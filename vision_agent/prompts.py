@@ -1,25 +1,28 @@
 ANALYZE_SCREEN = """\
-Analyze this kiosk touchscreen and identify every visible interactive element.
+Analyze this kiosk touchscreen ({width}x{height} pixels) and identify every visible interactive element.
 
 Return ONLY valid JSON — no markdown fences, no explanation:
-{
+{{
   "screen_id": "<login|products|cart|payment|order_history|success|unknown>",
   "description": "<one sentence describing this screen>",
   "elements": [
-    {
+    {{
       "id": "<short_snake_case_unique_id>",
       "type": "<button|input|text|link|image|dropdown|stepper>",
       "label": "<visible text or placeholder>",
       "description": "<what happens when tapped or typed into>",
-      "bbox": [x1, y1, x2, y2],
-      "center": [cx, cy],
+      "bbox": [x1_norm, y1_norm, x2_norm, y2_norm],
+      "center": [cx_norm, cy_norm],
       "confidence": 0.95
-    }
+    }}
   ]
-}
+}}
 
 Rules:
-- bbox and center are pixel values from the top-left corner of the image
+- bbox and center must be NORMALIZED values between 0.0 and 1.0:
+    0.0 = left/top edge of the image,  1.0 = right/bottom edge
+    Example: an element at pixel (954, 493) in a {width}x{height} image
+             has center [{cx_example:.3f}, {cy_example:.3f}]
 - Include ALL interactive elements (buttons, inputs, links, quantity ±, nav items)
 - Assign unique ids: prefer the element text in snake_case, e.g. "sign_in_button"
 - Omit purely decorative text or background images
