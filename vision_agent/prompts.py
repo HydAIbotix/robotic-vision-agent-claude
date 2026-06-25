@@ -1,12 +1,12 @@
 ANALYZE_SCREEN = """\
-Analyze this kiosk touchscreen ({width}x{height} pixels) and identify every visible interactive element.
+Analyze this kiosk touchscreen screenshot and identify every visible interactive element.
 
 Return ONLY valid JSON — no markdown fences, no explanation:
-{{
+{
   "screen_id": "<login|products|cart|payment|order_history|success|unknown>",
-  "description": "<one sentence describing this screen>",
+  "description": "<one sentence describing this screen's purpose>",
   "elements": [
-    {{
+    {
       "id": "<short_snake_case_unique_id>",
       "type": "<button|input|text|link|image|dropdown|stepper>",
       "label": "<visible text or placeholder>",
@@ -14,19 +14,46 @@ Return ONLY valid JSON — no markdown fences, no explanation:
       "bbox": [x1_norm, y1_norm, x2_norm, y2_norm],
       "center": [cx_norm, cy_norm],
       "confidence": 0.95
-    }}
+    }
   ]
-}}
+}
 
-Rules:
-- bbox and center must be NORMALIZED values between 0.0 and 1.0:
-    0.0 = left/top edge of the image,  1.0 = right/bottom edge
-    Example: an element at pixel (954, 493) in a {width}x{height} image
-             has center [{cx_example:.3f}, {cy_example:.3f}]
-- Include ALL interactive elements (buttons, inputs, links, quantity ±, nav items)
-- Assign unique ids: prefer the element text in snake_case, e.g. "sign_in_button"
-- Omit purely decorative text or background images
-- For quantity steppers, include the + and - as separate elements
+Coordinate rules (all values NORMALIZED 0.0–1.0):
+- 0.0 = left/top edge of image, 1.0 = right/bottom edge
+- "center" is the EXACT tap point — the visual midpoint of the interactive hit area
+- "confidence" measures certainty about the CENTER coordinates only:
+    0.90–1.00 : element boundary clearly visible, center unambiguous
+    0.70–0.89 : element visible but edges soft, partially occluded, or very small
+    below 0.70 : element inferred from context, coordinates are estimated
+
+Content rules:
+- Include ALL interactive elements: buttons, inputs, links, quantity ±, nav items, tabs
+- Unique snake_case IDs matching the label, e.g. "sign_in_button", "email_input"
+- Omit purely decorative text, dividers, and background images
+- For quantity steppers include + and - as separate elements
+- EXCLUDE on-screen / virtual keyboard keys — the robot types text directly; individual keys are not needed
+- Limit to the 25 most task-relevant elements if more are present
+"""
+
+CORRECT_ELEMENT_COORD = """\
+During screen analysis I found this element with low coordinate confidence:
+
+  Element ID : {element_id}
+  Type       : {element_type}
+  Label      : "{label}"
+  Proposed center (normalized 0.0-1.0): [{cx}, {cy}]
+  Confidence : {confidence:.2f}
+
+Look carefully at the screenshot. Locate the element labeled "{label}" ({element_type}).
+Is [{cx}, {cy}] the correct normalized tap center for this element?
+
+Return ONLY valid JSON — no markdown fences:
+{{
+  "confirmed": <true|false>,
+  "center": [cx_norm, cy_norm],
+  "confidence": <0.0-1.0>,
+  "reason": "<brief explanation — what is at the proposed point vs where the element actually is>"
+}}
 """
 
 PLAN_STEPS = """\

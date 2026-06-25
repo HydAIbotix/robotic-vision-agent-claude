@@ -1,0 +1,46 @@
+from typing import Optional
+from typing_extensions import TypedDict
+from app_map.store import AppMap
+
+
+class TestCase(TypedDict):
+    test_id: str
+    summary: str
+    description: str
+    preconditions: str
+    steps_raw: str
+    expected_results_raw: str
+
+
+class TestResult(TypedDict):
+    test_id: str
+    summary: str
+    outcome: str          # "passed" | "failed" | "error"
+    step_results: list    # list[StepResult] from vision_agent.state
+    vision_summary: str   # the agent's own summary string
+
+
+class TestRunnerState(TypedDict):
+    # ── Static config (set once at start) ────────────────────────────────────
+    test_cases: list[TestCase]
+    app_map: Optional[dict]   # None → agent navigates dynamically; set if AppMap available
+    credentials: dict          # {"valid": {"email": ..., "password": ...}, "invalid": {...}}
+    # demo_screens: screen_id → absolute screenshot path (used instead of robot camera)
+    demo_screens: dict
+
+    # ── Iteration pointers ────────────────────────────────────────────────────
+    current_tc_idx: int
+
+    # ── Per-test-case working state ───────────────────────────────────────────
+    current_tc: Optional[TestCase]
+    # planned_steps: list[str] in the existing format ["tap: X", "type: Y", "verify: Z"]
+    planned_steps: list[str]
+    credential_scenario: str   # "valid" | "invalid"
+    # start_image: the screenshot to use as the entry point for this test case
+    start_image: str
+
+    # ── Accumulated results ───────────────────────────────────────────────────
+    test_results: list[TestResult]
+
+    # ── Final output ──────────────────────────────────────────────────────────
+    summary: str

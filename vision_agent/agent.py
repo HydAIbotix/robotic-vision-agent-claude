@@ -49,6 +49,21 @@ def _advance_step(state: VisionAgentState) -> dict:
     }
 
 
+def _route_after_advance(state: VisionAgentState) -> str:
+    """
+    Skip re-analysis after type/verify steps — the screen doesn't change, so
+    reusing the current screen_analysis halves LLM calls for input-heavy tests.
+    Always re-analyze before tap steps so coordinates are fresh after navigation.
+    """
+    idx   = state.get("current_step_idx", 0)
+    steps = state.get("planned_steps") or []
+    if idx < len(steps):
+        action = steps[idx].partition(":")[0].strip()
+        if action in ("type", "verify"):
+            return "execute_step"
+    return "analyze_screen"
+
+
 # ── Graph assembly ─────────────────────────────────────────────────────────────
 
 def create_agent():
@@ -81,8 +96,12 @@ def create_agent():
     # After retry: re-analyze (screen may have changed) then re-execute same step
     graph.add_edge("handle_retry", "analyze_screen")
 
-    # After advancing: re-analyze new screen before next step
-    graph.add_edge("advance_step", "analyze_screen")
+    # After advancing: re-analyze only before tap steps; skip for type/verify
+    graph.add_conditional_edges(
+        "advance_step",
+        _route_after_advance,
+        {"analyze_screen": "analyze_screen", "execute_step": "execute_step"},
+    )
 
     graph.add_edge("finalize", END)
 

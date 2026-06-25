@@ -20,10 +20,20 @@ class Settings(BaseSettings):
     s3_prefix: str = "vision-agent"
     sqs_queue_url: str = ""  # SQS queue for robot image events
 
+    # Robot backend — swap without touching agent code
+    # demo        : pre-captured screenshots, no real interaction (default)
+    # playwright  : Playwright drives a browser — proxy for real hardware tests
+    # real        : physical robot arm hardware API
+    robot_backend: str = "demo"
+    kiosk_url: str = "http://localhost:5173"
+
     # Agent behaviour
     max_retries: int = 3
     screenshots_dir: str = "./screenshots"
     results_dir: str = "./results"
+
+    # Vision confidence: elements below this score get a correction follow-up call
+    coordinate_confidence_threshold: float = 0.85
 
 
 settings = Settings()

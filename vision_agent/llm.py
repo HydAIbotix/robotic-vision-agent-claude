@@ -20,5 +20,5 @@ def get_llm() -> BaseChatModel:
     return ChatAnthropic(
         model=settings.anthropic_model,
         api_key=settings.anthropic_api_key,
-        max_tokens=4096,
+        max_tokens=8192,
     )

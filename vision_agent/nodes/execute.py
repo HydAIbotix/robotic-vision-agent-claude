@@ -5,7 +5,7 @@ execute_step node — dispatches the current planned step to the robot arm
 import time
 from pathlib import Path
 from vision_agent.state import VisionAgentState, StepResult
-from vision_agent.robot import stubs as robot
+from vision_agent import robot
 from vision_agent.config import settings
 
 
