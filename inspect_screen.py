@@ -11,8 +11,13 @@ Usage:
     python inspect_screen.py C:/full/path/to/any.png
 """
 import sys
+import io
 import json
 from pathlib import Path
+
+# Force UTF-8 output so Unicode characters in element labels print correctly
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
 
@@ -59,7 +64,7 @@ print()
 print("Descriptions:")
 for el in analysis["elements"]:
     print(f"  {el['id']}")
-    print(f"    → {el['description']}")
+    print(f"    -> {el['description']}")
 
 # ── Annotated image ───────────────────────────────────────────────────────────
 img = Image.open(image_path).convert("RGB")
@@ -98,7 +103,7 @@ out_path = Path("screenshots") / f"annotated_{image_path.stem}.png"
 out_path.parent.mkdir(exist_ok=True)
 img.save(out_path)
 
-print(f"\nAnnotated image saved → {out_path}")
+print(f"\nAnnotated image saved -> {out_path}")
 print("Open it to visually verify that bounding boxes and centers align with the UI elements.")
 
 print()
