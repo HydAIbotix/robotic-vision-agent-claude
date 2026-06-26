@@ -8,7 +8,7 @@ import json
 from langchain_core.messages import HumanMessage
 from vision_agent.state import VisionAgentState
 from vision_agent.prompts import VALIDATE_STEP
-from vision_agent.llm import get_llm
+from vision_agent.llm import get_fast_llm
 from vision_agent.storage import get_storage
 
 
@@ -29,9 +29,17 @@ def validate_step(state: VisionAgentState) -> dict:
         screen_before=screen_before,
     )
 
-    llm = get_llm()
+    llm = get_fast_llm()   # Haiku — binary yes/no, ~0.8 s vs Sonnet's ~2.5 s
     msg = HumanMessage(content=[
-        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": b64,
+            },
+            "cache_control": {"type": "ephemeral"},
+        },
         {"type": "text", "text": prompt},
     ])
     response = llm.invoke([msg])

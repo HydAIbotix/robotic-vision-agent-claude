@@ -58,24 +58,104 @@ def capture_screen(save_path: str) -> dict:
 
 
 def tap(x: int, y: int) -> dict:
-    """Click at (x, y) in the browser — replaces robot arm tap command."""
+    """Click at (x, y) in the browser — replaces robot arm tap command.
+
+    Uses DOM elementFromPoint to resolve the correct interactive element
+    (handles the ~40 px y-offset that Claude's vision consistently produces).
+    Returns the element's actual center coordinates, then uses page.mouse.click()
+    so the full browser event chain fires (mousedown → focus → mouseup → click),
+    which is required for React synthetic events like onFocus to trigger.
+
+    When the exact point misses, snaps to the nearest interactive element within
+    80 px — preferring <button> over <input> so "tap: sign_in_button" wins over
+    a nearby password field that may be slightly closer in raw distance.
+    """
     page = _ensure_page()
-    page.mouse.click(x, y)
-    page.wait_for_timeout(300)   # give React time to re-render
-    print(f"  [PLAYWRIGHT] click({x}, {y})")
+    coords = page.evaluate(f"""() => {{
+        const isInteractive = (el) => {{
+            const tag  = el.tagName.toLowerCase();
+            const role = (el.getAttribute('role') || '').toLowerCase();
+            return tag === 'button' || tag === 'a' || tag === 'input' ||
+                   tag === 'select' || role === 'button' || role === 'link' ||
+                   el.onclick != null;
+        }};
+        const center = (el) => {{
+            const r = el.getBoundingClientRect();
+            return [Math.round((r.left + r.right) / 2), Math.round((r.top + r.bottom) / 2)];
+        }};
+
+        // 1. Try the exact point
+        const exact = document.elementFromPoint({x}, {y});
+        if (exact && isInteractive(exact)) {{
+            return [...center(exact), 'exact'];
+        }}
+
+        // 2. Snap: collect all interactive elements within 80 px,
+        //    then prefer buttons over inputs (handles sign-in button vs password field
+        //    when Claude's coordinate lands between the two).
+        const sel = 'button, input, a, select, [role="button"], [role="link"]';
+        const nearby = [];
+        for (const el of document.querySelectorAll(sel)) {{
+            const r = el.getBoundingClientRect();
+            if (r.width === 0 || r.height === 0) continue;
+            const cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+            const d  = Math.hypot(cx - {x}, cy - {y});
+            if (d < 80) {{
+                const isBtn = el.tagName.toLowerCase() === 'button' ||
+                              (el.getAttribute('role') || '').toLowerCase() === 'button';
+                nearby.push([el, d, isBtn]);
+            }}
+        }}
+        if (nearby.length > 0) {{
+            nearby.sort((a, b) => {{
+                if (a[2] !== b[2]) return a[2] ? -1 : 1;   // buttons first
+                return a[1] - b[1];                          // then by distance
+            }});
+            const [best, dist] = nearby[0];
+            return [...center(best), 'snap:' + Math.round(dist) + 'px'];
+        }}
+
+        return null;  // fall through to raw mouse click
+    }}""")
+
+    if coords:
+        cx, cy, snap_type = coords[0], coords[1], coords[2]
+        # Real mouse click — fires full browser event chain so React onFocus etc. trigger.
+        page.mouse.click(cx, cy)
+        page.wait_for_timeout(300)
+        if snap_type == "exact":
+            print(f"  [PLAYWRIGHT] click({cx}, {cy})")
+        else:
+            print(f"  [PLAYWRIGHT] tap-snap {snap_type} → ({x},{y}) → ({cx},{cy})")
+    else:
+        page.mouse.click(x, y)
+        page.wait_for_timeout(300)
+        print(f"  [PLAYWRIGHT] click({x}, {y}) [raw]")
+
     return {"success": True, "x": x, "y": y}
 
 
 def type_text(text: str) -> dict:
-    """Fill focused input — replaces robot arm keystroke."""
+    """Type into the focused input — replaces robot arm keystroke.
+
+    Uses page.keyboard.type() (real key events) which reliably triggers React's
+    onChange on each keystroke. Then clicks the kiosk's "Done" button to dismiss
+    its custom virtual keyboard so it doesn't overlap the next element to tap.
+    """
     page = _ensure_page()
-    # page.locator(":focus").fill() fires React's synthetic onChange correctly
-    # and is ~10x faster than keyboard.type() with per-char delay.
-    try:
-        page.locator(":focus").fill(text)
-    except Exception:
-        page.keyboard.type(text, delay=30)
-    print(f"  [PLAYWRIGHT] fill({text!r})")
+    page.keyboard.type(text, delay=30)
+    page.wait_for_timeout(200)
+
+    # Dismiss the kiosk's custom virtual keyboard via its "Done" button.
+    # The button uses onMouseDown:preventDefault so focus stays on the input
+    # while the keyboard closes — email/password state is preserved.
+    keyboard_done = page.locator('[data-testid="keyboard-done"]')
+    if keyboard_done.count() > 0:
+        keyboard_done.click()
+        page.wait_for_timeout(150)
+        print(f"  [PLAYWRIGHT] keyboard-done clicked")
+
+    print(f"  [PLAYWRIGHT] type({text!r})")
     return {"success": True, "text": text}
 
 

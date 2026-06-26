@@ -35,5 +35,12 @@ class Settings(BaseSettings):
     # Vision confidence: elements below this score get a correction follow-up call
     coordinate_confidence_threshold: float = 0.85
 
+    # Fast model used for validation (Haiku — binary yes/no, no element detection needed)
+    anthropic_fast_model: str = "claude-haiku-4-5-20251001"
+
+    # App Explorer coordinate cache — skip analyze_screen LLM call for known static screens
+    app_map_path: str = "app_map.json"
+    use_app_map_cache: bool = True
+
 
 settings = Settings()

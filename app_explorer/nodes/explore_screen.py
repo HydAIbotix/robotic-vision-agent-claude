@@ -3,11 +3,17 @@ explore_screen — analyze the current screenshot, add the screen to the AppMap,
 and queue every explorable action discovered by Claude.
 """
 import json
+from pathlib import Path
 from langchain_core.messages import HumanMessage
 from vision_agent.nodes.analyze import analyze_screen as _analyze
 from vision_agent.llm import get_llm
+from vision_agent.screen_cache import compute_hash
+from vision_agent.storage import get_storage
 from app_explorer.state import ExplorerState, ExplorationAction
 from app_explorer.prompts import SUGGEST_EXPLORABLE_ACTIONS
+
+# Screens whose content changes per session — always re-analyze at test time.
+_DYNAMIC_SCREEN_KEYWORDS = {"cart", "order", "history", "search", "result", "basket", "checkout_items"}
 
 
 def explore_screen(state: ExplorerState) -> dict:
@@ -32,13 +38,24 @@ def explore_screen(state: ExplorerState) -> dict:
     # ── 2. Add screen to AppMap if not already present ────────────────────────
     app_map = {**state["app_map"], "screens": dict(state["app_map"].get("screens") or {})}
     if screen_id not in app_map["screens"]:
+        # Compute perceptual hash for fast cache lookup at test time
+        image_bytes = get_storage().load(state["current_image_path"])
+        screen_hash = compute_hash(image_bytes)
+
+        # Tag dynamic screens — their content changes per session, so coordinates
+        # from this map cannot be reused without re-analyzing at test time.
+        is_dynamic = any(kw in screen_id.lower() for kw in _DYNAMIC_SCREEN_KEYWORDS)
+
         app_map["screens"][screen_id] = {
-            "screen_id": screen_id,
+            "screen_id":   screen_id,
             "description": screen["description"],
-            "elements": screen["elements"],
+            "elements":    screen["elements"],
             "transitions": {},
+            "screen_hash": screen_hash,
+            "is_dynamic":  is_dynamic,
         }
-        print(f"\n  [EXPLORE] New screen added: '{screen_id}'")
+        tag = "DYNAMIC" if is_dynamic else "STATIC"
+        print(f"\n  [EXPLORE] New screen added: '{screen_id}' [{tag}] hash={screen_hash[:12]}…")
     else:
         print(f"\n  [EXPLORE] Re-visiting known screen: '{screen_id}'")
 

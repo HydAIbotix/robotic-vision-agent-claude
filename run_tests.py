@@ -43,7 +43,7 @@ DEMO_SCREENS = {
 }
 
 CREDENTIALS = {
-    "valid":   {"email": "admin", "password": "admin123"},
+    "valid":   {"email": "tester@kiosk.local", "password": "Password123"},
     "invalid": {"email": "baduser", "password": "wrongpass"},
 }
 
