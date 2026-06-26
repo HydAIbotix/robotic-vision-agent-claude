@@ -27,9 +27,6 @@ class ExplorerState(TypedDict):
     app_name: str
     entry_image_path: str
     credentials: dict              # {"valid": {"email": ..., "password": ...}, "invalid": {...}}
-    # demo_navigation: "{screen_id}::{action_key}" → screenshot_path
-    # "__default__" suffix gives the starting screenshot for a screen
-    demo_navigation: dict
     app_map_path: str              # file to save the finished AppMap
 
     # ── Working state ─────────────────────────────────────────────────────────
@@ -41,6 +38,10 @@ class ExplorerState(TypedDict):
     last_executed_action: Optional[ExplorationAction]
     last_result_is_new: bool
     last_result_screen_id: str
+    # Maps screen_id → ordered list of ExplorationActions to replay from entry URL
+    # to reach that screen.  Entry screen maps to [].  Used by execute_action to
+    # reset the browser before each action regardless of what ran before.
+    approach_paths: dict
 
     # ── Output ────────────────────────────────────────────────────────────────
     complete: bool

@@ -20,6 +20,15 @@ def set_demo_screens(paths: list[str]) -> None:
     _demo_idx = 0
 
 
+def set_keyboard_map(kmap: dict) -> None:
+    """Store virtual keyboard coordinates — used by type_text to tap each key."""
+    global _keyboard_map
+    _keyboard_map = kmap.get("keys", kmap)
+
+
+_keyboard_map: dict = {}
+
+
 # ── Robot API ─────────────────────────────────────────────────────────────────
 
 def capture_screen(save_path: str) -> dict:
@@ -53,3 +62,15 @@ def swipe(x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> dict:
     # TODO: send swipe command to robot arm
     print(f"    [ROBOT] swipe({x1},{y1}) → ({x2},{y2})")
     return {"success": True}
+
+
+def scroll_page(x: int, y: int, delta_y: int) -> dict:
+    """Scroll gesture — not applicable to a physical kiosk (stub only)."""
+    print(f"    [ROBOT] scroll({x},{y}) delta_y={delta_y}")
+    return {"success": True, "delta_y": delta_y}
+
+
+def get_page_scroll_info() -> dict:
+    """Return stub scroll info — assume single viewport, no overflow."""
+    return {"scrollTop": 0, "scrollLeft": 0, "scrollHeight": 900, "scrollWidth": 1400,
+            "viewportHeight": 900, "viewportWidth": 1400}

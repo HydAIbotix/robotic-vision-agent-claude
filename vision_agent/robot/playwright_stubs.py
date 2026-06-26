@@ -18,6 +18,7 @@ from pathlib import Path
 _pw    = None          # sync_playwright() handle
 _browser = None
 _page    = None
+_keyboard_map: dict = {}   # populated by set_keyboard_map() after App Explorer runs
 
 
 def _ensure_page():
@@ -135,25 +136,76 @@ def tap(x: int, y: int) -> dict:
     return {"success": True, "x": x, "y": y}
 
 
-def type_text(text: str) -> dict:
-    """Type into the focused input — replaces robot arm keystroke.
+def set_keyboard_map(kmap: dict) -> None:
+    """Load the virtual keyboard coordinate map produced by App Explorer.
 
-    Uses page.keyboard.type() (real key events) which reliably triggers React's
-    onChange on each keystroke. Then clicks the kiosk's "Done" button to dismiss
-    its custom virtual keyboard so it doesn't overlap the next element to tap.
+    After this is called, type_text() clicks each character on the virtual
+    keyboard using page.mouse.click() — identical to a physical robot arm tap —
+    instead of sending real keyboard events.  Call once at test-run startup
+    after loading app_map.json.
+    """
+    global _keyboard_map
+    _keyboard_map = kmap.get("keys", kmap)   # accept both {keys:{}} and flat {char:[x,y]}
+    print(f"  [PLAYWRIGHT] keyboard map loaded ({len(_keyboard_map)} keys)")
+
+
+def _click_key(page, char: str) -> bool:
+    """Click a single key on the virtual keyboard. Returns True if the key was found."""
+    needs_shift = char.isupper() and char.isalpha()
+    if char == " ":
+        lookup = "space"   # keyboard map stores space bar as "space", not " "
+    elif char.isalpha():
+        lookup = char.lower()
+    else:
+        lookup = char
+    coords = _keyboard_map.get(lookup) or _keyboard_map.get(char)
+    if not coords:
+        return False
+    # Tap shift before the key — the kiosk keyboard is ONE-SHOT: it auto-returns to
+    # lowercase after typing exactly one uppercase letter (App.tsx line 2273-2274).
+    # Do NOT tap shift a second time; that would re-enable uppercase for the next char.
+    if needs_shift and "shift" in _keyboard_map:
+        sc = _keyboard_map["shift"]
+        page.mouse.click(int(sc[0] * 1400), int(sc[1] * 900))
+        page.wait_for_timeout(60)
+    px = int(coords[0] * 1400)
+    py = int(coords[1] * 900)
+    page.mouse.click(px, py)
+    page.wait_for_timeout(60)   # key debounce — matches physical tap cadence
+    return True
+
+
+def type_text(text: str) -> dict:
+    """Type into the focused input via keyboard events, then dismiss the virtual keyboard.
+
+    page.mouse.click() on virtual keyboard keys fires mousedown which blurs the
+    focused input — the keyboard closes before the click registers, so characters
+    are lost.  page.keyboard.type() sends key events directly to the focused DOM
+    element; React's onChange handler picks them up correctly regardless of whether
+    a virtual keyboard overlay is open.
+
+    The keyboard map IS still used to locate and tap the 'done' key after typing,
+    which matches real robot-arm behaviour (arm physically taps Done to close keyboard).
     """
     page = _ensure_page()
+
     page.keyboard.type(text, delay=30)
     page.wait_for_timeout(200)
 
-    # Dismiss the kiosk's custom virtual keyboard via its "Done" button.
-    # The button uses onMouseDown:preventDefault so focus stays on the input
-    # while the keyboard closes — email/password state is preserved.
-    keyboard_done = page.locator('[data-testid="keyboard-done"]')
-    if keyboard_done.count() > 0:
-        keyboard_done.click()
+    # Dismiss the virtual keyboard — prefer 'done' coordinate from map
+    done_coords = (
+        _keyboard_map.get("done")
+        or _keyboard_map.get("return")
+        or _keyboard_map.get("enter")
+    ) if _keyboard_map else None
+    if done_coords:
+        page.mouse.click(int(done_coords[0] * 1400), int(done_coords[1] * 900))
         page.wait_for_timeout(150)
-        print(f"  [PLAYWRIGHT] keyboard-done clicked")
+    else:
+        kb_done = page.locator('[data-testid="keyboard-done"]')
+        if kb_done.count() > 0:
+            kb_done.click()
+            page.wait_for_timeout(150)
 
     print(f"  [PLAYWRIGHT] type({text!r})")
     return {"success": True, "text": text}
@@ -169,12 +221,41 @@ def swipe(x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> dict:
 
 
 def reset_to_entry() -> None:
-    """Navigate back to the kiosk entry URL — call between test cases."""
+    """Navigate back to the kiosk entry URL — call between test cases.
+
+    Clears localStorage and sessionStorage first so the kiosk app starts
+    unauthenticated (no session restore).  Without this, a logged-in kiosk
+    SPA auto-redirects back to the products page on every reset, making
+    login-page actions test the wrong screen.
+    """
     if _page is not None:
         from vision_agent.config import settings
+        _page.evaluate("() => { localStorage.clear(); sessionStorage.clear(); }")
         _page.goto(settings.kiosk_url)
         _page.wait_for_load_state("networkidle")
         print(f"  [PLAYWRIGHT] Reset to {settings.kiosk_url}")
+
+
+def scroll_page(x: int, y: int, delta_y: int) -> dict:
+    """Scroll the page at viewport position (x, y) by delta_y pixels (positive = down)."""
+    page = _ensure_page()
+    page.mouse.move(x, y)           # position the wheel over the scrollable area
+    page.mouse.wheel(0, delta_y)    # Playwright wheel(deltaX, deltaY) — no x/y args
+    page.wait_for_timeout(300)
+    return {"success": True, "delta_y": delta_y}
+
+
+def get_page_scroll_info() -> dict:
+    """Return current scroll position and full page dimensions."""
+    page = _ensure_page()
+    return page.evaluate("""() => ({
+        scrollTop:      window.scrollY,
+        scrollLeft:     window.scrollX,
+        scrollHeight:   document.documentElement.scrollHeight,
+        scrollWidth:    document.documentElement.scrollWidth,
+        viewportHeight: window.innerHeight,
+        viewportWidth:  window.innerWidth,
+    })""")
 
 
 def set_demo_screens(paths: list[str]) -> None:

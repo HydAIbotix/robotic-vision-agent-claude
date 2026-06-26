@@ -59,10 +59,26 @@ if not test_cases:
     print(f"No test cases found (filter={FILTER_TC})")
     sys.exit(1)
 
+# ── Load app map + keyboard map ────────────────────────────────────────────────
+from vision_agent.config import settings
+from vision_agent import robot
+from app_map import store as app_map_store
+from pathlib import Path as _Path
+
+_app_map = None
+if _Path(settings.app_map_path).exists():
+    _app_map = app_map_store.load(settings.app_map_path)
+    if "keyboard_map" in _app_map:
+        robot.set_keyboard_map(_app_map["keyboard_map"])
+        print(f"  Keyboard map loaded ({len(_app_map['keyboard_map'].get('keys', _app_map['keyboard_map']))} keys)")
+    else:
+        print("  WARNING: app_map.json has no keyboard_map — type_text will use keyboard events fallback")
+else:
+    print("  No app_map.json found — run run_explorer.py first for tap-based typing")
+
 # ── Run ────────────────────────────────────────────────────────────────────────
 from test_runner.agent import create_test_runner
 from test_runner.state import TestRunnerState
-from vision_agent.config import settings
 
 print("=" * 60)
 print(f"  Test Runner — {len(test_cases)} test case(s)  [{settings.robot_backend.upper()} mode]")

@@ -1,0 +1,1963 @@
+{
+  "app_name": "Generic Kiosk POS",
+  "explored_at": "",
+  "entry_screen": "signin",
+  "screens": {
+    "login": {
+      "screen_id": "login",
+      "description": "A sign-in screen for Generic Kiosk POS allowing users to enter credentials or navigate to sign up, password recovery, or developer settings.",
+      "elements": [
+        {
+          "id": "email_input",
+          "type": "input",
+          "label": "Email",
+          "description": "Text field for entering the user's email address",
+          "bbox": [
+            681,
+            196,
+            1282,
+            265
+          ],
+          "center": [
+            981,
+            231
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "password_input",
+          "type": "input",
+          "label": "Password",
+          "description": "Secure text field for entering the user's password",
+          "bbox": [
+            681,
+            301,
+            1282,
+            370
+          ],
+          "center": [
+            981,
+            336
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "sign_in_button",
+          "type": "button",
+          "label": "Sign In",
+          "description": "Submits the email and password credentials to authenticate the user",
+          "bbox": [
+            681,
+            378,
+            1282,
+            421
+          ],
+          "center": [
+            981,
+            399
+          ],
+          "confidence": 0.97
+        },
+        {
+          "id": "sign_up_link",
+          "type": "link",
+          "label": "Sign up",
+          "description": "Navigates to the user registration/account creation screen",
+          "bbox": [
+            681,
+            424,
+            784,
+            450
+          ],
+          "center": [
+            721,
+            437
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "forgot_password_link",
+          "type": "link",
+          "label": "Forgot password?",
+          "description": "Navigates to the password recovery screen",
+          "bbox": [
+            784,
+            424,
+            952,
+            450
+          ],
+          "center": [
+            868,
+            437
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "developer_settings_link",
+          "type": "link",
+          "label": "Developer settings",
+          "description": "Opens developer/advanced configuration settings for the kiosk",
+          "bbox": [
+            952,
+            424,
+            1134,
+            450
+          ],
+          "center": [
+            1026,
+            437
+          ],
+          "confidence": 0.92
+        }
+      ],
+      "transitions": {
+        "sign_in_valid_credentials": "product_selection",
+        "sign_in_invalid_credentials": "login",
+        "navigate_to_sign_up": "user_registration",
+        "navigate_to_forgot_password": "login",
+        "navigate_to_developer_settings": "developer_settings"
+      },
+      "screen_hash": "000003ff03ff03ff03ff03ff03ff030303ff0100000000000000000000000000",
+      "is_dynamic": false
+    },
+    "product_selection": {
+      "screen_id": "product_selection",
+      "description": "Product selection screen where users can browse items, adjust quantities, and add products to their cart.",
+      "elements": [
+        {
+          "id": "home_button",
+          "type": "button",
+          "label": "Home",
+          "description": "Navigates to the home screen",
+          "bbox": [
+            929,
+            22,
+            1059,
+            67
+          ],
+          "center": [
+            995,
+            45
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "order_history_nav_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Navigates to the order history screen",
+          "bbox": [
+            1059,
+            22,
+            1229,
+            67
+          ],
+          "center": [
+            1145,
+            45
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "sign_out_button",
+          "type": "button",
+          "label": "Sign Out",
+          "description": "Signs the current user out of the kiosk session",
+          "bbox": [
+            1229,
+            22,
+            1383,
+            67
+          ],
+          "center": [
+            1306,
+            45
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "products_nav_link",
+          "type": "link",
+          "label": "Products",
+          "description": "Navigates to the products listing page",
+          "bbox": [
+            593,
+            130,
+            1001,
+            166
+          ],
+          "center": [
+            796,
+            148
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "categories_nav_link",
+          "type": "link",
+          "label": "Categories",
+          "description": "Navigates to the categories page",
+          "bbox": [
+            593,
+            169,
+            1001,
+            199
+          ],
+          "center": [
+            796,
+            184
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "deals_nav_link",
+          "type": "link",
+          "label": "Deals",
+          "description": "Navigates to the deals page",
+          "bbox": [
+            593,
+            199,
+            1001,
+            232
+          ],
+          "center": [
+            796,
+            216
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "loyalty_nav_link",
+          "type": "link",
+          "label": "Loyalty",
+          "description": "Navigates to the loyalty program page",
+          "bbox": [
+            593,
+            232,
+            1001,
+            265
+          ],
+          "center": [
+            796,
+            249
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "receipts_nav_link",
+          "type": "link",
+          "label": "Receipts",
+          "description": "Navigates to the receipts page",
+          "bbox": [
+            593,
+            265,
+            1001,
+            298
+          ],
+          "center": [
+            796,
+            282
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "support_nav_link",
+          "type": "link",
+          "label": "Support",
+          "description": "Navigates to the support page",
+          "bbox": [
+            593,
+            298,
+            1001,
+            331
+          ],
+          "center": [
+            796,
+            315
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "store_info_nav_link",
+          "type": "link",
+          "label": "Store Info",
+          "description": "Navigates to the store information page",
+          "bbox": [
+            593,
+            331,
+            1001,
+            364
+          ],
+          "center": [
+            796,
+            348
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "order_history_sidebar_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Opens the order history view from the sidebar",
+          "bbox": [
+            1141,
+            139,
+            1383,
+            180
+          ],
+          "center": [
+            1262,
+            160
+          ],
+          "confidence": 0.93
+        },
+        {
+          "id": "cart_checkout_button",
+          "type": "button",
+          "label": "Cart / Checkout (0)",
+          "description": "Opens the cart and checkout screen, currently showing 0 items",
+          "bbox": [
+            1141,
+            184,
+            1383,
+            232
+          ],
+          "center": [
+            1262,
+            208
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "nexora_decrement_button",
+          "type": "button",
+          "label": "-",
+          "description": "Decreases the quantity of Nexora Phone X2",
+          "bbox": [
+            1156,
+            409,
+            1215,
+            457
+          ],
+          "center": [
+            1185,
+            433
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "nexora_increment_button",
+          "type": "button",
+          "label": "+",
+          "description": "Increases the quantity of Nexora Phone X2",
+          "bbox": [
+            1271,
+            409,
+            1330,
+            457
+          ],
+          "center": [
+            1300,
+            433
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "nexora_add_to_cart_button",
+          "type": "button",
+          "label": "Add to Cart",
+          "description": "Adds the selected quantity of Nexora Phone X2 to the cart",
+          "bbox": [
+            1026,
+            463,
+            1365,
+            508
+          ],
+          "center": [
+            1195,
+            486
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "orionbook_decrement_button",
+          "type": "button",
+          "label": "-",
+          "description": "Decreases the quantity of OrionBook Pro 14",
+          "bbox": [
+            1379,
+            409,
+            1400,
+            457
+          ],
+          "center": [
+            1167,
+            483
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "orionbook_decrement_button",
+          "type": "button",
+          "label": "-",
+          "description": "Decreases the quantity of OrionBook Pro 14",
+          "bbox": [
+            1150,
+            409,
+            1211,
+            457
+          ],
+          "center": [
+            1180,
+            433
+          ],
+          "confidence": 0.85
+        },
+        {
+          "id": "orionbook_increment_button",
+          "type": "button",
+          "label": "+",
+          "description": "Increases the quantity of OrionBook Pro 14",
+          "bbox": [
+            1254,
+            409,
+            1313,
+            457
+          ],
+          "center": [
+            1283,
+            433
+          ],
+          "confidence": 0.85
+        },
+        {
+          "id": "orionbook_add_to_cart_button",
+          "type": "button",
+          "label": "Add to Cart",
+          "description": "Adds the selected quantity of OrionBook Pro 14 to the cart",
+          "bbox": [
+            1026,
+            463,
+            1365,
+            508
+          ],
+          "center": [
+            1167,
+            543
+          ],
+          "confidence": 0.85
+        },
+        {
+          "id": "audiopulse_decrement_button",
+          "type": "button",
+          "label": "-",
+          "description": "Decreases the quantity of AudioPulse Pro Buds",
+          "bbox": [
+            1156,
+            673,
+            1215,
+            720
+          ],
+          "center": [
+            1185,
+            696
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "audiopulse_increment_button",
+          "type": "button",
+          "label": "+",
+          "description": "Increases the quantity of AudioPulse Pro Buds",
+          "bbox": [
+            1271,
+            673,
+            1330,
+            720
+          ],
+          "center": [
+            1300,
+            696
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "audiopulse_add_to_cart_button",
+          "type": "button",
+          "label": "Add to Cart",
+          "description": "Adds the selected quantity of AudioPulse Pro Buds to the cart",
+          "bbox": [
+            1026,
+            724,
+            1365,
+            772
+          ],
+          "center": [
+            1195,
+            748
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "tabnova_decrement_button",
+          "type": "button",
+          "label": "-",
+          "description": "Decreases the quantity of TabNova Air 11",
+          "bbox": [
+            1365,
+            673,
+            1400,
+            720
+          ],
+          "center": [
+            1383,
+            696
+          ],
+          "confidence": 0.85
+        },
+        {
+          "id": "tabnova_increment_button",
+          "type": "button",
+          "label": "+",
+          "description": "Increases the quantity of TabNova Air 11",
+          "bbox": [
+            1215,
+            673,
+            1274,
+            720
+          ],
+          "center": [
+            1244,
+            696
+          ],
+          "confidence": 0.85
+        },
+        {
+          "id": "tabnova_add_to_cart_button",
+          "type": "button",
+          "label": "Add to Cart",
+          "description": "Adds the selected quantity of TabNova Air 11 to the cart",
+          "bbox": [
+            1026,
+            724,
+            1365,
+            772
+          ],
+          "center": [
+            1370,
+            748
+          ],
+          "confidence": 0.85
+        }
+      ],
+      "transitions": {
+        "navigate_home": "product_selection",
+        "navigate_order_history_nav": "product_selection",
+        "sign_out": "login",
+        "navigate_categories": "product_selection",
+        "navigate_deals": "product_selection",
+        "navigate_support": "product_selection",
+        "navigate_cart_checkout": "product_selection",
+        "add_nexora_to_cart": "product_selection",
+        "add_orionbook_to_cart": "product_selection",
+        "add_audiopulse_to_cart": "product_selection",
+        "add_tabnova_to_cart": "product_selection",
+        "navigate_loyalty": "product_selection"
+      },
+      "screen_hash": "0003007f01ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff",
+      "is_dynamic": false
+    },
+    "user_registration": {
+      "screen_id": "user_registration",
+      "description": "A user registration screen for creating a local test user account with name, email, and password fields.",
+      "elements": [
+        {
+          "id": "name_input",
+          "type": "input",
+          "label": "Robot Tester",
+          "description": "Text input field for entering the user's name; currently contains 'Robot Tester'",
+          "bbox": [
+            681,
+            200,
+            1272,
+            256
+          ],
+          "center": [
+            977,
+            228
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "email_input",
+          "type": "input",
+          "label": "Email",
+          "description": "Text input field for entering the user's email address",
+          "bbox": [
+            681,
+            308,
+            1272,
+            364
+          ],
+          "center": [
+            977,
+            336
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "password_input",
+          "type": "input",
+          "label": "Password",
+          "description": "Password input field for entering the user's password; currently contains masked characters",
+          "bbox": [
+            681,
+            388,
+            1272,
+            444
+          ],
+          "center": [
+            977,
+            416
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "sign_up_and_continue_button",
+          "type": "button",
+          "label": "Sign Up and Continue",
+          "description": "Submits the registration form to create a new local test user and proceeds to the next screen",
+          "bbox": [
+            681,
+            457,
+            1272,
+            506
+          ],
+          "center": [
+            977,
+            481
+          ],
+          "confidence": 0.97
+        },
+        {
+          "id": "back_to_sign_in_link",
+          "type": "link",
+          "label": "Back to sign in",
+          "description": "Navigates back to the sign-in screen",
+          "bbox": [
+            681,
+            514,
+            910,
+            544
+          ],
+          "center": [
+            743,
+            529
+          ],
+          "confidence": 0.92
+        }
+      ],
+      "transitions": {
+        "sign_up_valid_credentials": "user_registration",
+        "sign_up_invalid_credentials": "user_registration",
+        "back_to_sign_in": "login"
+      },
+      "screen_hash": "000003ff03ff03ff03ff03ff03ff03ff033303ff03ff00000000000000000000",
+      "is_dynamic": false
+    },
+    "developer_settings": {
+      "screen_id": "developer_settings",
+      "description": "Developer Settings screen for configuring robot test runtime parameters such as timing delays, vision mode, and page warning scenarios.",
+      "elements": [
+        {
+          "id": "info_badge",
+          "type": "button",
+          "label": "INFO",
+          "description": "Displays informational banner about Developer Settings Mode",
+          "bbox": [
+            802,
+            97,
+            873,
+            127
+          ],
+          "center": [
+            837,
+            112
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "status_page_transition",
+          "type": "text",
+          "label": "Status: Page transition started.",
+          "description": "Read-only status message indicating a page transition has begun",
+          "bbox": [
+            1237,
+            76,
+            1397,
+            103
+          ],
+          "center": [
+            1317,
+            90
+          ],
+          "confidence": 0.88
+        },
+        {
+          "id": "back_to_sign_in_button",
+          "type": "button",
+          "label": "Back to Sign In",
+          "description": "Navigates back to the Sign In screen",
+          "bbox": [
+            1226,
+            205,
+            1397,
+            262
+          ],
+          "center": [
+            1311,
+            234
+          ],
+          "confidence": 0.93
+        },
+        {
+          "id": "page_delay_input",
+          "type": "input",
+          "label": "900",
+          "description": "Input field to set the page delay in milliseconds for robot test simulation",
+          "bbox": [
+            813,
+            416,
+            1337,
+            461
+          ],
+          "center": [
+            1075,
+            439
+          ],
+          "confidence": 0.94
+        },
+        {
+          "id": "action_delay_input",
+          "type": "input",
+          "label": "350",
+          "description": "Input field to set the action delay in milliseconds for robot test simulation",
+          "bbox": [
+            1337,
+            416,
+            1400,
+            461
+          ],
+          "center": [
+            1208,
+            439
+          ],
+          "confidence": 0.85
+        },
+        {
+          "id": "robot_vision_mode_checkbox",
+          "type": "button",
+          "label": "Robot vision mode",
+          "description": "Checkbox to enable or disable robot vision mode for testing",
+          "bbox": [
+            813,
+            475,
+            1064,
+            505
+          ],
+          "center": [
+            863,
+            490
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "sign_in_scenario_row",
+          "type": "button",
+          "label": "Sign in / signin",
+          "description": "Expandable row for configuring Sign In page warning/error/fatal scenario settings",
+          "bbox": [
+            813,
+            639,
+            1400,
+            702
+          ],
+          "center": [
+            1106,
+            670
+          ],
+          "confidence": 0.85
+        },
+        {
+          "id": "show_banner_button",
+          "type": "button",
+          "label": "Show Banner",
+          "description": "Triggers an inline status banner for the Sign In scenario",
+          "bbox": [
+            813,
+            706,
+            1064,
+            733
+          ],
+          "center": [
+            938,
+            805
+          ],
+          "confidence": 0.62
+        },
+        {
+          "id": "show_popup_button",
+          "type": "button",
+          "label": "Show Popup",
+          "description": "Triggers a popup for the Sign In warning/error/fatal scenario",
+          "bbox": [
+            1064,
+            706,
+            1260,
+            733
+          ],
+          "center": [
+            1232,
+            817
+          ],
+          "confidence": 0.72
+        },
+        {
+          "id": "horizontal_scrollbar",
+          "type": "button",
+          "label": "",
+          "description": "Horizontal scrollbar to scroll the page content left or right",
+          "bbox": [
+            0,
+            865,
+            1092,
+            880
+          ],
+          "center": [
+            546,
+            876
+          ],
+          "confidence": 0.55
+        },
+        {
+          "id": "signin_show_banner",
+          "type": "input",
+          "label": "Show Banner",
+          "description": "Checkbox to show banner on Sign in page",
+          "bbox": [
+            637,
+            796,
+            679,
+            823
+          ],
+          "center": [
+            653,
+            810
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "signin_show_popup",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Sign in page",
+          "bbox": [
+            804,
+            796,
+            847,
+            823
+          ],
+          "center": [
+            823,
+            810
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "signin_title_input",
+          "type": "input",
+          "label": "Credential Entry Watchpoi",
+          "description": "Title input for Sign in page scenario",
+          "bbox": [
+            972,
+            810,
+            1218,
+            864
+          ],
+          "center": [
+            1094,
+            837
+          ],
+          "confidence": 0.88
+        },
+        {
+          "id": "signup_show_banner",
+          "type": "input",
+          "label": "Show Banner",
+          "description": "Checkbox to show banner on Sign up page",
+          "bbox": [
+            637,
+            1003,
+            679,
+            1030
+          ],
+          "center": [
+            653,
+            1017
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "signup_show_popup",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Sign up page",
+          "bbox": [
+            804,
+            1003,
+            847,
+            1030
+          ],
+          "center": [
+            823,
+            1017
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "signup_title_input",
+          "type": "input",
+          "label": "Local User Creation Watch",
+          "description": "Title input for Sign up page scenario",
+          "bbox": [
+            972,
+            1035,
+            1218,
+            1080
+          ],
+          "center": [
+            1094,
+            1057
+          ],
+          "confidence": 0.88
+        },
+        {
+          "id": "forgotpassword_show_banner",
+          "type": "input",
+          "label": "Show Banner",
+          "description": "Checkbox to show banner on Forgot password page",
+          "bbox": [
+            637,
+            1206,
+            679,
+            1233
+          ],
+          "center": [
+            653,
+            1219
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "forgotpassword_show_popup",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Forgot password page (checked)",
+          "bbox": [
+            804,
+            1206,
+            847,
+            1233
+          ],
+          "center": [
+            823,
+            1219
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "forgotpassword_title_input",
+          "type": "input",
+          "label": "Password Reset Service Mo",
+          "description": "Title input for Forgot password page scenario",
+          "bbox": [
+            972,
+            1224,
+            1218,
+            1269
+          ],
+          "center": [
+            1094,
+            1246
+          ],
+          "confidence": 0.88
+        },
+        {
+          "id": "developersettings_show_banner",
+          "type": "input",
+          "label": "Show Banner",
+          "description": "Checkbox to show banner on Developer settings page (checked)",
+          "bbox": [
+            637,
+            1399,
+            679,
+            1426
+          ],
+          "center": [
+            653,
+            1413
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "developersettings_show_popup",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Developer settings page",
+          "bbox": [
+            804,
+            1399,
+            847,
+            1426
+          ],
+          "center": [
+            823,
+            1413
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "developersettings_title_input",
+          "type": "input",
+          "label": "Developer Settings Mode",
+          "description": "Title input for Developer settings page scenario",
+          "bbox": [
+            972,
+            1417,
+            1218,
+            1462
+          ],
+          "center": [
+            1094,
+            1440
+          ],
+          "confidence": 0.88
+        },
+        {
+          "id": "developersettings_show_banner_2",
+          "type": "input",
+          "label": "Show Banner",
+          "description": "Checkbox to show banner on Developer settings page (checked)",
+          "bbox": [
+            637,
+            1440,
+            679,
+            1467
+          ],
+          "center": [
+            653,
+            1453
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "developersettings_show_popup_2",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Developer settings page",
+          "bbox": [
+            804,
+            1440,
+            847,
+            1467
+          ],
+          "center": [
+            823,
+            1453
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "products_show_banner",
+          "type": "input",
+          "label": "Show Banner",
+          "description": "Checkbox to show banner on Products page",
+          "bbox": [
+            637,
+            1638,
+            679,
+            1665
+          ],
+          "center": [
+            653,
+            1651
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "products_show_popup",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Products page",
+          "bbox": [
+            804,
+            1638,
+            847,
+            1665
+          ],
+          "center": [
+            823,
+            1651
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "products_title_input",
+          "type": "input",
+          "label": "Inventory Response Delay",
+          "description": "Title input for Products page scenario",
+          "bbox": [
+            972,
+            1656,
+            1218,
+            1701
+          ],
+          "center": [
+            1094,
+            1678
+          ],
+          "confidence": 0.88
+        },
+        {
+          "id": "categories_show_banner",
+          "type": "input",
+          "label": "Show Banner",
+          "description": "Checkbox to show banner on Categories page",
+          "bbox": [
+            637,
+            1827,
+            679,
+            1854
+          ],
+          "center": [
+            653,
+            1840
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "categories_show_popup",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Categories page",
+          "bbox": [
+            804,
+            1827,
+            847,
+            1854
+          ],
+          "center": [
+            823,
+            1840
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "categories_title_input",
+          "type": "input",
+          "label": "Category Filter Scenario",
+          "description": "Title input for Categories page scenario",
+          "bbox": [
+            972,
+            1845,
+            1218,
+            1890
+          ],
+          "center": [
+            1094,
+            1867
+          ],
+          "confidence": 0.88
+        },
+        {
+          "id": "deals_show_banner",
+          "type": "input",
+          "label": "Show Banner",
+          "description": "Checkbox to show banner on Deals page",
+          "bbox": [
+            637,
+            2011,
+            679,
+            2038
+          ],
+          "center": [
+            653,
+            2025
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "deals_show_popup",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Deals page",
+          "bbox": [
+            804,
+            2011,
+            847,
+            2038
+          ],
+          "center": [
+            823,
+            2025
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "deals_title_input",
+          "type": "input",
+          "label": "Deal Refresh Scenario",
+          "description": "Title input for Deals page scenario",
+          "bbox": [
+            972,
+            2029,
+            1218,
+            2074
+          ],
+          "center": [
+            1094,
+            2052
+          ],
+          "confidence": 0.88
+        },
+        {
+          "id": "loyalty_show_banner",
+          "type": "input",
+          "label": "Show Banner",
+          "description": "Checkbox to show banner on Loyalty page",
+          "bbox": [
+            637,
+            2268,
+            679,
+            2295
+          ],
+          "center": [
+            653,
+            2281
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "loyalty_show_popup",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Loyalty page",
+          "bbox": [
+            804,
+            2268,
+            847,
+            2295
+          ],
+          "center": [
+            823,
+            2281
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "loyalty_title_input",
+          "type": "input",
+          "label": "Loyalty Lookup Scenario",
+          "description": "Title input for Loyalty page scenario",
+          "bbox": [
+            972,
+            2286,
+            1218,
+            2331
+          ],
+          "center": [
+            1094,
+            2308
+          ],
+          "confidence": 0.88
+        },
+        {
+          "id": "receipts_show_banner",
+          "type": "input",
+          "label": "Show Banner",
+          "description": "Checkbox to show banner on Receipts page",
+          "bbox": [
+            637,
+            2470,
+            679,
+            2497
+          ],
+          "center": [
+            653,
+            2484
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "receipts_show_popup",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Receipts page",
+          "bbox": [
+            804,
+            2470,
+            847,
+            2497
+          ],
+          "center": [
+            823,
+            2484
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "receipts_title_input",
+          "type": "input",
+          "label": "Receipt Reprint Scenario",
+          "description": "Title input for Receipts page scenario",
+          "bbox": [
+            972,
+            2488,
+            1218,
+            2533
+          ],
+          "center": [
+            1094,
+            2511
+          ],
+          "confidence": 0.88
+        },
+        {
+          "id": "support_show_banner",
+          "type": "input",
+          "label": "Show Banner",
+          "description": "Checkbox to show banner on Support page",
+          "bbox": [
+            637,
+            2659,
+            679,
+            2686
+          ],
+          "center": [
+            653,
+            2673
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "support_show_popup",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Support page",
+          "bbox": [
+            804,
+            2659,
+            847,
+            2686
+          ],
+          "center": [
+            823,
+            2673
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "support_title_input",
+          "type": "input",
+          "label": "Help Screen Scenario",
+          "description": "Title input for Support page scenario",
+          "bbox": [
+            972,
+            2677,
+            1218,
+            2722
+          ],
+          "center": [
+            1094,
+            2700
+          ],
+          "confidence": 0.88
+        },
+        {
+          "id": "storeinfo_show_banner",
+          "type": "input",
+          "label": "Show Banner",
+          "description": "Checkbox to show banner on Store info page",
+          "bbox": [
+            637,
+            2844,
+            679,
+            2871
+          ],
+          "center": [
+            653,
+            2857
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "storeinfo_show_popup",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Store info page",
+          "bbox": [
+            804,
+            2844,
+            847,
+            2871
+          ],
+          "center": [
+            823,
+            2857
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "storeinfo_title_input",
+          "type": "input",
+          "label": "Store Information Scenario",
+          "description": "Title input for Store info page scenario",
+          "bbox": [
+            972,
+            2862,
+            1218,
+            2907
+          ],
+          "center": [
+            1094,
+            2884
+          ],
+          "confidence": 0.88
+        },
+        {
+          "id": "storeinfo_show_banner_2",
+          "type": "input",
+          "label": "Show Banner",
+          "description": "Checkbox to show banner on Store info page",
+          "bbox": [
+            637,
+            2907,
+            679,
+            2934
+          ],
+          "center": [
+            653,
+            2920
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "storeinfo_show_popup_2",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Store info page",
+          "bbox": [
+            804,
+            2907,
+            847,
+            2934
+          ],
+          "center": [
+            823,
+            2920
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "cart_show_banner",
+          "type": "input",
+          "label": "Show Banner",
+          "description": "Checkbox to show banner on Cart page",
+          "bbox": [
+            637,
+            3109,
+            679,
+            3136
+          ],
+          "center": [
+            653,
+            3123
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "cart_show_popup",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Cart page (checked)",
+          "bbox": [
+            804,
+            3109,
+            847,
+            3136
+          ],
+          "center": [
+            823,
+            3123
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "cart_title_input",
+          "type": "input",
+          "label": "Tax Calculation Retry Simu",
+          "description": "Title input for Cart page scenario",
+          "bbox": [
+            972,
+            3127,
+            1218,
+            3172
+          ],
+          "center": [
+            1094,
+            3150
+          ],
+          "confidence": 0.88
+        },
+        {
+          "id": "cardpayment_show_banner",
+          "type": "input",
+          "label": "Show Banner",
+          "description": "Checkbox to show banner on Card payment page",
+          "bbox": [
+            637,
+            3298,
+            679,
+            3325
+          ],
+          "center": [
+            653,
+            3312
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "cardpayment_show_popup",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Card payment page",
+          "bbox": [
+            804,
+            3298,
+            847,
+            3325
+          ],
+          "center": [
+            823,
+            3312
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "cardpayment_title_input",
+          "type": "input",
+          "label": "Card Reader Precheck War",
+          "description": "Title input for Card payment page scenario",
+          "bbox": [
+            972,
+            3316,
+            1218,
+            3361
+          ],
+          "center": [
+            1094,
+            3339
+          ],
+          "confidence": 0.88
+        },
+        {
+          "id": "cardreadertap_show_banner",
+          "type": "input",
+          "label": "Show Banner",
+          "description": "Checkbox to show banner on Card reader tap page",
+          "bbox": [
+            637,
+            3483,
+            679,
+            3510
+          ],
+          "center": [
+            653,
+            3496
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "cardreadertap_show_popup",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Card reader tap page (checked)",
+          "bbox": [
+            804,
+            3483,
+            847,
+            3510
+          ],
+          "center": [
+            823,
+            3496
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "cardreadertap_title_input",
+          "type": "input",
+          "label": "Reader Alignment Retry N",
+          "description": "Title input for Card reader tap page scenario",
+          "bbox": [
+            972,
+            3501,
+            1218,
+            3546
+          ],
+          "center": [
+            1094,
+            3523
+          ],
+          "confidence": 0.88
+        },
+        {
+          "id": "cardreadertap_show_popup_2",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Card reader tap page (checked)",
+          "bbox": [
+            804,
+            3556,
+            847,
+            3583
+          ],
+          "center": [
+            823,
+            3569
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "orderresult_show_banner",
+          "type": "input",
+          "label": "Show Banner",
+          "description": "Checkbox to show banner on Order result page",
+          "bbox": [
+            637,
+            3736,
+            679,
+            3763
+          ],
+          "center": [
+            653,
+            3749
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "orderresult_show_popup",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Order result page",
+          "bbox": [
+            804,
+            3736,
+            847,
+            3763
+          ],
+          "center": [
+            823,
+            3749
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "orderresult_title_input",
+          "type": "input",
+          "label": "Receipt Delivery Warning",
+          "description": "Title input for Order result page scenario",
+          "bbox": [
+            972,
+            3754,
+            1218,
+            3799
+          ],
+          "center": [
+            1094,
+            3776
+          ],
+          "confidence": 0.88
+        },
+        {
+          "id": "orderhistory_show_banner",
+          "type": "input",
+          "label": "Show Banner",
+          "description": "Checkbox to show banner on Order history page",
+          "bbox": [
+            637,
+            3925,
+            679,
+            3952
+          ],
+          "center": [
+            653,
+            3938
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "orderhistory_show_popup",
+          "type": "input",
+          "label": "Show Popup",
+          "description": "Checkbox to show popup on Order history page (checked)",
+          "bbox": [
+            804,
+            3925,
+            847,
+            3952
+          ],
+          "center": [
+            823,
+            3938
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "orderhistory_title_input",
+          "type": "input",
+          "label": "History Sync Fatal Scenario",
+          "description": "Title input for Order history page scenario",
+          "bbox": [
+            972,
+            3943,
+            1218,
+            3988
+          ],
+          "center": [
+            1094,
+            3965
+          ],
+          "confidence": 0.88
+        },
+        {
+          "id": "reset_card_balances_button",
+          "type": "button",
+          "label": "Reset Card Balances",
+          "description": "Resets stored test-card balances in this browser",
+          "bbox": [
+            616,
+            4141,
+            1008,
+            4186
+          ],
+          "center": [
+            812,
+            4163
+          ],
+          "confidence": 0.97
+        }
+      ],
+      "transitions": {
+        "tap_info_badge": "developer_settings",
+        "tap_back_to_sign_in": "login",
+        "set_page_delay": "developer_settings",
+        "set_action_delay": "developer_settings",
+        "toggle_robot_vision_mode": "developer_settings",
+        "expand_sign_in_scenario_row": "developer_settings",
+        "tap_show_banner_button": "developer_settings",
+        "tap_show_popup_button": "developer_settings",
+        "tap_reset_card_balances": "developer_settings",
+        "scroll_horizontal_scrollbar": "developer_settings",
+        "configure_signin_scenario": "developer_settings",
+        "configure_cart_scenario": "developer_settings"
+      },
+      "screen_hash": "0000000001ff01ff01ff01ff03ff03ff03ff03ff03ff03ff03ff03ff03ff03ff",
+      "is_dynamic": false
+    }
+  },
+  "keyboard_map": {
+    "keys": {
+      "1": [
+        0.455,
+        0.635
+      ],
+      "2": [
+        0.513,
+        0.635
+      ],
+      "3": [
+        0.57,
+        0.635
+      ],
+      "4": [
+        0.627,
+        0.635
+      ],
+      "5": [
+        0.684,
+        0.635
+      ],
+      "6": [
+        0.741,
+        0.635
+      ],
+      "7": [
+        0.798,
+        0.635
+      ],
+      "8": [
+        0.855,
+        0.635
+      ],
+      "9": [
+        0.912,
+        0.635
+      ],
+      "0": [
+        0.969,
+        0.635
+      ],
+      "q": [
+        0.455,
+        0.69
+      ],
+      "w": [
+        0.513,
+        0.69
+      ],
+      "e": [
+        0.57,
+        0.69
+      ],
+      "r": [
+        0.627,
+        0.69
+      ],
+      "t": [
+        0.684,
+        0.69
+      ],
+      "y": [
+        0.741,
+        0.69
+      ],
+      "u": [
+        0.798,
+        0.69
+      ],
+      "i": [
+        0.855,
+        0.69
+      ],
+      "o": [
+        0.912,
+        0.69
+      ],
+      "p": [
+        0.969,
+        0.69
+      ],
+      "a": [
+        0.47,
+        0.745
+      ],
+      "s": [
+        0.527,
+        0.745
+      ],
+      "d": [
+        0.584,
+        0.745
+      ],
+      "f": [
+        0.641,
+        0.745
+      ],
+      "g": [
+        0.698,
+        0.745
+      ],
+      "h": [
+        0.755,
+        0.745
+      ],
+      "j": [
+        0.812,
+        0.745
+      ],
+      "k": [
+        0.869,
+        0.745
+      ],
+      "l": [
+        0.926,
+        0.745
+      ],
+      "z": [
+        0.455,
+        0.8
+      ],
+      "x": [
+        0.513,
+        0.8
+      ],
+      "c": [
+        0.57,
+        0.8
+      ],
+      "v": [
+        0.627,
+        0.8
+      ],
+      "b": [
+        0.684,
+        0.8
+      ],
+      "n": [
+        0.741,
+        0.8
+      ],
+      "m": [
+        0.798,
+        0.8
+      ],
+      ".": [
+        0.855,
+        0.8
+      ],
+      "@": [
+        0.912,
+        0.8
+      ],
+      "-": [
+        0.969,
+        0.8
+      ],
+      "shift": [
+        0.47,
+        0.855
+      ],
+      "_": [
+        0.541,
+        0.855
+      ],
+      "space": [
+        0.641,
+        0.855
+      ],
+      "backspace": [
+        0.779,
+        0.855
+      ],
+      "clear": [
+        0.878,
+        0.855
+      ],
+      "done": [
+        0.955,
+        0.855
+      ]
+    }
+  }
+}
