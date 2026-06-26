@@ -8,13 +8,23 @@ from vision_agent.storage import get_storage
 
 def finalize(state: VisionAgentState) -> dict:
     results = state.get("step_results") or []
-    passed_count = sum(1 for r in results if r["success"])
-    all_passed = passed_count == len(results) and len(results) > 0
+
+    # Retries produce duplicate step_instruction entries — only the last result
+    # for each step counts. A step that failed then recovered via retry is a pass.
+    final_by_step: dict = {}
+    for r in results:
+        final_by_step[r["step_instruction"]] = r
+    final_results = list(final_by_step.values())
+
+    passed_count = sum(1 for r in final_results if r["success"])
+    all_passed = passed_count == len(final_results) and len(final_results) > 0
 
     outcome = "passed" if all_passed else "failed"
     screens = " → ".join(state.get("screen_history") or [])
+    retry_count = len(results) - len(final_results)
+    retry_note = f" ({retry_count} step(s) recovered via retry)" if retry_count else ""
     summary = (
-        f"{outcome.upper()}: {passed_count}/{len(results)} steps succeeded. "
+        f"{outcome.upper()}: {passed_count}/{len(final_results)} steps succeeded{retry_note}. "
         f"Path: {screens}."
     )
 
