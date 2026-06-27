@@ -12,6 +12,7 @@ API call budget per screen:
 """
 import io
 import json
+import math
 import time
 import base64
 from pathlib import Path
@@ -163,6 +164,88 @@ def _collect_scrolled_elements(base_elements: list, image_path: str, screen_id: 
     return _dedup_elements(all_elements)
 
 
+def _dom_correct_elements(elements: list) -> list:
+    """Correct Claude's element coordinates using live DOM positions.
+
+    Claude's vision analysis sometimes misplaces elements by 100-300 px — most
+    commonly sidebar navigation items that sit at a different x than the product
+    cards, confusing the model.  This function queries the browser DOM for every
+    interactive element's actual center, then text-matches each Claude element to
+    a DOM element.  If the match is unambiguous and the offset exceeds 30 px, the
+    coordinate is corrected to the DOM-true value before it is stored in the map.
+
+    Only runs when the backend supports DOM access (playwright mode).
+    Real robot arm stubs return [] — correction is skipped transparently.
+    """
+    try:
+        dom_els = robot.get_dom_element_centers()
+    except AttributeError:
+        return elements
+
+    if not dom_els:
+        return elements
+
+    corrected = []
+    for el in elements:
+        label = (el.get("label") or "").lower().strip()
+        if not label:
+            corrected.append(el)
+            continue
+
+        cx, cy = el["center"][0], el["center"][1]
+
+        # Find DOM elements whose text overlaps with the Claude label.
+        # Ratio guard: when checking "label in dom_text", the label must cover
+        # at least 70% of the DOM text to prevent short labels like "password"
+        # from matching "Forgot password?" (ratio 8/16 = 0.50 → rejected).
+        # Full strings ("Categories" / "Sign In") hit ratio 1.0 and pass.
+        matches = []
+        for dom_el in dom_els:
+            dom_text = dom_el["text"].lower().strip()
+            if not dom_text or len(dom_text) < 2:
+                continue
+
+            label_in_dom = (label in dom_text) and (len(label) / len(dom_text) >= 0.7)
+            dom_in_label = dom_text in label   # dom is a subset of the label — always safe
+            if not (label_in_dom or dom_in_label):
+                continue
+
+            dist = math.hypot(dom_el["cx"] - cx, dom_el["cy"] - cy)
+            if dist < 350:   # ignore distant matches — likely wrong element
+                # Weight: prefer type-matching elements (e.g. input→input, button→button)
+                el_type = el.get("type", "")
+                dom_tag = dom_el.get("tag", "")
+                type_match = (
+                    (el_type == "input"  and dom_tag == "input")  or
+                    (el_type == "button" and dom_tag == "button") or
+                    (el_type == "link"   and dom_tag in ("a", "button"))
+                )
+                matches.append((0 if type_match else 1, dist, dom_el))
+
+        if matches:
+            matches.sort(key=lambda x: (x[0], x[1]))   # type-match first, then distance
+            _, best_dist, best = matches[0]
+            el = dict(el)
+            # Always store the matched DOM testid (stable across runs, great for determinism)
+            if best.get("testid"):
+                el["testid"] = best["testid"]
+            if best_dist > 30:  # only correct coordinates when meaningfully off
+                print(
+                    f"  [DOM-FIX] '{el['id']}': ({cx},{cy}) → ({best['cx']},{best['cy']})"
+                    f"  Δ={best_dist:.0f}px  label='{label[:20]}' dom='{best['text'][:20]}'"
+                )
+                new_cx, new_cy = best["cx"], best["cy"]
+                el["center"] = [new_cx, new_cy]
+                if el.get("bbox") and len(el["bbox"]) == 4:
+                    bw = abs(el["bbox"][2] - el["bbox"][0])
+                    bh = abs(el["bbox"][3] - el["bbox"][1])
+                    el["bbox"] = [new_cx - bw // 2, new_cy - bh // 2,
+                                  new_cx + bw // 2, new_cy + bh // 2]
+
+        corrected.append(el)
+    return corrected
+
+
 def _dedup_elements(elements: list, radius: int = 30) -> list:
     result: list = []
     for el in elements:
@@ -193,7 +276,8 @@ def _save_annotated(image_path: str, screen_id: str, elements: list) -> None:
         color = palette.get(el.get("type", ""), "#F59E0B")
         if el.get("bbox") and len(el["bbox"]) == 4:
             x1, y1, x2, y2 = el["bbox"]
-            draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+            # Normalize: PIL requires top-left ≤ bottom-right
+            draw.rectangle([min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)], outline=color, width=2)
         cx, cy = el["center"]
         r = 5
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=color)
@@ -226,8 +310,12 @@ def _map_keyboard(elements: list, app_map: dict) -> dict:
 
     cx, cy = input_el["center"]
     px, py = int(cx), int(cy)
-    print(f"\n  [KEYBOARD] Tapping '{input_el['id']}' @ ({px},{py}) to reveal keyboard…")
-    robot.tap(px, py)
+    print(f"\n  [KEYBOARD MAP - ONE-TIME SETUP] Tapping '{input_el['id']}' @ ({px},{py}) to reveal virtual keyboard…")
+    try:
+        robot.tap(px, py)
+    except Exception as e:
+        print(f"  [KEYBOARD MAP] Browser error during tap ({e}) — skipping keyboard mapping for now")
+        return app_map
     time.sleep(0.6)
 
     ts      = int(time.time() * 1000)
@@ -254,20 +342,21 @@ def _map_keyboard(elements: list, app_map: dict) -> dict:
         print("  [KEYBOARD] No keys found — virtual keyboard may not have appeared")
         return app_map
 
-    done_coords = (
-        kb_data["keys"].get("done")
-        or kb_data["keys"].get("return")
-        or kb_data["keys"].get("enter")
-    )
+    # Load the map FIRST so type_text("") can use the done-key coords as fallback
+    robot.set_keyboard_map(kb_data)
+
+    # Dismiss the keyboard via type_text("") which tries data-testid="keyboard-done"
+    # before falling back to the map coordinate.  Avoids robot.tap() which uses
+    # DOM snap and can accidentally land on a nearby key (e.g. '-') and type it.
+    done_coords = kb_data["keys"].get("done") or kb_data["keys"].get("return") or kb_data["keys"].get("enter")
     if done_coords:
         dx, dy = int(done_coords[0] * _VIEWPORT_W), int(done_coords[1] * _VIEWPORT_H)
         print(f"  [KEYBOARD] Dismissing via 'done' @ ({dx},{dy})")
-        robot.tap(dx, dy)
-        time.sleep(0.4)
     else:
-        print("  [KEYBOARD] 'done' key not found — keyboard may still be visible")
+        print("  [KEYBOARD] 'done' key not found — attempting dismiss via testid")
+    robot.type_text("")   # no chars typed; just triggers testid-first keyboard dismiss
+    time.sleep(0.3)
 
-    robot.set_keyboard_map(kb_data)
     return {**app_map, "keyboard_map": kb_data}
 
 
@@ -299,6 +388,7 @@ def explore_screen(state: ExplorerState) -> dict:
     if not existing.get("elements"):
         # New screen or skeleton (elements:[]) from identify_result — full capture
         elements = screen.get("elements") or []
+        elements = _dom_correct_elements(elements)   # fix coordinates using live DOM positions
         elements = _collect_scrolled_elements(elements, state["current_image_path"], screen_id)
 
         image_bytes = get_storage().load(state["current_image_path"])
@@ -306,7 +396,10 @@ def explore_screen(state: ExplorerState) -> dict:
         is_dynamic  = any(kw in screen_id.lower() for kw in _DYNAMIC_SCREEN_KEYWORDS)
         label       = "New screen" if screen_id not in app_map["screens"] else "Skeleton updated"
         tag         = "DYNAMIC" if is_dynamic else "STATIC"
+        dom_id      = robot.get_dom_screen_id()   # e.g. "products", "categories", ""
         print(f"\n  [EXPLORE] {label}: '{screen_id}' [{tag}]  {len(elements)} elements  hash={screen_hash[:12]}…")
+        if dom_id:
+            print(f"  [EXPLORE] DOM screen: '{dom_id}'")
 
         app_map["screens"][screen_id] = {
             "screen_id":   screen_id,
@@ -315,6 +408,7 @@ def explore_screen(state: ExplorerState) -> dict:
             "transitions": existing.get("transitions") or {},
             "screen_hash": screen_hash,
             "is_dynamic":  is_dynamic,
+            "dom_id":      dom_id,   # DOM testid → reliably identifies SPA state views
         }
         _save_annotated(state["current_image_path"], screen_id, elements)
     else:
@@ -351,20 +445,65 @@ def explore_screen(state: ExplorerState) -> dict:
     data = json.loads(raw)
 
     # ── 6. Queue actions not yet explored ─────────────────────────────────────
-    explored    = set(state.get("explored_action_keys") or [])
+    explored = set(state.get("explored_action_keys") or [])
+
+    # Screens that have been fully mapped already (have element lists).
+    # Used to deduplicate sidebar-nav actions: once "categories" is in the map
+    # there is no need to queue navigate_categories from every other screen.
+    fully_explored_ids = {
+        sid for sid, sc in (app_map.get("screens") or {}).items()
+        if sc.get("elements")
+    }
+
+    # Global element_transitions: element_id → dest_screen_id collected from all
+    # previously executed single-tap actions.  Used to skip "sign_out_button" or
+    # "home_button" actions on every screen once the destination is already mapped.
+    element_transitions = app_map.get("element_transitions") or {}
+
     new_actions: list[ExplorationAction] = []
+    skipped_dedup = 0
     for a in data.get("explorable_actions") or []:
         full_key = f"{screen_id}::{a['action_key']}"
-        if full_key not in explored:
-            new_actions.append({
-                "action_key":          a["action_key"],
-                "screen_id":           screen_id,
-                "description":         a.get("description", ""),
-                "steps":               a.get("steps") or [],
-                "credential_scenario": a.get("credential_scenario"),
-            })
+        if full_key in explored:
+            continue
 
-    queue = list(state.get("exploration_queue") or []) + new_actions
+        steps = a.get("steps") or []
+        if len(steps) == 1 and steps[0].get("action_type") == "tap":
+            eid = steps[0].get("element_id", "")
+
+            # Element-level dedup: if we already know where this exact element leads
+            # and that destination is fully explored, there is no new information to gain.
+            if eid and eid in element_transitions:
+                known_dest = element_transitions[eid]
+                if known_dest in fully_explored_ids:
+                    skipped_dedup += 1
+                    continue
+
+            # Action-key dedup: skip nav actions whose action_key names a fully-mapped
+            # screen (e.g. "navigate_categories" once categories is in fully_explored_ids).
+            # Guard: len(sid) >= 5 prevents short ids like "cart" (4 chars) from
+            # false-matching substrings in unrelated action keys.
+            action_key_lower = a["action_key"].lower()
+            if any(sid in action_key_lower for sid in fully_explored_ids if len(sid) >= 5):
+                skipped_dedup += 1
+                continue
+
+        new_actions.append({
+            "action_key":          a["action_key"],
+            "screen_id":           screen_id,
+            "description":         a.get("description", ""),
+            "steps":               steps,
+            "credential_scenario": a.get("credential_scenario"),
+        })
+
+    if skipped_dedup:
+        print(f"  [DEDUP]  Skipped {skipped_dedup} nav action(s) — destinations already mapped")
+
+    # DFS order: prepend new actions so we explore the current branch deeply
+    # before backtracking.  Combined with stateful execution this means
+    # consecutive actions from the same source screen need no browser reset.
+    existing_queue = list(state.get("exploration_queue") or [])
+    queue = new_actions + existing_queue
     print(f"  [EXPLORE] '{screen_id}': queued {len(new_actions)} new actions  (queue depth: {len(queue)})")
 
     approach_paths = dict(state.get("approach_paths") or {})

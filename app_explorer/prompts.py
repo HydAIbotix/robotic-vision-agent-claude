@@ -38,6 +38,14 @@ Rules:
 - Quantity stepper + / - buttons: one action each (just tap, no credentials)
 - "Add to Cart" buttons: include a preceding qty increment step first
 - Skip static text, images, decorative elements
+- SKIP display-only "cards": info panels, stat tiles, device-status widgets, quick-info cards
+  whose label is a noun phrase (e.g. "Reader", "Network Status", "Kiosk ID") with no
+  verb/action text. These are display elements — tapping them stays on the same screen.
+  Only include tapping a card if it has explicit action text like "Tap to...", "Select...",
+  "Configure...", or is clearly a navigation tile to a different screen.
+- SKIP global actions already explored from other screens — specifically: sign_out/logout
+  (always goes to login), home/back buttons (always go to a fixed screen). These are
+  recorded once globally; you do not need to repeat them from every screen.
 - Maximum 12 actions per screen
 """
 
@@ -161,7 +169,7 @@ From screen: {from_screen_id}
 
 Known screens discovered so far:
 {known_screens}
-
+{dom_screen_hint}
 Examine the current screenshot (the result of that action).
 
 Return ONLY valid JSON:
@@ -173,6 +181,6 @@ Return ONLY valid JSON:
 }}
 
 - If the screenshot matches a known screen: set is_new_screen=false and use that screen's ID exactly
-- If it's a new screen never seen before: coin a short snake_case ID
+- If it's a new screen never seen before: coin a short snake_case ID (use the DOM hint if provided)
 - transition_type: did we navigate to a new page, see an error, see a small UI update, or nothing changed?
 """

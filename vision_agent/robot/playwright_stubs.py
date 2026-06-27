@@ -19,12 +19,27 @@ _pw    = None          # sync_playwright() handle
 _browser = None
 _page    = None
 _keyboard_map: dict = {}   # populated by set_keyboard_map() after App Explorer runs
+_progress_injected: bool = False  # True once the HUD overlay div has been created
 
 
 def _ensure_page():
     global _pw, _browser, _page
     if _page is not None:
-        return _page
+        # Verify the page is still alive — a previous crash may have left a stale
+        # module-level reference while the underlying browser process was killed.
+        try:
+            _ = _page.url  # cheap property; raises TargetClosedError if page is gone
+            return _page
+        except Exception:
+            print("  [PLAYWRIGHT] Stale page detected — reopening browser")
+            try:
+                if _browser:
+                    _browser.close()
+                if _pw:
+                    _pw.stop()
+            except Exception:
+                pass
+            _pw = _browser = _page = None
 
     from playwright.sync_api import sync_playwright
     from vision_agent.config import settings
@@ -175,7 +190,7 @@ def _click_key(page, char: str) -> bool:
     return True
 
 
-def type_text(text: str) -> dict:
+def type_text(text: str, clear_first: bool = True) -> dict:
     """Type into the focused input via keyboard events, then dismiss the virtual keyboard.
 
     page.mouse.click() on virtual keyboard keys fires mousedown which blurs the
@@ -186,25 +201,37 @@ def type_text(text: str) -> dict:
 
     The keyboard map IS still used to locate and tap the 'done' key after typing,
     which matches real robot-arm behaviour (arm physically taps Done to close keyboard).
+
+    clear_first=True (default): sends Ctrl+A before typing so any pre-filled text
+    in the field (e.g. sign-up form defaults) is selected and replaced, not appended.
     """
     page = _ensure_page()
+
+    if clear_first and text:
+        # Select all pre-existing text — replaced by the upcoming keyboard.type() call.
+        page.keyboard.press("Control+a")
+        page.wait_for_timeout(80)
 
     page.keyboard.type(text, delay=30)
     page.wait_for_timeout(200)
 
-    # Dismiss the virtual keyboard — prefer 'done' coordinate from map
-    done_coords = (
-        _keyboard_map.get("done")
-        or _keyboard_map.get("return")
-        or _keyboard_map.get("enter")
-    ) if _keyboard_map else None
-    if done_coords:
-        page.mouse.click(int(done_coords[0] * 1400), int(done_coords[1] * 900))
+    # Dismiss the virtual keyboard.
+    # IMPORTANT: prefer data-testid over coordinates — the LLM sometimes assigns
+    # a slightly wrong 'done' key position that lands on an adjacent '-' key,
+    # which appends '-' to the typed text and causes auth failures.
+    kb_done = page.locator('[data-testid="keyboard-done"]')
+    if kb_done.count() > 0:
+        kb_done.click()
         page.wait_for_timeout(150)
-    else:
-        kb_done = page.locator('[data-testid="keyboard-done"]')
-        if kb_done.count() > 0:
-            kb_done.click()
+    elif _keyboard_map:
+        # Testid not found — fall back to coordinate from map
+        done_coords = (
+            _keyboard_map.get("done")
+            or _keyboard_map.get("return")
+            or _keyboard_map.get("enter")
+        )
+        if done_coords:
+            page.mouse.click(int(done_coords[0] * 1400), int(done_coords[1] * 900))
             page.wait_for_timeout(150)
 
     print(f"  [PLAYWRIGHT] type({text!r})")
@@ -228,11 +255,13 @@ def reset_to_entry() -> None:
     SPA auto-redirects back to the products page on every reset, making
     login-page actions test the wrong screen.
     """
+    global _progress_injected
     if _page is not None:
         from vision_agent.config import settings
         _page.evaluate("() => { localStorage.clear(); sessionStorage.clear(); }")
         _page.goto(settings.kiosk_url)
         _page.wait_for_load_state("networkidle")
+        _progress_injected = False  # page reload wiped the HUD div — re-inject on next update
         print(f"  [PLAYWRIGHT] Reset to {settings.kiosk_url}")
 
 
@@ -258,13 +287,200 @@ def get_page_scroll_info() -> dict:
     })""")
 
 
+def get_dom_screen_id() -> str:
+    """Generically detect the current screen using data-testid attributes.
+
+    Algorithm (app-agnostic — works for any web app):
+      1. Scan all [data-testid] elements that cover ≥ 25 % of the viewport.
+         Those are screen-level sections, not small widgets.
+      2. Prefer testids that contain "screen", "page" or "view" — common naming
+         conventions for top-level route containers.
+      3. Normalize the winning testid to a snake_case screen_id:
+           "signin-screen"     → "signin"
+           "store-info-screen" → "store_info"
+           "main-page"         → "main"
+           "kiosk-products"    → "kiosk_products"
+
+    Returns the normalized screen_id, or "" when no large testid is found
+    (falls back to perceptual hash + Claude vision in identify_result).
+    """
+    page = _ensure_page()
+    try:
+        testid: str = page.evaluate("""() => {
+            const vpArea = window.innerWidth * window.innerHeight;
+            const candidates = [];
+            for (const el of document.querySelectorAll('[data-testid]')) {
+                const r = el.getBoundingClientRect();
+                const area = r.width * r.height;
+                if (area < vpArea * 0.25) continue;  // too small — skip
+                const tid = el.getAttribute('data-testid') || '';
+                if (tid) candidates.push({testid: tid, area: area});
+            }
+            if (!candidates.length) return '';
+            // Prefer testids with common screen-level suffixes/keywords
+            const screenLike = candidates.filter(c =>
+                c.testid.includes('screen') ||
+                c.testid.includes('page')   ||
+                c.testid.includes('view')
+            );
+            const ranked = screenLike.length ? screenLike : candidates;
+            ranked.sort((a, b) => b.area - a.area);
+            return ranked[0].testid;
+        }""")
+    except Exception:
+        return ""
+
+    if not testid:
+        return ""
+
+    # Normalize to snake_case screen_id
+    sid = testid
+    for suffix in ("-screen", "-page", "-view", "screen", "page", "view"):
+        if sid.endswith(suffix):
+            sid = sid[:-len(suffix)]
+            break
+    return sid.lstrip("-").replace("-", "_")
+
+
+def get_dom_element_centers() -> list[dict]:
+    """Return all visible interactive elements with their text, center coords, and testid.
+
+    Used by App Explorer's DOM coordinate correction step to fix cases where
+    Claude's vision analysis misplaces elements (e.g. sidebar nav links placed
+    ~250px off because the layout confuses the vision model).  The text from
+    each DOM element is matched against Claude's element labels; when a clear
+    text-match exists but the position differs significantly, the coordinate is
+    corrected to the DOM-true value.
+    """
+    page = _ensure_page()
+    try:
+        return page.evaluate("""() => {
+            const results = [];
+            const sel = 'button, a, input, select, [role="button"], [role="link"]';
+            for (const el of document.querySelectorAll(sel)) {
+                const r = el.getBoundingClientRect();
+                if (r.width === 0 || r.height === 0) continue;
+                // Collect visible text: textContent for buttons/links, placeholder for inputs
+                const text = (
+                    el.textContent ||
+                    el.getAttribute('placeholder') ||
+                    el.getAttribute('aria-label') || ''
+                ).trim().slice(0, 80);
+                results.push({
+                    text:   text,
+                    cx:     Math.round(r.left + r.width  / 2),
+                    cy:     Math.round(r.top  + r.height / 2),
+                    tag:    el.tagName.toLowerCase(),
+                    testid: el.getAttribute('data-testid') || '',
+                });
+            }
+            return results;
+        }""")
+    except Exception:
+        return []
+
+
+def navigate_to_screen(screen_id: str) -> bool:
+    """Navigate to an authenticated screen via its sidebar/nav button — no login needed.
+
+    Derives the expected nav button label generically from the screen_id:
+      "categories"    → "Categories"
+      "store_info"    → "Store Info"
+      "order_history" → "Order History"
+
+    Uses :has-text() selectors so it works regardless of exact DOM structure or
+    whether the kiosk layout changes (sidebar, top nav, tabs — all work the same).
+    Returns True if a matching clickable element was found and clicked.
+    """
+    # Generic derivation: underscore → space, title-case each word
+    nav_text = screen_id.replace("_", " ").title()
+    page = _ensure_page()
+    try:
+        for selector in (
+            f'a:has-text("{nav_text}")',
+            f'button:has-text("{nav_text}")',
+            f'[role="link"]:has-text("{nav_text}")',
+            f'[role="button"]:has-text("{nav_text}")',
+        ):
+            loc = page.locator(selector)
+            if loc.count() > 0:
+                loc.first.click()
+                page.wait_for_timeout(500)
+                return True
+    except Exception as e:
+        print(f"  [PLAYWRIGHT] navigate_to_screen('{screen_id}') error: {e}")
+    return False
+
+
+def update_explorer_progress(explored: int, total: int, current_action: str = "") -> None:
+    """Show/update a floating HUD overlay in the kiosk browser during App Explorer runs.
+
+    First call injects a fixed-position <div> at bottom-right. Subsequent calls
+    update its content in-place. The overlay is pointer-events:none so it cannot
+    interfere with any click or tap the explorer performs on the page itself.
+
+    The div is re-injected automatically whenever a page navigation (reset_to_entry
+    or initial load) wipes the DOM — checked on every call via a lightweight JS probe.
+    """
+    global _progress_injected
+    if _page is None:
+        return
+    try:
+        # Check whether the div still exists — a page navigation (reset_to_entry)
+        # wipes the DOM and destroys the overlay even though _progress_injected is True.
+        hud_exists: bool = _page.evaluate("() => !!document.getElementById('__explorer_hud')")
+        if not hud_exists:
+            _progress_injected = False
+
+        if not _progress_injected:
+            _page.evaluate("""() => {
+                const d = document.createElement('div');
+                d.id = '__explorer_hud';
+                d.style.cssText = [
+                    'position:fixed', 'bottom:12px', 'right:12px',
+                    'z-index:2147483647',
+                    'background:rgba(15,23,42,0.92)',
+                    'color:#e2e8f0',
+                    'border:1px solid #334155',
+                    'border-radius:10px',
+                    'padding:10px 14px',
+                    'font:600 12px/1.6 monospace',
+                    'max-width:280px',
+                    'pointer-events:none',
+                    'box-shadow:0 4px 16px rgba(0,0,0,0.5)',
+                ].join(';');
+                document.body.appendChild(d);
+            }""")
+            _progress_injected = True
+
+        pct    = min(100, int(explored / total * 100)) if total else 0
+        filled = round(pct / 5)          # out of 20 chars
+        bar    = "█" * filled + "░" * (20 - filled)
+        label  = current_action[:42] if current_action else ""
+
+        _page.evaluate(
+            """([pct, explored, total, bar, label]) => {
+                const el = document.getElementById('__explorer_hud');
+                if (!el) return;
+                el.innerHTML =
+                    '<div style="color:#7dd3fc;margin-bottom:2px">🔍 App Explorer</div>' +
+                    '<div style="color:#a3e635;letter-spacing:1px">' + bar + '</div>' +
+                    '<div>' + pct + '%  (' + explored + ' / ' + total + ' actions)</div>' +
+                    (label ? '<div style="color:#94a3b8;font-size:10px">' + label + '</div>' : '');
+            }""",
+            [pct, explored, total, bar, label],
+        )
+    except Exception:
+        pass   # never crash exploration because of the HUD overlay
+
+
 def set_demo_screens(paths: list[str]) -> None:
     """No-op in playwright mode — real screenshots taken after every action."""
     pass
 
 
 def stop() -> None:
-    global _pw, _browser, _page
+    global _pw, _browser, _page, _progress_injected
     try:
         if _browser:
             _browser.close()
@@ -273,4 +489,5 @@ def stop() -> None:
     except Exception:
         pass
     _pw = _browser = _page = None
+    _progress_injected = False
     print("  [PLAYWRIGHT] Browser closed")

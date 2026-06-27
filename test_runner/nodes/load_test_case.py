@@ -20,8 +20,9 @@ def load_test_case(state: TestRunnerState) -> dict:
     print(f"{'='*60}")
 
     return {
-        "current_tc":       tc,
-        "planned_steps":    [],
+        "current_tc":          tc,
+        "structured_plan":     None,   # cleared per test case; parse_steps fills it
+        "planned_steps":       [],
         "credential_scenario": "",
-        "start_image":      start_image,
+        "start_image":         start_image,
     }

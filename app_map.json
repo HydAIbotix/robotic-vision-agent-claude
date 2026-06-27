@@ -5,7 +5,7 @@
   "screens": {
     "login": {
       "screen_id": "login",
-      "description": "A sign-in screen for Generic Kiosk POS allowing users to enter credentials or navigate to sign up, password recovery, or developer settings.",
+      "description": "A sign-in screen for Generic Kiosk POS where users can enter their email and password to authenticate.",
       "elements": [
         {
           "id": "email_input",
@@ -15,48 +15,49 @@
           "bbox": [
             681,
             196,
-            1282,
-            265
+            1281,
+            268
           ],
           "center": [
             981,
-            231
+            232
           ],
-          "confidence": 0.95
+          "confidence": 0.97
         },
         {
           "id": "password_input",
           "type": "input",
           "label": "Password",
-          "description": "Secure text field for entering the user's password",
+          "description": "Masked text field for entering the user's password",
           "bbox": [
             681,
             301,
-            1282,
-            370
+            1281,
+            373
           ],
           "center": [
             981,
-            336
+            337
           ],
-          "confidence": 0.95
+          "confidence": 0.97
         },
         {
           "id": "sign_in_button",
           "type": "button",
           "label": "Sign In",
-          "description": "Submits the email and password credentials to authenticate the user",
+          "description": "Submits the email and password credentials to log in",
           "bbox": [
             681,
-            378,
-            1282,
+            379,
+            1281,
             421
           ],
           "center": [
             981,
-            399
+            400
           ],
-          "confidence": 0.97
+          "confidence": 0.98,
+          "testid": "signin-button"
         },
         {
           "id": "sign_up_link",
@@ -64,65 +65,69 @@
           "label": "Sign up",
           "description": "Navigates to the user registration/account creation screen",
           "bbox": [
-            681,
+            686,
             424,
             784,
             450
           ],
           "center": [
-            721,
+            729,
             437
           ],
-          "confidence": 0.92
+          "confidence": 0.92,
+          "testid": "go-signup"
         },
         {
           "id": "forgot_password_link",
           "type": "link",
           "label": "Forgot password?",
-          "description": "Navigates to the password recovery screen",
+          "description": "Navigates to the password reset screen",
           "bbox": [
             784,
             424,
-            952,
+            924,
             450
           ],
           "center": [
-            868,
+            854,
             437
           ],
-          "confidence": 0.92
+          "confidence": 0.92,
+          "testid": "go-forgot-password"
         },
         {
           "id": "developer_settings_link",
           "type": "link",
           "label": "Developer settings",
-          "description": "Opens developer/advanced configuration settings for the kiosk",
+          "description": "Opens developer or advanced configuration settings",
           "bbox": [
-            952,
+            924,
             424,
-            1134,
+            1106,
             450
           ],
           "center": [
-            1026,
+            1015,
             437
           ],
-          "confidence": 0.92
+          "confidence": 0.91,
+          "testid": "go-developer-settings"
         }
       ],
       "transitions": {
-        "sign_in_valid_credentials": "product_selection",
-        "sign_in_invalid_credentials": "login",
-        "navigate_to_sign_up": "user_registration",
+        "sign_in_valid_credentials": "products",
+        "sign_in_invalid_credentials": "popup_login_failed",
+        "navigate_to_sign_up": "signup",
         "navigate_to_forgot_password": "login",
         "navigate_to_developer_settings": "developer_settings"
       },
       "screen_hash": "000003ff03ff03ff03ff03ff03ff030303ff0100000000000000000000000000",
-      "is_dynamic": false
+      "is_dynamic": false,
+      "dom_id": ""
     },
-    "product_selection": {
-      "screen_id": "product_selection",
-      "description": "Product selection screen where users can browse items, adjust quantities, and add products to their cart.",
+    "products": {
+      "screen_id": "products",
+      "description": "Product selection screen where users can browse products, adjust quantities, and add items to their cart.",
       "elements": [
         {
           "id": "home_button",
@@ -130,16 +135,17 @@
           "label": "Home",
           "description": "Navigates to the home screen",
           "bbox": [
-            929,
-            22,
+            905,
+            19,
             1059,
             67
           ],
           "center": [
-            995,
-            45
+            982,
+            43
           ],
-          "confidence": 0.95
+          "confidence": 0.95,
+          "testid": "nav-home"
         },
         {
           "id": "order_history_nav_button",
@@ -148,32 +154,34 @@
           "description": "Navigates to the order history screen",
           "bbox": [
             1059,
-            22,
-            1229,
+            19,
+            1258,
             67
           ],
           "center": [
-            1145,
-            45
+            1159,
+            43
           ],
-          "confidence": 0.95
+          "confidence": 0.95,
+          "testid": "nav-orders"
         },
         {
           "id": "sign_out_button",
           "type": "button",
           "label": "Sign Out",
-          "description": "Signs the current user out of the kiosk session",
+          "description": "Signs the user out of the kiosk session",
           "bbox": [
-            1229,
-            22,
-            1383,
-            67
+            1228,
+            25,
+            1364,
+            73
           ],
           "center": [
-            1306,
-            45
+            1296,
+            49
           ],
-          "confidence": 0.95
+          "confidence": 0.95,
+          "testid": "signout-button"
         },
         {
           "id": "products_nav_link",
@@ -181,33 +189,35 @@
           "label": "Products",
           "description": "Navigates to the products listing page",
           "bbox": [
-            593,
-            130,
-            1001,
-            166
+            451,
+            145,
+            859,
+            189
           ],
           "center": [
-            796,
-            148
+            655,
+            167
           ],
-          "confidence": 0.95
+          "confidence": 0.95,
+          "testid": "menu-products"
         },
         {
           "id": "categories_nav_link",
           "type": "link",
           "label": "Categories",
-          "description": "Navigates to the categories page",
+          "description": "Navigates to the product categories page",
           "bbox": [
-            593,
-            169,
-            1001,
-            199
+            451,
+            193,
+            859,
+            229
           ],
           "center": [
-            796,
-            184
+            655,
+            211
           ],
-          "confidence": 0.92
+          "confidence": 0.92,
+          "testid": "menu-categories"
         },
         {
           "id": "deals_nav_link",
@@ -215,16 +225,17 @@
           "label": "Deals",
           "description": "Navigates to the deals page",
           "bbox": [
-            593,
-            199,
-            1001,
-            232
+            451,
+            237,
+            859,
+            273
           ],
           "center": [
-            796,
-            216
+            655,
+            255
           ],
-          "confidence": 0.92
+          "confidence": 0.92,
+          "testid": "menu-deals"
         },
         {
           "id": "loyalty_nav_link",
@@ -232,16 +243,17 @@
           "label": "Loyalty",
           "description": "Navigates to the loyalty program page",
           "bbox": [
-            593,
-            232,
-            1001,
-            265
+            451,
+            281,
+            859,
+            317
           ],
           "center": [
-            796,
-            249
+            655,
+            299
           ],
-          "confidence": 0.92
+          "confidence": 0.92,
+          "testid": "menu-loyalty"
         },
         {
           "id": "receipts_nav_link",
@@ -249,16 +261,17 @@
           "label": "Receipts",
           "description": "Navigates to the receipts page",
           "bbox": [
-            593,
-            265,
-            1001,
-            298
+            451,
+            325,
+            859,
+            361
           ],
           "center": [
-            796,
-            282
+            655,
+            343
           ],
-          "confidence": 0.92
+          "confidence": 0.92,
+          "testid": "menu-receipts"
         },
         {
           "id": "support_nav_link",
@@ -266,16 +279,17 @@
           "label": "Support",
           "description": "Navigates to the support page",
           "bbox": [
-            593,
-            298,
-            1001,
-            331
+            451,
+            369,
+            859,
+            405
           ],
           "center": [
-            796,
-            315
+            655,
+            387
           ],
-          "confidence": 0.92
+          "confidence": 0.92,
+          "testid": "menu-support"
         },
         {
           "id": "store_info_nav_link",
@@ -283,16 +297,17 @@
           "label": "Store Info",
           "description": "Navigates to the store information page",
           "bbox": [
-            593,
-            331,
-            1001,
-            364
+            451,
+            413,
+            859,
+            449
           ],
           "center": [
-            796,
-            348
+            655,
+            431
           ],
-          "confidence": 0.92
+          "confidence": 0.92,
+          "testid": "menu-store-info"
         },
         {
           "id": "order_history_sidebar_button",
@@ -300,276 +315,2020 @@
           "label": "Order History",
           "description": "Opens the order history view from the sidebar",
           "bbox": [
-            1141,
-            139,
-            1383,
-            180
+            1087,
+            151,
+            1331,
+            199
           ],
           "center": [
-            1262,
-            160
+            1209,
+            175
           ],
-          "confidence": 0.93
+          "confidence": 0.95,
+          "testid": "order-history-button"
         },
         {
           "id": "cart_checkout_button",
           "type": "button",
           "label": "Cart / Checkout (0)",
-          "description": "Opens the cart and checkout screen, currently showing 0 items",
+          "description": "Opens the cart and checkout screen",
           "bbox": [
-            1141,
-            184,
-            1383,
-            232
+            1106,
+            210,
+            1350,
+            256
           ],
           "center": [
-            1262,
-            208
+            1228,
+            233
           ],
-          "confidence": 0.95
+          "confidence": 0.95,
+          "testid": "cart-checkout-button"
         },
         {
-          "id": "nexora_decrement_button",
-          "type": "button",
+          "id": "nexora_phone_decrement",
+          "type": "stepper",
           "label": "-",
           "description": "Decreases the quantity of Nexora Phone X2",
           "bbox": [
             1156,
-            409,
-            1215,
-            457
+            464,
+            1209,
+            493
           ],
           "center": [
-            1185,
-            433
+            1183,
+            478
           ],
-          "confidence": 0.95
+          "confidence": 0.93
         },
         {
-          "id": "nexora_increment_button",
-          "type": "button",
+          "id": "nexora_phone_increment",
+          "type": "stepper",
           "label": "+",
           "description": "Increases the quantity of Nexora Phone X2",
           "bbox": [
-            1271,
-            409,
-            1330,
-            457
+            1257,
+            464,
+            1310,
+            493
           ],
           "center": [
-            1300,
-            433
+            1283,
+            478
           ],
-          "confidence": 0.95
+          "confidence": 0.93
         },
         {
-          "id": "nexora_add_to_cart_button",
+          "id": "nexora_phone_add_to_cart",
           "type": "button",
           "label": "Add to Cart",
           "description": "Adds the selected quantity of Nexora Phone X2 to the cart",
           "bbox": [
-            1026,
-            463,
-            1365,
-            508
+            968,
+            528,
+            1302,
+            562
           ],
           "center": [
-            1195,
-            486
+            1135,
+            545
           ],
-          "confidence": 0.95
+          "confidence": 0.95,
+          "testid": "add-to-cart-orionbook-pro-14"
         },
         {
-          "id": "orionbook_decrement_button",
-          "type": "button",
+          "id": "orionbook_pro_decrement",
+          "type": "stepper",
           "label": "-",
           "description": "Decreases the quantity of OrionBook Pro 14",
           "bbox": [
-            1379,
-            409,
+            1363,
+            464,
             1400,
-            457
+            493
           ],
           "center": [
-            1167,
-            483
-          ],
-          "confidence": 0.92
-        },
-        {
-          "id": "orionbook_decrement_button",
-          "type": "button",
-          "label": "-",
-          "description": "Decreases the quantity of OrionBook Pro 14",
-          "bbox": [
-            1150,
-            409,
-            1211,
-            457
-          ],
-          "center": [
-            1180,
-            433
+            1381,
+            478
           ],
           "confidence": 0.85
         },
         {
-          "id": "orionbook_increment_button",
-          "type": "button",
+          "id": "orionbook_pro_increment",
+          "type": "stepper",
           "label": "+",
           "description": "Increases the quantity of OrionBook Pro 14",
           "bbox": [
-            1254,
-            409,
-            1313,
-            457
+            1363,
+            464,
+            1398,
+            493
           ],
           "center": [
-            1283,
-            433
+            1293,
+            478
           ],
-          "confidence": 0.85
+          "confidence": 0.88
         },
         {
-          "id": "orionbook_add_to_cart_button",
+          "id": "orionbook_pro_add_to_cart",
           "type": "button",
           "label": "Add to Cart",
           "description": "Adds the selected quantity of OrionBook Pro 14 to the cart",
           "bbox": [
-            1026,
-            463,
-            1365,
-            508
+            1027,
+            506,
+            1360,
+            540
           ],
           "center": [
-            1167,
-            543
+            1380,
+            522
           ],
-          "confidence": 0.85
+          "confidence": 0.88,
+          "testid": "add-to-cart-vistaview-55-tv"
         },
         {
-          "id": "audiopulse_decrement_button",
-          "type": "button",
+          "id": "audiopulse_pro_decrement",
+          "type": "stepper",
           "label": "-",
           "description": "Decreases the quantity of AudioPulse Pro Buds",
           "bbox": [
             1156,
-            673,
-            1215,
-            720
+            727,
+            1209,
+            756
           ],
           "center": [
-            1185,
-            696
+            1183,
+            741
           ],
-          "confidence": 0.95
+          "confidence": 0.93
         },
         {
-          "id": "audiopulse_increment_button",
-          "type": "button",
+          "id": "audiopulse_pro_increment",
+          "type": "stepper",
           "label": "+",
           "description": "Increases the quantity of AudioPulse Pro Buds",
           "bbox": [
-            1271,
-            673,
-            1330,
-            720
+            1257,
+            727,
+            1310,
+            756
           ],
           "center": [
-            1300,
-            696
+            1283,
+            741
           ],
-          "confidence": 0.95
+          "confidence": 0.93
         },
         {
-          "id": "audiopulse_add_to_cart_button",
+          "id": "audiopulse_pro_add_to_cart",
           "type": "button",
           "label": "Add to Cart",
           "description": "Adds the selected quantity of AudioPulse Pro Buds to the cart",
           "bbox": [
-            1026,
-            724,
-            1365,
-            772
+            960,
+            826,
+            1294,
+            860
           ],
           "center": [
-            1195,
-            748
+            1127,
+            843
           ],
-          "confidence": 0.95
+          "confidence": 0.95,
+          "testid": "add-to-cart-tabnova-air-11"
         },
         {
-          "id": "tabnova_decrement_button",
-          "type": "button",
+          "id": "tabnova_air_decrement",
+          "type": "stepper",
           "label": "-",
           "description": "Decreases the quantity of TabNova Air 11",
           "bbox": [
-            1365,
-            673,
+            1363,
+            727,
             1400,
-            720
+            756
           ],
           "center": [
-            1383,
-            696
+            1381,
+            741
           ],
           "confidence": 0.85
         },
         {
-          "id": "tabnova_increment_button",
-          "type": "button",
+          "id": "tabnova_air_increment",
+          "type": "stepper",
           "label": "+",
           "description": "Increases the quantity of TabNova Air 11",
           "bbox": [
-            1215,
-            673,
-            1274,
-            720
+            1363,
+            727,
+            1398,
+            756
           ],
           "center": [
-            1244,
-            696
+            1254,
+            741
           ],
-          "confidence": 0.85
+          "confidence": 0.82
         },
         {
-          "id": "tabnova_add_to_cart_button",
+          "id": "tabnova_air_add_to_cart",
           "type": "button",
           "label": "Add to Cart",
           "description": "Adds the selected quantity of TabNova Air 11 to the cart",
           "bbox": [
-            1026,
-            724,
-            1365,
-            772
+            1213,
+            826,
+            1545,
+            860
           ],
           "center": [
-            1370,
-            748
+            1379,
+            843
+          ],
+          "confidence": 0.88,
+          "testid": "add-to-cart-fitpulse-watch-s"
+        }
+      ],
+      "transitions": {
+        "nav_order_history": "products",
+        "nav_categories": "categories",
+        "nav_deals": "deals",
+        "nav_loyalty": "loyalty",
+        "nav_receipts": "receipts",
+        "nav_support": "support",
+        "nav_store_info": "store_info",
+        "nav_order_history_sidebar": "categories",
+        "nav_cart_checkout": "products",
+        "add_nexora_phone_to_cart": "products",
+        "add_orionbook_pro_to_cart": "products"
+      },
+      "screen_hash": "0003007f01ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff",
+      "is_dynamic": false,
+      "dom_id": "products"
+    },
+    "categories": {
+      "screen_id": "categories",
+      "description": "Product categories browsing screen showing six category tiles that filter POS products for robot navigation and screen recognition tests.",
+      "elements": [
+        {
+          "id": "home_button",
+          "type": "button",
+          "label": "Home",
+          "description": "Navigates to the home screen",
+          "bbox": [
+            929,
+            25,
+            1069,
+            64
+          ],
+          "center": [
+            999,
+            45
+          ],
+          "confidence": 0.95,
+          "testid": "nav-home"
+        },
+        {
+          "id": "order_history_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Navigates to the order history screen",
+          "bbox": [
+            1075,
+            25,
+            1257,
+            64
+          ],
+          "center": [
+            1166,
+            45
+          ],
+          "confidence": 0.95,
+          "testid": "nav-orders"
+        },
+        {
+          "id": "sign_out_button",
+          "type": "button",
+          "label": "Sign Out",
+          "description": "Signs the current user out of the kiosk session",
+          "bbox": [
+            1262,
+            25,
+            1388,
+            64
+          ],
+          "center": [
+            1325,
+            45
+          ],
+          "confidence": 0.95,
+          "testid": "signout-button"
+        },
+        {
+          "id": "products_nav_link",
+          "type": "link",
+          "label": "Products",
+          "description": "Navigates to the products listing page",
+          "bbox": [
+            585,
+            133,
+            742,
+            163
+          ],
+          "center": [
+            663,
+            148
+          ],
+          "confidence": 0.92,
+          "testid": "menu-products"
+        },
+        {
+          "id": "categories_nav_link",
+          "type": "link",
+          "label": "Categories",
+          "description": "Navigates to the product categories page (currently active)",
+          "bbox": [
+            585,
+            171,
+            742,
+            205
+          ],
+          "center": [
+            663,
+            188
+          ],
+          "confidence": 0.95,
+          "testid": "menu-categories"
+        },
+        {
+          "id": "deals_nav_link",
+          "type": "link",
+          "label": "Deals",
+          "description": "Navigates to the deals page",
+          "bbox": [
+            577,
+            240,
+            733,
+            270
+          ],
+          "center": [
+            655,
+            255
+          ],
+          "confidence": 0.92,
+          "testid": "menu-deals"
+        },
+        {
+          "id": "loyalty_nav_link",
+          "type": "link",
+          "label": "Loyalty",
+          "description": "Navigates to the loyalty program page",
+          "bbox": [
+            577,
+            284,
+            733,
+            314
+          ],
+          "center": [
+            655,
+            299
+          ],
+          "confidence": 0.92,
+          "testid": "menu-loyalty"
+        },
+        {
+          "id": "receipts_nav_link",
+          "type": "link",
+          "label": "Receipts",
+          "description": "Navigates to the receipts page",
+          "bbox": [
+            577,
+            329,
+            733,
+            357
+          ],
+          "center": [
+            655,
+            343
+          ],
+          "confidence": 0.92,
+          "testid": "menu-receipts"
+        },
+        {
+          "id": "support_nav_link",
+          "type": "link",
+          "label": "Support",
+          "description": "Navigates to the support page",
+          "bbox": [
+            577,
+            373,
+            733,
+            401
+          ],
+          "center": [
+            655,
+            387
+          ],
+          "confidence": 0.92,
+          "testid": "menu-support"
+        },
+        {
+          "id": "store_info_nav_link",
+          "type": "link",
+          "label": "Store Info",
+          "description": "Navigates to the store information page",
+          "bbox": [
+            577,
+            417,
+            733,
+            445
+          ],
+          "center": [
+            655,
+            431
+          ],
+          "confidence": 0.92,
+          "testid": "menu-store-info"
+        },
+        {
+          "id": "view_products_button",
+          "type": "button",
+          "label": "View Products",
+          "description": "Navigates to the full products listing page",
+          "bbox": [
+            1229,
+            142,
+            1388,
+            184
+          ],
+          "center": [
+            1309,
+            162
+          ],
+          "confidence": 0.95,
+          "testid": "categories-products"
+        },
+        {
+          "id": "smartphone_category_card",
+          "type": "button",
+          "label": "SMARTPHONE",
+          "description": "Filters and shows products in the Smartphone category",
+          "bbox": [
+            742,
+            205,
+            1085,
+            351
+          ],
+          "center": [
+            912,
+            278
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "laptop_category_card",
+          "type": "button",
+          "label": "LAPTOP",
+          "description": "Filters and shows products in the Laptop category",
+          "bbox": [
+            1090,
+            205,
+            1388,
+            351
+          ],
+          "center": [
+            1240,
+            278
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "television_category_card",
+          "type": "button",
+          "label": "TELEVISION",
+          "description": "Filters and shows products in the Television category",
+          "bbox": [
+            742,
+            353,
+            1085,
+            488
+          ],
+          "center": [
+            912,
+            421
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "audio_category_card",
+          "type": "button",
+          "label": "AUDIO",
+          "description": "Filters and shows products in the Audio category",
+          "bbox": [
+            1090,
+            353,
+            1388,
+            488
+          ],
+          "center": [
+            1240,
+            421
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "tablet_category_card",
+          "type": "button",
+          "label": "TABLET",
+          "description": "Filters and shows products in the Tablet category",
+          "bbox": [
+            742,
+            492,
+            1085,
+            627
+          ],
+          "center": [
+            912,
+            559
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "wearable_category_card",
+          "type": "button",
+          "label": "WEARABLE",
+          "description": "Filters and shows products in the Wearable category",
+          "bbox": [
+            1090,
+            492,
+            1388,
+            627
+          ],
+          "center": [
+            1240,
+            559
+          ],
+          "confidence": 0.95
+        }
+      ],
+      "transitions": {
+        "nav_order_history": "categories",
+        "nav_deals": "deals",
+        "nav_loyalty": "loyalty",
+        "nav_receipts": "receipts",
+        "nav_support": "support",
+        "nav_store_info": "store_info",
+        "filter_smartphone_category": "categories",
+        "filter_laptop_category": "categories",
+        "filter_television_category": "categories",
+        "filter_audio_category": "categories"
+      },
+      "screen_hash": "0003001300ff01ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff",
+      "is_dynamic": false,
+      "dom_id": "categories"
+    },
+    "deals": {
+      "screen_id": "deals",
+      "description": "Today's Deals page showing promotional product offers with navigation sidebar and top bar controls.",
+      "elements": [
+        {
+          "id": "home_button",
+          "type": "button",
+          "label": "Home",
+          "description": "Navigates to the home screen",
+          "bbox": [
+            919,
+            25,
+            1059,
+            67
+          ],
+          "center": [
+            989,
+            46
+          ],
+          "confidence": 0.95,
+          "testid": "nav-home"
+        },
+        {
+          "id": "order_history_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Navigates to the order history screen",
+          "bbox": [
+            1066,
+            25,
+            1243,
+            67
+          ],
+          "center": [
+            1155,
+            46
+          ],
+          "confidence": 0.95,
+          "testid": "nav-orders"
+        },
+        {
+          "id": "sign_out_button",
+          "type": "button",
+          "label": "Sign Out",
+          "description": "Signs the current user out of the kiosk session",
+          "bbox": [
+            1250,
+            25,
+            1388,
+            67
+          ],
+          "center": [
+            1318,
+            46
+          ],
+          "confidence": 0.95,
+          "testid": "signout-button"
+        },
+        {
+          "id": "products_link",
+          "type": "link",
+          "label": "Products",
+          "description": "Navigates to the Products section",
+          "bbox": [
+            449,
+            151,
+            861,
+            183
+          ],
+          "center": [
+            655,
+            167
+          ],
+          "confidence": 0.93,
+          "testid": "menu-products"
+        },
+        {
+          "id": "categories_link",
+          "type": "link",
+          "label": "Categories",
+          "description": "Navigates to the Categories section",
+          "bbox": [
+            449,
+            194,
+            861,
+            228
+          ],
+          "center": [
+            655,
+            211
+          ],
+          "confidence": 0.93,
+          "testid": "menu-categories"
+        },
+        {
+          "id": "deals_link",
+          "type": "link",
+          "label": "Deals",
+          "description": "Navigates to the Deals section (currently active)",
+          "bbox": [
+            449,
+            238,
+            861,
+            272
+          ],
+          "center": [
+            655,
+            255
+          ],
+          "confidence": 0.95,
+          "testid": "menu-deals"
+        },
+        {
+          "id": "loyalty_link",
+          "type": "link",
+          "label": "Loyalty",
+          "description": "Navigates to the Loyalty program section",
+          "bbox": [
+            449,
+            282,
+            861,
+            316
+          ],
+          "center": [
+            655,
+            299
+          ],
+          "confidence": 0.93,
+          "testid": "menu-loyalty"
+        },
+        {
+          "id": "receipts_link",
+          "type": "link",
+          "label": "Receipts",
+          "description": "Navigates to the Receipts section",
+          "bbox": [
+            449,
+            326,
+            861,
+            360
+          ],
+          "center": [
+            655,
+            343
+          ],
+          "confidence": 0.93,
+          "testid": "menu-receipts"
+        },
+        {
+          "id": "support_link",
+          "type": "link",
+          "label": "Support",
+          "description": "Navigates to the Support section",
+          "bbox": [
+            449,
+            370,
+            861,
+            404
+          ],
+          "center": [
+            655,
+            387
+          ],
+          "confidence": 0.93,
+          "testid": "menu-support"
+        },
+        {
+          "id": "store_info_link",
+          "type": "link",
+          "label": "Store Info",
+          "description": "Navigates to the Store Info section",
+          "bbox": [
+            449,
+            414,
+            861,
+            448
+          ],
+          "center": [
+            655,
+            431
+          ],
+          "confidence": 0.93,
+          "testid": "menu-store-info"
+        },
+        {
+          "id": "shop_deals_button",
+          "type": "button",
+          "label": "Shop Deals",
+          "description": "Opens the full deals/offers shopping page",
+          "bbox": [
+            1234,
+            142,
+            1388,
+            187
+          ],
+          "center": [
+            1311,
+            164
+          ],
+          "confidence": 0.95,
+          "testid": "deals-products"
+        },
+        {
+          "id": "nexora_phone_x2_card",
+          "type": "button",
+          "label": "Nexora Phone X2",
+          "description": "Opens the product detail page for the Nexora Phone X2 deal ($699.00)",
+          "bbox": [
+            742,
+            201,
+            996,
+            373
+          ],
+          "center": [
+            869,
+            288
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "orionbook_pro_14_card",
+          "type": "button",
+          "label": "OrionBook Pro 14",
+          "description": "Opens the product detail page for the OrionBook Pro 14 deal ($1,199.00)",
+          "bbox": [
+            1001,
+            201,
+            1255,
+            373
+          ],
+          "center": [
+            1128,
+            288
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "vistaview_55_smart_tv_card",
+          "type": "button",
+          "label": "VistaView 55 Smart TV",
+          "description": "Opens the product detail page for the VistaView 55 Smart TV deal ($899.00)",
+          "bbox": [
+            1260,
+            201,
+            1388,
+            373
+          ],
+          "center": [
+            1324,
+            288
+          ],
+          "confidence": 0.91
+        }
+      ],
+      "transitions": {
+        "nav_loyalty": "loyalty",
+        "nav_receipts": "receipts",
+        "nav_support": "support",
+        "nav_store_info": "store_info",
+        "open_nexora_phone_x2": "deals",
+        "open_orionbook_pro_14": "deals",
+        "open_vistaview_55_smart_tv": "deals"
+      },
+      "screen_hash": "0003001300ff00ff01ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff",
+      "is_dynamic": false,
+      "dom_id": "deals"
+    },
+    "loyalty": {
+      "screen_id": "loyalty",
+      "description": "Loyalty Rewards page displaying member information including tier, points balance, and reward value for the logged-in user.",
+      "elements": [
+        {
+          "id": "home_button",
+          "type": "button",
+          "label": "Home",
+          "description": "Navigates to the home screen of the kiosk",
+          "bbox": [
+            929,
+            25,
+            1069,
+            64
+          ],
+          "center": [
+            999,
+            45
+          ],
+          "confidence": 0.95,
+          "testid": "nav-home"
+        },
+        {
+          "id": "order_history_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Navigates to the order history screen",
+          "bbox": [
+            1075,
+            25,
+            1254,
+            64
+          ],
+          "center": [
+            1164,
+            45
+          ],
+          "confidence": 0.95,
+          "testid": "nav-orders"
+        },
+        {
+          "id": "sign_out_button",
+          "type": "button",
+          "label": "Sign Out",
+          "description": "Signs the current user out of the kiosk session",
+          "bbox": [
+            1260,
+            25,
+            1388,
+            64
+          ],
+          "center": [
+            1324,
+            45
+          ],
+          "confidence": 0.95,
+          "testid": "signout-button"
+        },
+        {
+          "id": "kiosk_id_label",
+          "type": "text",
+          "label": "KIOSK-ID-2",
+          "description": "Displays the current kiosk identifier",
+          "bbox": [
+            812,
+            86,
+            988,
+            117
+          ],
+          "center": [
+            900,
+            101
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "products_nav",
+          "type": "link",
+          "label": "Products",
+          "description": "Navigates to the Products section of the kiosk",
+          "bbox": [
+            567,
+            152,
+            743,
+            182
+          ],
+          "center": [
+            655,
+            167
+          ],
+          "confidence": 0.92,
+          "testid": "menu-products"
+        },
+        {
+          "id": "categories_nav",
+          "type": "link",
+          "label": "Categories",
+          "description": "Navigates to the Categories section of the kiosk",
+          "bbox": [
+            567,
+            196,
+            743,
+            226
+          ],
+          "center": [
+            655,
+            211
+          ],
+          "confidence": 0.92,
+          "testid": "menu-categories"
+        },
+        {
+          "id": "deals_nav",
+          "type": "link",
+          "label": "Deals",
+          "description": "Navigates to the Deals section of the kiosk",
+          "bbox": [
+            567,
+            239,
+            743,
+            271
+          ],
+          "center": [
+            655,
+            255
+          ],
+          "confidence": 0.92,
+          "testid": "menu-deals"
+        },
+        {
+          "id": "loyalty_nav",
+          "type": "link",
+          "label": "Loyalty",
+          "description": "Navigates to the Loyalty Rewards page (currently active)",
+          "bbox": [
+            567,
+            282,
+            743,
+            316
+          ],
+          "center": [
+            655,
+            299
+          ],
+          "confidence": 0.95,
+          "testid": "menu-loyalty"
+        },
+        {
+          "id": "receipts_nav",
+          "type": "link",
+          "label": "Receipts",
+          "description": "Navigates to the Receipts section of the kiosk",
+          "bbox": [
+            567,
+            328,
+            743,
+            358
+          ],
+          "center": [
+            655,
+            343
+          ],
+          "confidence": 0.92,
+          "testid": "menu-receipts"
+        },
+        {
+          "id": "support_nav",
+          "type": "link",
+          "label": "Support",
+          "description": "Navigates to the Support section of the kiosk",
+          "bbox": [
+            567,
+            372,
+            743,
+            402
+          ],
+          "center": [
+            655,
+            387
+          ],
+          "confidence": 0.92,
+          "testid": "menu-support"
+        },
+        {
+          "id": "store_info_nav",
+          "type": "link",
+          "label": "Store Info",
+          "description": "Navigates to the Store Info section of the kiosk",
+          "bbox": [
+            567,
+            416,
+            743,
+            446
+          ],
+          "center": [
+            655,
+            431
+          ],
+          "confidence": 0.92,
+          "testid": "menu-store-info"
+        },
+        {
+          "id": "member_card",
+          "type": "text",
+          "label": "tester@kiosk.local",
+          "description": "Displays the logged-in member's email address",
+          "bbox": [
+            1017,
+            199,
+            1386,
+            277
+          ],
+          "center": [
+            1201,
+            238
+          ],
+          "confidence": 0.93
+        },
+        {
+          "id": "tier_card",
+          "type": "text",
+          "label": "Gold Lab",
+          "description": "Displays the member's current loyalty tier",
+          "bbox": [
+            1390,
+            199,
+            1386,
+            277
+          ],
+          "center": [
+            1388,
+            238
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "points_card",
+          "type": "text",
+          "label": "12,480",
+          "description": "Displays the member's current loyalty points balance",
+          "bbox": [
+            1017,
+            280,
+            1386,
+            358
+          ],
+          "center": [
+            1201,
+            319
+          ],
+          "confidence": 0.93
+        },
+        {
+          "id": "reward_card",
+          "type": "text",
+          "label": "$25.00",
+          "description": "Displays the current reward value available to the member",
+          "bbox": [
+            1390,
+            280,
+            1386,
+            358
+          ],
+          "center": [
+            1388,
+            319
+          ],
+          "confidence": 0.9
+        }
+      ],
+      "transitions": {
+        "nav_receipts": "receipts",
+        "nav_support": "support",
+        "nav_store_info": "store_info"
+      },
+      "screen_hash": "0003001300ff00ff00ff01ff00ff00ff00ff00ff00ff00ff00ff00ff00ff007f",
+      "is_dynamic": false,
+      "dom_id": "loyalty"
+    },
+    "receipts": {
+      "screen_id": "receipts",
+      "description": "Receipt Center screen showing no available receipts, with navigation options to view order history or browse other sections.",
+      "elements": [
+        {
+          "id": "home_button",
+          "type": "button",
+          "label": "Home",
+          "description": "Navigates to the home screen of the kiosk",
+          "bbox": [
+            929,
+            22,
+            1069,
+            67
+          ],
+          "center": [
+            999,
+            45
+          ],
+          "confidence": 0.95,
+          "testid": "nav-home"
+        },
+        {
+          "id": "order_history_nav_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Navigates to the order history screen from the top navigation bar",
+          "bbox": [
+            1075,
+            22,
+            1226,
+            67
+          ],
+          "center": [
+            1150,
+            45
+          ],
+          "confidence": 0.95,
+          "testid": "nav-orders"
+        },
+        {
+          "id": "sign_out_button",
+          "type": "button",
+          "label": "Sign Out",
+          "description": "Signs the current user out of the kiosk session",
+          "bbox": [
+            1232,
+            22,
+            1372,
+            67
+          ],
+          "center": [
+            1302,
+            45
+          ],
+          "confidence": 0.95,
+          "testid": "signout-button"
+        },
+        {
+          "id": "kiosk_id_label",
+          "type": "button",
+          "label": "KIOSK-ID-2",
+          "description": "Displays or selects the current kiosk identifier",
+          "bbox": [
+            812,
+            85,
+            994,
+            117
+          ],
+          "center": [
+            903,
+            101
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "products_nav_link",
+          "type": "link",
+          "label": "Products",
+          "description": "Navigates to the products listing page",
+          "bbox": [
+            564,
+            151,
+            746,
+            183
+          ],
+          "center": [
+            655,
+            167
+          ],
+          "confidence": 0.93,
+          "testid": "menu-products"
+        },
+        {
+          "id": "categories_nav_link",
+          "type": "link",
+          "label": "Categories",
+          "description": "Navigates to the categories page",
+          "bbox": [
+            564,
+            195,
+            746,
+            227
+          ],
+          "center": [
+            655,
+            211
+          ],
+          "confidence": 0.93,
+          "testid": "menu-categories"
+        },
+        {
+          "id": "deals_nav_link",
+          "type": "link",
+          "label": "Deals",
+          "description": "Navigates to the deals page",
+          "bbox": [
+            564,
+            239,
+            746,
+            271
+          ],
+          "center": [
+            655,
+            255
+          ],
+          "confidence": 0.93,
+          "testid": "menu-deals"
+        },
+        {
+          "id": "loyalty_nav_link",
+          "type": "link",
+          "label": "Loyalty",
+          "description": "Navigates to the loyalty program page",
+          "bbox": [
+            564,
+            283,
+            746,
+            315
+          ],
+          "center": [
+            655,
+            299
+          ],
+          "confidence": 0.93,
+          "testid": "menu-loyalty"
+        },
+        {
+          "id": "receipts_nav_link",
+          "type": "link",
+          "label": "Receipts",
+          "description": "Currently active page; navigates to the receipts/receipt center page",
+          "bbox": [
+            564,
+            321,
+            746,
+            365
+          ],
+          "center": [
+            655,
+            343
+          ],
+          "confidence": 0.95,
+          "testid": "menu-receipts"
+        },
+        {
+          "id": "support_nav_link",
+          "type": "link",
+          "label": "Support",
+          "description": "Navigates to the support page",
+          "bbox": [
+            564,
+            371,
+            746,
+            403
+          ],
+          "center": [
+            655,
+            387
+          ],
+          "confidence": 0.93,
+          "testid": "menu-support"
+        },
+        {
+          "id": "store_info_nav_link",
+          "type": "link",
+          "label": "Store Info",
+          "description": "Navigates to the store information page",
+          "bbox": [
+            564,
+            415,
+            746,
+            447
+          ],
+          "center": [
+            655,
+            431
+          ],
+          "confidence": 0.93,
+          "testid": "menu-store-info"
+        },
+        {
+          "id": "order_history_content_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Navigates to the order history page from within the Receipt Center content area",
+          "bbox": [
+            1229,
+            142,
+            1383,
+            184
+          ],
+          "center": [
+            1306,
+            163
+          ],
+          "confidence": 0.95,
+          "testid": "receipts-history"
+        },
+        {
+          "id": "view_history_button",
+          "type": "button",
+          "label": "View History",
+          "description": "Navigates to order history to view past purchases since no receipt is currently available",
+          "bbox": [
+            956,
+            346,
+            1152,
+            400
+          ],
+          "center": [
+            1054,
+            373
+          ],
+          "confidence": 0.95
+        }
+      ],
+      "transitions": {
+        "nav_support": "support",
+        "nav_store_info": "store_info",
+        "nav_order_history_content": "categories",
+        "nav_view_history": "categories"
+      },
+      "screen_hash": "0003001300ff00ff00ff00ff01ff00ff00ff00ff00ff00ff00ff00ff00ff007f",
+      "is_dynamic": false,
+      "dom_id": "receipts"
+    },
+    "support": {
+      "screen_id": "support",
+      "description": "Support and Diagnostics page providing access to contact support, reader check, and network status tools, along with sidebar navigation.",
+      "elements": [
+        {
+          "id": "home_button",
+          "type": "button",
+          "label": "Home",
+          "description": "Navigates to the home screen",
+          "bbox": [
+            929,
+            25,
+            1066,
+            67
+          ],
+          "center": [
+            998,
+            46
+          ],
+          "confidence": 0.95,
+          "testid": "nav-home"
+        },
+        {
+          "id": "order_history_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Navigates to the order history screen",
+          "bbox": [
+            1076,
+            25,
+            1241,
+            67
+          ],
+          "center": [
+            1159,
+            46
+          ],
+          "confidence": 0.95,
+          "testid": "nav-orders"
+        },
+        {
+          "id": "sign_out_button",
+          "type": "button",
+          "label": "Sign Out",
+          "description": "Signs the user out of the kiosk session",
+          "bbox": [
+            1250,
+            25,
+            1377,
+            67
+          ],
+          "center": [
+            1313,
+            46
+          ],
+          "confidence": 0.95,
+          "testid": "signout-button"
+        },
+        {
+          "id": "kiosk_id_label",
+          "type": "button",
+          "label": "KIOSK-ID-2",
+          "description": "Displays the current kiosk identifier, may be tappable for kiosk settings",
+          "bbox": [
+            809,
+            85,
+            1002,
+            117
+          ],
+          "center": [
+            905,
+            100
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "products_nav",
+          "type": "link",
+          "label": "Products",
+          "description": "Navigates to the Products section",
+          "bbox": [
+            559,
+            152,
+            751,
+            182
+          ],
+          "center": [
+            655,
+            167
+          ],
+          "confidence": 0.95,
+          "testid": "menu-products"
+        },
+        {
+          "id": "categories_nav",
+          "type": "link",
+          "label": "Categories",
+          "description": "Navigates to the Categories section",
+          "bbox": [
+            559,
+            196,
+            751,
+            226
+          ],
+          "center": [
+            655,
+            211
+          ],
+          "confidence": 0.95,
+          "testid": "menu-categories"
+        },
+        {
+          "id": "deals_nav",
+          "type": "link",
+          "label": "Deals",
+          "description": "Navigates to the Deals section",
+          "bbox": [
+            559,
+            240,
+            751,
+            270
+          ],
+          "center": [
+            655,
+            255
+          ],
+          "confidence": 0.95,
+          "testid": "menu-deals"
+        },
+        {
+          "id": "loyalty_nav",
+          "type": "link",
+          "label": "Loyalty",
+          "description": "Navigates to the Loyalty section",
+          "bbox": [
+            559,
+            284,
+            751,
+            314
+          ],
+          "center": [
+            655,
+            299
+          ],
+          "confidence": 0.95,
+          "testid": "menu-loyalty"
+        },
+        {
+          "id": "receipts_nav",
+          "type": "link",
+          "label": "Receipts",
+          "description": "Navigates to the Receipts section",
+          "bbox": [
+            559,
+            328,
+            751,
+            358
+          ],
+          "center": [
+            655,
+            343
+          ],
+          "confidence": 0.95,
+          "testid": "menu-receipts"
+        },
+        {
+          "id": "support_nav",
+          "type": "link",
+          "label": "Support",
+          "description": "Currently active \u2014 shows the Support and Diagnostics page",
+          "bbox": [
+            559,
+            365,
+            751,
+            409
+          ],
+          "center": [
+            655,
+            387
+          ],
+          "confidence": 0.95,
+          "testid": "menu-support"
+        },
+        {
+          "id": "store_info_nav",
+          "type": "link",
+          "label": "Store Info",
+          "description": "Navigates to the Store Info section",
+          "bbox": [
+            559,
+            415,
+            751,
+            447
+          ],
+          "center": [
+            655,
+            431
+          ],
+          "confidence": 0.95,
+          "testid": "menu-store-info"
+        },
+        {
+          "id": "contact_support_card",
+          "type": "button",
+          "label": "Contact Support",
+          "description": "Opens assisted checkout support for the current kiosk session",
+          "bbox": [
+            1015,
+            196,
+            1257,
+            331
+          ],
+          "center": [
+            1135,
+            263
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "reader_check_card",
+          "type": "button",
+          "label": "Reader Check",
+          "description": "Verifies card-reader connectivity before payment",
+          "bbox": [
+            1264,
+            196,
+            1380,
+            331
+          ],
+          "center": [
+            1321,
+            263
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "network_status_card",
+          "type": "button",
+          "label": "Network Status",
+          "description": "Confirms that the transaction sync path is available",
+          "bbox": [
+            1380,
+            196,
+            1400,
+            331
+          ],
+          "center": [
+            1282,
+            263
+          ],
+          "confidence": 0.92
+        }
+      ],
+      "transitions": {
+        "nav_kiosk_id_settings": "support",
+        "nav_store_info": "store_info",
+        "open_reader_check": "support",
+        "open_network_status": "support"
+      },
+      "screen_hash": "0003001300ff00ff00ff00ff01ff00ff00ff00ff00ff00ff00ff00ff00ff007f",
+      "is_dynamic": false,
+      "dom_id": "support"
+    },
+    "store_info": {
+      "screen_id": "store_info",
+      "description": "Store and Kiosk Information setup screen showing kiosk configuration details including Kiosk ID, Pair Kiosk, Reader status, and Sync mode.",
+      "elements": [
+        {
+          "id": "home_button",
+          "type": "button",
+          "label": "Home",
+          "description": "Navigates to the home screen of the kiosk POS",
+          "bbox": [
+            925,
+            23,
+            1066,
+            64
+          ],
+          "center": [
+            995,
+            44
+          ],
+          "confidence": 0.95,
+          "testid": "nav-home"
+        },
+        {
+          "id": "order_history_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Navigates to the order history screen",
+          "bbox": [
+            1072,
+            23,
+            1236,
+            64
+          ],
+          "center": [
+            1153,
+            44
+          ],
+          "confidence": 0.95,
+          "testid": "nav-orders"
+        },
+        {
+          "id": "sign_out_button",
+          "type": "button",
+          "label": "Sign Out",
+          "description": "Signs the user out of the kiosk POS system",
+          "bbox": [
+            1241,
+            23,
+            1377,
+            64
+          ],
+          "center": [
+            1309,
+            44
+          ],
+          "confidence": 0.95,
+          "testid": "signout-button"
+        },
+        {
+          "id": "kiosk_id_tab",
+          "type": "button",
+          "label": "KIOSK-ID-2",
+          "description": "Displays or selects the current kiosk identifier tab",
+          "bbox": [
+            593,
+            79,
+            733,
+            117
+          ],
+          "center": [
+            663,
+            98
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "products_link",
+          "type": "link",
+          "label": "Products",
+          "description": "Navigates to the Products management section",
+          "bbox": [
+            593,
+            133,
+            733,
+            165
+          ],
+          "center": [
+            663,
+            149
+          ],
+          "confidence": 0.92,
+          "testid": "menu-products"
+        },
+        {
+          "id": "categories_link",
+          "type": "link",
+          "label": "Categories",
+          "description": "Navigates to the Categories management section",
+          "bbox": [
+            593,
+            169,
+            733,
+            201
+          ],
+          "center": [
+            663,
+            185
+          ],
+          "confidence": 0.92,
+          "testid": "menu-categories"
+        },
+        {
+          "id": "deals_link",
+          "type": "link",
+          "label": "Deals",
+          "description": "Navigates to the Deals management section",
+          "bbox": [
+            585,
+            239,
+            725,
+            271
+          ],
+          "center": [
+            655,
+            255
+          ],
+          "confidence": 0.92,
+          "testid": "menu-deals"
+        },
+        {
+          "id": "loyalty_link",
+          "type": "link",
+          "label": "Loyalty",
+          "description": "Navigates to the Loyalty program management section",
+          "bbox": [
+            585,
+            283,
+            725,
+            315
+          ],
+          "center": [
+            655,
+            299
+          ],
+          "confidence": 0.92,
+          "testid": "menu-loyalty"
+        },
+        {
+          "id": "receipts_link",
+          "type": "link",
+          "label": "Receipts",
+          "description": "Navigates to the Receipts management section",
+          "bbox": [
+            585,
+            327,
+            725,
+            359
+          ],
+          "center": [
+            655,
+            343
+          ],
+          "confidence": 0.92,
+          "testid": "menu-receipts"
+        },
+        {
+          "id": "support_link",
+          "type": "link",
+          "label": "Support",
+          "description": "Navigates to the Support section",
+          "bbox": [
+            585,
+            371,
+            725,
+            403
+          ],
+          "center": [
+            655,
+            387
+          ],
+          "confidence": 0.92,
+          "testid": "menu-support"
+        },
+        {
+          "id": "store_info_link",
+          "type": "link",
+          "label": "Store Info",
+          "description": "Currently active section showing Store and Kiosk Information",
+          "bbox": [
+            585,
+            413,
+            725,
+            449
+          ],
+          "center": [
+            655,
+            431
+          ],
+          "confidence": 0.95,
+          "testid": "menu-store-info"
+        },
+        {
+          "id": "kiosk_id_card",
+          "type": "button",
+          "label": "KIOSK-ID-2",
+          "description": "Displays the current Kiosk ID; may be tappable to edit or view details",
+          "bbox": [
+            742,
+            196,
+            1068,
+            279
+          ],
+          "center": [
+            904,
+            237
+          ],
+          "confidence": 0.85
+        },
+        {
+          "id": "pair_kiosk_card",
+          "type": "button",
+          "label": "KIOSK-ID-1",
+          "description": "Displays the paired kiosk ID; may be tappable to change pairing",
+          "bbox": [
+            1075,
+            196,
+            1383,
+            279
+          ],
+          "center": [
+            1229,
+            237
+          ],
+          "confidence": 0.85
+        },
+        {
+          "id": "reader_card",
+          "type": "button",
+          "label": "Ready",
+          "description": "Displays the reader status; may be tappable to manage reader settings",
+          "bbox": [
+            742,
+            282,
+            1068,
+            365
+          ],
+          "center": [
+            904,
+            324
+          ],
+          "confidence": 0.85
+        },
+        {
+          "id": "sync_card",
+          "type": "button",
+          "label": "Local demo",
+          "description": "Displays the sync mode; may be tappable to change sync settings",
+          "bbox": [
+            1075,
+            282,
+            1383,
+            365
+          ],
+          "center": [
+            1229,
+            324
           ],
           "confidence": 0.85
         }
       ],
       "transitions": {
-        "navigate_home": "product_selection",
-        "navigate_order_history_nav": "product_selection",
-        "sign_out": "login",
-        "navigate_categories": "product_selection",
-        "navigate_deals": "product_selection",
-        "navigate_support": "product_selection",
-        "navigate_cart_checkout": "product_selection",
-        "add_nexora_to_cart": "product_selection",
-        "add_orionbook_to_cart": "product_selection",
-        "add_audiopulse_to_cart": "product_selection",
-        "add_tabnova_to_cart": "product_selection",
-        "navigate_loyalty": "product_selection"
+        "select_kiosk_id_tab": "products"
       },
-      "screen_hash": "0003007f01ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff",
-      "is_dynamic": false
+      "screen_hash": "0003001300ff00ff00ff00ff00ff01ff00ff00ff00ff00ff00ff00ff00ff007f",
+      "is_dynamic": false,
+      "dom_id": "store_info"
     },
-    "user_registration": {
-      "screen_id": "user_registration",
-      "description": "A user registration screen for creating a local test user account with name, email, and password fields.",
+    "popup_login_failed": {
+      "screen_id": "popup_login_failed",
+      "description": "Login screen showing a failed login popup overlay with a Try Again button, over the sign-in form with email and password fields.",
+      "elements": [
+        {
+          "id": "try_again_button",
+          "type": "button",
+          "label": "Try Again",
+          "description": "Dismisses the Login Failed popup and allows the user to attempt login again",
+          "bbox": [
+            425,
+            474,
+            589,
+            515
+          ],
+          "center": [
+            506,
+            495
+          ],
+          "confidence": 0.97,
+          "testid": "popup-login-failed-confirm"
+        },
+        {
+          "id": "email_input",
+          "type": "input",
+          "label": "baduser@example.com",
+          "description": "Email address input field for user authentication",
+          "bbox": [
+            679,
+            196,
+            1282,
+            244
+          ],
+          "center": [
+            979,
+            220
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "password_input",
+          "type": "input",
+          "label": "Password",
+          "description": "Password input field for user authentication",
+          "bbox": [
+            679,
+            277,
+            1282,
+            325
+          ],
+          "center": [
+            979,
+            301
+          ],
+          "confidence": 0.91
+        },
+        {
+          "id": "sign_in_button",
+          "type": "button",
+          "label": "Sign In",
+          "description": "Submits the email and password credentials to log in",
+          "bbox": [
+            679,
+            334,
+            1282,
+            376
+          ],
+          "center": [
+            1344,
+            399
+          ],
+          "confidence": 0.62
+        },
+        {
+          "id": "user_settings_link",
+          "type": "link",
+          "label": "r settings",
+          "description": "Link to user settings or create new user section (partially obscured)",
+          "bbox": [
+            959,
+            385,
+            1282,
+            409
+          ],
+          "center": [
+            1064,
+            441
+          ],
+          "confidence": 0.55
+        }
+      ],
+      "transitions": {
+        "dismiss_popup_try_again": "login",
+        "sign_in_valid_credentials": "popup_login_failed",
+        "sign_in_invalid_credentials": "popup_login_failed",
+        "navigate_user_settings": "popup_login_failed"
+      },
+      "screen_hash": "0000010f036b03ff01ff07ff0ff70ff10ff70ff007e000000000000000000000",
+      "is_dynamic": false,
+      "dom_id": "popup_login_failed"
+    },
+    "signup": {
+      "screen_id": "signup",
+      "description": "A user registration screen for creating a local test account with name, email, and password fields.",
       "elements": [
         {
           "id": "name_input",
@@ -577,14 +2336,14 @@
           "label": "Robot Tester",
           "description": "Text input field for entering the user's name; currently contains 'Robot Tester'",
           "bbox": [
-            681,
-            200,
-            1272,
-            256
+            674,
+            199,
+            1268,
+            259
           ],
           "center": [
-            977,
-            228
+            971,
+            229
           ],
           "confidence": 0.95
         },
@@ -594,14 +2353,14 @@
           "label": "Email",
           "description": "Text input field for entering the user's email address",
           "bbox": [
-            681,
-            308,
-            1272,
-            364
+            674,
+            309,
+            1268,
+            369
           ],
           "center": [
-            977,
-            336
+            971,
+            339
           ],
           "confidence": 0.95
         },
@@ -611,14 +2370,14 @@
           "label": "Password",
           "description": "Password input field for entering the user's password; currently contains masked characters",
           "bbox": [
-            681,
-            388,
-            1272,
-            444
+            674,
+            389,
+            1268,
+            449
           ],
           "center": [
-            977,
-            416
+            971,
+            419
           ],
           "confidence": 0.95
         },
@@ -628,180 +2387,133 @@
           "label": "Sign Up and Continue",
           "description": "Submits the registration form to create a new local test user and proceeds to the next screen",
           "bbox": [
-            681,
-            457,
-            1272,
-            506
+            674,
+            459,
+            1268,
+            509
           ],
           "center": [
-            977,
-            481
+            971,
+            484
           ],
-          "confidence": 0.97
+          "confidence": 0.97,
+          "testid": "signup-button"
         },
         {
           "id": "back_to_sign_in_link",
           "type": "link",
           "label": "Back to sign in",
-          "description": "Navigates back to the sign-in screen",
+          "description": "Navigates back to the sign-in/login screen",
           "bbox": [
-            681,
-            514,
-            910,
-            544
+            674,
+            517,
+            868,
+            549
           ],
           "center": [
-            743,
-            529
+            749,
+            532
           ],
-          "confidence": 0.92
+          "confidence": 0.92,
+          "testid": "back-to-signin"
         }
       ],
       "transitions": {
-        "sign_up_valid_credentials": "user_registration",
-        "sign_up_invalid_credentials": "user_registration",
+        "signup_valid_credentials": "signup",
+        "signup_invalid_credentials": "products",
         "back_to_sign_in": "login"
       },
       "screen_hash": "000003ff03ff03ff03ff03ff03ff03ff033303ff03ff00000000000000000000",
-      "is_dynamic": false
+      "is_dynamic": false,
+      "dom_id": "signup"
     },
     "developer_settings": {
       "screen_id": "developer_settings",
-      "description": "Developer Settings screen for configuring robot test runtime parameters such as timing delays, vision mode, and page warning scenarios.",
+      "description": "Developer Settings screen for configuring robot test runtime parameters including timing delays, vision mode, and page warning scenarios.",
       "elements": [
-        {
-          "id": "info_badge",
-          "type": "button",
-          "label": "INFO",
-          "description": "Displays informational banner about Developer Settings Mode",
-          "bbox": [
-            802,
-            97,
-            873,
-            127
-          ],
-          "center": [
-            837,
-            112
-          ],
-          "confidence": 0.92
-        },
-        {
-          "id": "status_page_transition",
-          "type": "text",
-          "label": "Status: Page transition started.",
-          "description": "Read-only status message indicating a page transition has begun",
-          "bbox": [
-            1237,
-            76,
-            1397,
-            103
-          ],
-          "center": [
-            1317,
-            90
-          ],
-          "confidence": 0.88
-        },
         {
           "id": "back_to_sign_in_button",
           "type": "button",
           "label": "Back to Sign In",
-          "description": "Navigates back to the Sign In screen",
+          "description": "Navigates back to the login/sign-in screen",
           "bbox": [
-            1226,
-            205,
+            1215,
+            210,
             1397,
-            262
+            268
           ],
           "center": [
-            1311,
-            234
+            1306,
+            239
+          ],
+          "confidence": 0.92,
+          "testid": "settings-back-to-signin"
+        },
+        {
+          "id": "page_delay_ms_input",
+          "type": "input",
+          "label": "900",
+          "description": "Input field to set the page transition delay in milliseconds for robot test simulation",
+          "bbox": [
+            810,
+            417,
+            1346,
+            469
+          ],
+          "center": [
+            1078,
+            443
           ],
           "confidence": 0.93
         },
         {
-          "id": "page_delay_input",
-          "type": "input",
-          "label": "900",
-          "description": "Input field to set the page delay in milliseconds for robot test simulation",
-          "bbox": [
-            813,
-            416,
-            1337,
-            461
-          ],
-          "center": [
-            1075,
-            439
-          ],
-          "confidence": 0.94
-        },
-        {
-          "id": "action_delay_input",
+          "id": "action_delay_ms_input",
           "type": "input",
           "label": "350",
           "description": "Input field to set the action delay in milliseconds for robot test simulation",
           "bbox": [
-            1337,
-            416,
+            1346,
+            417,
             1400,
-            461
+            469
           ],
           "center": [
-            1208,
-            439
+            1220,
+            443
           ],
-          "confidence": 0.85
+          "confidence": 0.82
         },
         {
           "id": "robot_vision_mode_checkbox",
           "type": "button",
           "label": "Robot vision mode",
-          "description": "Checkbox to enable or disable robot vision mode for testing",
+          "description": "Checkbox to enable or disable robot vision mode for the kiosk simulation",
           "bbox": [
-            813,
-            475,
+            810,
+            477,
             1064,
-            505
+            511
           ],
           "center": [
-            863,
-            490
+            868,
+            494
           ],
-          "confidence": 0.92
-        },
-        {
-          "id": "sign_in_scenario_row",
-          "type": "button",
-          "label": "Sign in / signin",
-          "description": "Expandable row for configuring Sign In page warning/error/fatal scenario settings",
-          "bbox": [
-            813,
-            639,
-            1400,
-            702
-          ],
-          "center": [
-            1106,
-            670
-          ],
-          "confidence": 0.85
+          "confidence": 0.91
         },
         {
           "id": "show_banner_button",
           "type": "button",
           "label": "Show Banner",
-          "description": "Triggers an inline status banner for the Sign In scenario",
+          "description": "Triggers an inline status banner for the Sign In warning/error scenario",
           "bbox": [
-            813,
+            810,
             706,
-            1064,
-            733
+            1036,
+            738
           ],
           "center": [
-            938,
-            805
+            922,
+            819
           ],
           "confidence": 0.62
         },
@@ -809,50 +2521,50 @@
           "id": "show_popup_button",
           "type": "button",
           "label": "Show Popup",
-          "description": "Triggers a popup for the Sign In warning/error/fatal scenario",
+          "description": "Triggers a popup dialog for the Sign In warning/error scenario",
           "bbox": [
-            1064,
+            1036,
             706,
-            1260,
-            733
+            1232,
+            738
           ],
           "center": [
-            1232,
-            817
+            1211,
+            722
           ],
           "confidence": 0.72
         },
         {
-          "id": "horizontal_scrollbar",
+          "id": "info_badge",
           "type": "button",
-          "label": "",
-          "description": "Horizontal scrollbar to scroll the page content left or right",
+          "label": "INFO",
+          "description": "Info badge indicating this is Developer Settings Mode; may expand or dismiss the info banner",
           "bbox": [
-            0,
-            865,
-            1092,
-            880
+            810,
+            97,
+            896,
+            124
           ],
           "center": [
-            546,
-            876
+            852,
+            110
           ],
-          "confidence": 0.55
+          "confidence": 0.88
         },
         {
           "id": "signin_show_banner",
           "type": "input",
           "label": "Show Banner",
-          "description": "Checkbox to show banner on Sign in page",
+          "description": "Checkbox to show banner on sign in page",
           "bbox": [
-            637,
-            796,
-            679,
-            823
+            616,
+            792,
+            700,
+            864
           ],
           "center": [
-            653,
-            810
+            644,
+            828
           ],
           "confidence": 0.92
         },
@@ -860,16 +2572,16 @@
           "id": "signin_show_popup",
           "type": "input",
           "label": "Show Popup",
-          "description": "Checkbox to show popup on Sign in page",
+          "description": "Checkbox to show popup on sign in page",
           "bbox": [
-            804,
-            796,
-            847,
-            823
+            797,
+            792,
+            882,
+            864
           ],
           "center": [
-            823,
-            810
+            840,
+            828
           ],
           "confidence": 0.92
         },
@@ -877,16 +2589,16 @@
           "id": "signin_title_input",
           "type": "input",
           "label": "Credential Entry Watchpoi",
-          "description": "Title input for Sign in page scenario",
+          "description": "Title input for sign in watchpoint scenario",
           "bbox": [
-            972,
+            979,
             810,
-            1218,
-            864
+            1232,
+            873
           ],
           "center": [
-            1094,
-            837
+            1106,
+            841
           ],
           "confidence": 0.88
         },
@@ -894,16 +2606,16 @@
           "id": "signup_show_banner",
           "type": "input",
           "label": "Show Banner",
-          "description": "Checkbox to show banner on Sign up page",
+          "description": "Checkbox to show banner on sign up page",
           "bbox": [
-            637,
-            1003,
-            679,
-            1030
+            616,
+            999,
+            700,
+            1071
           ],
           "center": [
-            653,
-            1017
+            644,
+            1035
           ],
           "confidence": 0.92
         },
@@ -911,16 +2623,16 @@
           "id": "signup_show_popup",
           "type": "input",
           "label": "Show Popup",
-          "description": "Checkbox to show popup on Sign up page",
+          "description": "Checkbox to show popup on sign up page",
           "bbox": [
-            804,
-            1003,
-            847,
-            1030
+            797,
+            999,
+            882,
+            1071
           ],
           "center": [
-            823,
-            1017
+            840,
+            1035
           ],
           "confidence": 0.92
         },
@@ -928,169 +2640,135 @@
           "id": "signup_title_input",
           "type": "input",
           "label": "Local User Creation Watch",
-          "description": "Title input for Sign up page scenario",
+          "description": "Title input for sign up watchpoint scenario",
           "bbox": [
-            972,
-            1035,
-            1218,
+            979,
+            1017,
+            1232,
             1080
           ],
           "center": [
-            1094,
-            1057
+            1106,
+            1048
           ],
           "confidence": 0.88
         },
         {
-          "id": "forgotpassword_show_banner",
+          "id": "forgotpw_show_banner",
           "type": "input",
           "label": "Show Banner",
-          "description": "Checkbox to show banner on Forgot password page",
+          "description": "Checkbox to show banner on forgot password page",
           "bbox": [
-            637,
+            616,
             1206,
-            679,
-            1233
+            700,
+            1278
           ],
           "center": [
-            653,
-            1219
+            644,
+            1242
           ],
           "confidence": 0.92
         },
         {
-          "id": "forgotpassword_show_popup",
+          "id": "forgotpw_show_popup",
           "type": "input",
           "label": "Show Popup",
-          "description": "Checkbox to show popup on Forgot password page (checked)",
+          "description": "Checkbox to show popup on forgot password page (checked)",
           "bbox": [
-            804,
+            797,
             1206,
-            847,
-            1233
+            882,
+            1278
           ],
           "center": [
-            823,
-            1219
+            840,
+            1242
           ],
           "confidence": 0.95
         },
         {
-          "id": "forgotpassword_title_input",
+          "id": "forgotpw_title_input",
           "type": "input",
           "label": "Password Reset Service Mo",
-          "description": "Title input for Forgot password page scenario",
+          "description": "Title input for forgot password scenario",
           "bbox": [
-            972,
+            979,
             1224,
-            1218,
-            1269
+            1232,
+            1287
           ],
           "center": [
-            1094,
-            1246
+            1106,
+            1255
           ],
           "confidence": 0.88
         },
         {
-          "id": "developersettings_show_banner",
+          "id": "devsettings_show_banner",
           "type": "input",
           "label": "Show Banner",
-          "description": "Checkbox to show banner on Developer settings page (checked)",
+          "description": "Checkbox to show banner on developer settings page (checked)",
           "bbox": [
-            637,
-            1399,
-            679,
-            1426
+            616,
+            1404,
+            700,
+            1476
           ],
           "center": [
-            653,
-            1413
+            644,
+            1440
           ],
           "confidence": 0.95
         },
         {
-          "id": "developersettings_show_popup",
+          "id": "devsettings_show_popup",
           "type": "input",
           "label": "Show Popup",
-          "description": "Checkbox to show popup on Developer settings page",
+          "description": "Checkbox to show popup on developer settings page",
           "bbox": [
-            804,
-            1399,
-            847,
-            1426
+            797,
+            1404,
+            882,
+            1476
           ],
           "center": [
-            823,
-            1413
+            840,
+            1440
           ],
           "confidence": 0.92
         },
         {
-          "id": "developersettings_title_input",
+          "id": "devsettings_title_input",
           "type": "input",
           "label": "Developer Settings Mode",
-          "description": "Title input for Developer settings page scenario",
+          "description": "Title input for developer settings scenario",
           "bbox": [
-            972,
-            1417,
-            1218,
-            1462
+            979,
+            1422,
+            1232,
+            1485
           ],
           "center": [
-            1094,
-            1440
+            1106,
+            1453
           ],
           "confidence": 0.88
-        },
-        {
-          "id": "developersettings_show_banner_2",
-          "type": "input",
-          "label": "Show Banner",
-          "description": "Checkbox to show banner on Developer settings page (checked)",
-          "bbox": [
-            637,
-            1440,
-            679,
-            1467
-          ],
-          "center": [
-            653,
-            1453
-          ],
-          "confidence": 0.9
-        },
-        {
-          "id": "developersettings_show_popup_2",
-          "type": "input",
-          "label": "Show Popup",
-          "description": "Checkbox to show popup on Developer settings page",
-          "bbox": [
-            804,
-            1440,
-            847,
-            1467
-          ],
-          "center": [
-            823,
-            1453
-          ],
-          "confidence": 0.9
         },
         {
           "id": "products_show_banner",
           "type": "input",
           "label": "Show Banner",
-          "description": "Checkbox to show banner on Products page",
+          "description": "Checkbox to show banner on products page",
           "bbox": [
-            637,
-            1638,
-            679,
-            1665
+            616,
+            1629,
+            700,
+            1701
           ],
           "center": [
-            653,
-            1651
+            644,
+            1665
           ],
           "confidence": 0.92
         },
@@ -1098,16 +2776,16 @@
           "id": "products_show_popup",
           "type": "input",
           "label": "Show Popup",
-          "description": "Checkbox to show popup on Products page",
+          "description": "Checkbox to show popup on products page",
           "bbox": [
-            804,
-            1638,
-            847,
-            1665
+            797,
+            1629,
+            882,
+            1701
           ],
           "center": [
-            823,
-            1651
+            840,
+            1665
           ],
           "confidence": 0.92
         },
@@ -1115,15 +2793,15 @@
           "id": "products_title_input",
           "type": "input",
           "label": "Inventory Response Delay",
-          "description": "Title input for Products page scenario",
+          "description": "Title input for products inventory delay scenario",
           "bbox": [
-            972,
-            1656,
-            1218,
-            1701
+            979,
+            1647,
+            1232,
+            1710
           ],
           "center": [
-            1094,
+            1106,
             1678
           ],
           "confidence": 0.88
@@ -1132,16 +2810,16 @@
           "id": "categories_show_banner",
           "type": "input",
           "label": "Show Banner",
-          "description": "Checkbox to show banner on Categories page",
+          "description": "Checkbox to show banner on categories page",
           "bbox": [
-            637,
+            616,
             1827,
-            679,
-            1854
+            700,
+            1899
           ],
           "center": [
-            653,
-            1840
+            644,
+            1863
           ],
           "confidence": 0.92
         },
@@ -1149,16 +2827,16 @@
           "id": "categories_show_popup",
           "type": "input",
           "label": "Show Popup",
-          "description": "Checkbox to show popup on Categories page",
+          "description": "Checkbox to show popup on categories page",
           "bbox": [
-            804,
+            797,
             1827,
-            847,
-            1854
+            882,
+            1899
           ],
           "center": [
-            823,
-            1840
+            840,
+            1863
           ],
           "confidence": 0.92
         },
@@ -1166,16 +2844,16 @@
           "id": "categories_title_input",
           "type": "input",
           "label": "Category Filter Scenario",
-          "description": "Title input for Categories page scenario",
+          "description": "Title input for categories filter scenario",
           "bbox": [
-            972,
+            979,
             1845,
-            1218,
-            1890
+            1232,
+            1908
           ],
           "center": [
-            1094,
-            1867
+            1106,
+            1876
           ],
           "confidence": 0.88
         },
@@ -1183,16 +2861,16 @@
           "id": "deals_show_banner",
           "type": "input",
           "label": "Show Banner",
-          "description": "Checkbox to show banner on Deals page",
+          "description": "Checkbox to show banner on deals page",
           "bbox": [
-            637,
-            2011,
-            679,
-            2038
+            616,
+            2025,
+            700,
+            2097
           ],
           "center": [
-            653,
-            2025
+            644,
+            2061
           ],
           "confidence": 0.92
         },
@@ -1200,16 +2878,16 @@
           "id": "deals_show_popup",
           "type": "input",
           "label": "Show Popup",
-          "description": "Checkbox to show popup on Deals page",
+          "description": "Checkbox to show popup on deals page",
           "bbox": [
-            804,
-            2011,
-            847,
-            2038
+            797,
+            2025,
+            882,
+            2097
           ],
           "center": [
-            823,
-            2025
+            840,
+            2061
           ],
           "confidence": 0.92
         },
@@ -1217,16 +2895,16 @@
           "id": "deals_title_input",
           "type": "input",
           "label": "Deal Refresh Scenario",
-          "description": "Title input for Deals page scenario",
+          "description": "Title input for deals refresh scenario",
           "bbox": [
-            972,
-            2029,
-            1218,
-            2074
+            979,
+            2043,
+            1232,
+            2106
           ],
           "center": [
-            1094,
-            2052
+            1106,
+            2074
           ],
           "confidence": 0.88
         },
@@ -1234,16 +2912,16 @@
           "id": "loyalty_show_banner",
           "type": "input",
           "label": "Show Banner",
-          "description": "Checkbox to show banner on Loyalty page",
+          "description": "Checkbox to show banner on loyalty page",
           "bbox": [
-            637,
+            616,
             2268,
-            679,
-            2295
+            700,
+            2340
           ],
           "center": [
-            653,
-            2281
+            644,
+            2304
           ],
           "confidence": 0.92
         },
@@ -1251,16 +2929,16 @@
           "id": "loyalty_show_popup",
           "type": "input",
           "label": "Show Popup",
-          "description": "Checkbox to show popup on Loyalty page",
+          "description": "Checkbox to show popup on loyalty page",
           "bbox": [
-            804,
+            797,
             2268,
-            847,
-            2295
+            882,
+            2340
           ],
           "center": [
-            823,
-            2281
+            840,
+            2304
           ],
           "confidence": 0.92
         },
@@ -1268,16 +2946,16 @@
           "id": "loyalty_title_input",
           "type": "input",
           "label": "Loyalty Lookup Scenario",
-          "description": "Title input for Loyalty page scenario",
+          "description": "Title input for loyalty lookup scenario",
           "bbox": [
-            972,
+            979,
             2286,
-            1218,
-            2331
+            1232,
+            2349
           ],
           "center": [
-            1094,
-            2308
+            1106,
+            2317
           ],
           "confidence": 0.88
         },
@@ -1285,16 +2963,16 @@
           "id": "receipts_show_banner",
           "type": "input",
           "label": "Show Banner",
-          "description": "Checkbox to show banner on Receipts page",
+          "description": "Checkbox to show banner on receipts page",
           "bbox": [
-            637,
-            2470,
-            679,
-            2497
+            616,
+            2475,
+            700,
+            2547
           ],
           "center": [
-            653,
-            2484
+            644,
+            2511
           ],
           "confidence": 0.92
         },
@@ -1302,16 +2980,16 @@
           "id": "receipts_show_popup",
           "type": "input",
           "label": "Show Popup",
-          "description": "Checkbox to show popup on Receipts page",
+          "description": "Checkbox to show popup on receipts page",
           "bbox": [
-            804,
-            2470,
-            847,
-            2497
+            797,
+            2475,
+            882,
+            2547
           ],
           "center": [
-            823,
-            2484
+            840,
+            2511
           ],
           "confidence": 0.92
         },
@@ -1319,16 +2997,16 @@
           "id": "receipts_title_input",
           "type": "input",
           "label": "Receipt Reprint Scenario",
-          "description": "Title input for Receipts page scenario",
+          "description": "Title input for receipts reprint scenario",
           "bbox": [
-            972,
-            2488,
-            1218,
-            2533
+            979,
+            2493,
+            1232,
+            2556
           ],
           "center": [
-            1094,
-            2511
+            1106,
+            2524
           ],
           "confidence": 0.88
         },
@@ -1336,16 +3014,16 @@
           "id": "support_show_banner",
           "type": "input",
           "label": "Show Banner",
-          "description": "Checkbox to show banner on Support page",
+          "description": "Checkbox to show banner on support page",
           "bbox": [
-            637,
-            2659,
-            679,
-            2686
+            616,
+            2682,
+            700,
+            2754
           ],
           "center": [
-            653,
-            2673
+            644,
+            2718
           ],
           "confidence": 0.92
         },
@@ -1353,16 +3031,16 @@
           "id": "support_show_popup",
           "type": "input",
           "label": "Show Popup",
-          "description": "Checkbox to show popup on Support page",
+          "description": "Checkbox to show popup on support page",
           "bbox": [
-            804,
-            2659,
-            847,
-            2686
+            797,
+            2682,
+            882,
+            2754
           ],
           "center": [
-            823,
-            2673
+            840,
+            2718
           ],
           "confidence": 0.92
         },
@@ -1370,16 +3048,16 @@
           "id": "support_title_input",
           "type": "input",
           "label": "Help Screen Scenario",
-          "description": "Title input for Support page scenario",
+          "description": "Title input for support help screen scenario",
           "bbox": [
-            972,
-            2677,
-            1218,
-            2722
+            979,
+            2700,
+            1232,
+            2763
           ],
           "center": [
-            1094,
-            2700
+            1106,
+            2731
           ],
           "confidence": 0.88
         },
@@ -1387,16 +3065,16 @@
           "id": "storeinfo_show_banner",
           "type": "input",
           "label": "Show Banner",
-          "description": "Checkbox to show banner on Store info page",
+          "description": "Checkbox to show banner on store info page",
           "bbox": [
-            637,
-            2844,
-            679,
-            2871
+            616,
+            2898,
+            700,
+            2970
           ],
           "center": [
-            653,
-            2857
+            644,
+            2934
           ],
           "confidence": 0.9
         },
@@ -1404,16 +3082,16 @@
           "id": "storeinfo_show_popup",
           "type": "input",
           "label": "Show Popup",
-          "description": "Checkbox to show popup on Store info page",
+          "description": "Checkbox to show popup on store info page",
           "bbox": [
-            804,
-            2844,
-            847,
-            2871
+            797,
+            2898,
+            882,
+            2970
           ],
           "center": [
-            823,
-            2857
+            840,
+            2934
           ],
           "confidence": 0.9
         },
@@ -1421,67 +3099,33 @@
           "id": "storeinfo_title_input",
           "type": "input",
           "label": "Store Information Scenario",
-          "description": "Title input for Store info page scenario",
+          "description": "Title input for store information scenario",
           "bbox": [
-            972,
-            2862,
-            1218,
-            2907
+            979,
+            2916,
+            1232,
+            2979
           ],
           "center": [
-            1094,
-            2884
+            1106,
+            2947
           ],
           "confidence": 0.88
-        },
-        {
-          "id": "storeinfo_show_banner_2",
-          "type": "input",
-          "label": "Show Banner",
-          "description": "Checkbox to show banner on Store info page",
-          "bbox": [
-            637,
-            2907,
-            679,
-            2934
-          ],
-          "center": [
-            653,
-            2920
-          ],
-          "confidence": 0.9
-        },
-        {
-          "id": "storeinfo_show_popup_2",
-          "type": "input",
-          "label": "Show Popup",
-          "description": "Checkbox to show popup on Store info page",
-          "bbox": [
-            804,
-            2907,
-            847,
-            2934
-          ],
-          "center": [
-            823,
-            2920
-          ],
-          "confidence": 0.9
         },
         {
           "id": "cart_show_banner",
           "type": "input",
           "label": "Show Banner",
-          "description": "Checkbox to show banner on Cart page",
+          "description": "Checkbox to show banner on cart page",
           "bbox": [
-            637,
-            3109,
-            679,
-            3136
+            616,
+            3105,
+            700,
+            3177
           ],
           "center": [
-            653,
-            3123
+            644,
+            3141
           ],
           "confidence": 0.92
         },
@@ -1489,16 +3133,16 @@
           "id": "cart_show_popup",
           "type": "input",
           "label": "Show Popup",
-          "description": "Checkbox to show popup on Cart page (checked)",
+          "description": "Checkbox to show popup on cart page (checked)",
           "bbox": [
-            804,
-            3109,
-            847,
-            3136
+            797,
+            3105,
+            882,
+            3177
           ],
           "center": [
-            823,
-            3123
+            840,
+            3141
           ],
           "confidence": 0.95
         },
@@ -1506,16 +3150,16 @@
           "id": "cart_title_input",
           "type": "input",
           "label": "Tax Calculation Retry Simu",
-          "description": "Title input for Cart page scenario",
+          "description": "Title input for cart tax calculation retry scenario",
           "bbox": [
-            972,
-            3127,
-            1218,
-            3172
+            979,
+            3123,
+            1232,
+            3186
           ],
           "center": [
-            1094,
-            3150
+            1106,
+            3154
           ],
           "confidence": 0.88
         },
@@ -1523,16 +3167,16 @@
           "id": "cardpayment_show_banner",
           "type": "input",
           "label": "Show Banner",
-          "description": "Checkbox to show banner on Card payment page",
+          "description": "Checkbox to show banner on card payment page",
           "bbox": [
-            637,
-            3298,
-            679,
-            3325
+            616,
+            3321,
+            700,
+            3393
           ],
           "center": [
-            653,
-            3312
+            644,
+            3357
           ],
           "confidence": 0.92
         },
@@ -1540,16 +3184,16 @@
           "id": "cardpayment_show_popup",
           "type": "input",
           "label": "Show Popup",
-          "description": "Checkbox to show popup on Card payment page",
+          "description": "Checkbox to show popup on card payment page",
           "bbox": [
-            804,
-            3298,
-            847,
-            3325
+            797,
+            3321,
+            882,
+            3393
           ],
           "center": [
-            823,
-            3312
+            840,
+            3357
           ],
           "confidence": 0.92
         },
@@ -1557,101 +3201,84 @@
           "id": "cardpayment_title_input",
           "type": "input",
           "label": "Card Reader Precheck War",
-          "description": "Title input for Card payment page scenario",
+          "description": "Title input for card payment precheck warning scenario",
           "bbox": [
-            972,
-            3316,
-            1218,
-            3361
+            979,
+            3339,
+            1232,
+            3402
           ],
           "center": [
-            1094,
-            3339
+            1106,
+            3370
           ],
           "confidence": 0.88
         },
         {
-          "id": "cardreadertap_show_banner",
+          "id": "tapcard_show_banner",
           "type": "input",
           "label": "Show Banner",
-          "description": "Checkbox to show banner on Card reader tap page",
+          "description": "Checkbox to show banner on card reader tap page",
           "bbox": [
-            637,
-            3483,
-            679,
-            3510
+            616,
+            3519,
+            700,
+            3591
           ],
           "center": [
-            653,
-            3496
+            644,
+            3555
           ],
           "confidence": 0.92
         },
         {
-          "id": "cardreadertap_show_popup",
+          "id": "tapcard_show_popup",
           "type": "input",
           "label": "Show Popup",
-          "description": "Checkbox to show popup on Card reader tap page (checked)",
+          "description": "Checkbox to show popup on card reader tap page (checked)",
           "bbox": [
-            804,
-            3483,
-            847,
-            3510
+            797,
+            3519,
+            882,
+            3591
           ],
           "center": [
-            823,
-            3496
+            840,
+            3555
           ],
           "confidence": 0.95
         },
         {
-          "id": "cardreadertap_title_input",
+          "id": "tapcard_title_input",
           "type": "input",
           "label": "Reader Alignment Retry N",
-          "description": "Title input for Card reader tap page scenario",
+          "description": "Title input for card reader tap alignment retry scenario",
           "bbox": [
-            972,
-            3501,
-            1218,
-            3546
+            979,
+            3537,
+            1232,
+            3600
           ],
           "center": [
-            1094,
-            3523
+            1106,
+            3568
           ],
           "confidence": 0.88
-        },
-        {
-          "id": "cardreadertap_show_popup_2",
-          "type": "input",
-          "label": "Show Popup",
-          "description": "Checkbox to show popup on Card reader tap page (checked)",
-          "bbox": [
-            804,
-            3556,
-            847,
-            3583
-          ],
-          "center": [
-            823,
-            3569
-          ],
-          "confidence": 0.9
         },
         {
           "id": "orderresult_show_banner",
           "type": "input",
           "label": "Show Banner",
-          "description": "Checkbox to show banner on Order result page",
+          "description": "Checkbox to show banner on order result page",
           "bbox": [
-            637,
+            616,
             3736,
-            679,
-            3763
+            700,
+            3808
           ],
           "center": [
-            653,
-            3749
+            644,
+            3772
           ],
           "confidence": 0.92
         },
@@ -1659,16 +3286,16 @@
           "id": "orderresult_show_popup",
           "type": "input",
           "label": "Show Popup",
-          "description": "Checkbox to show popup on Order result page",
+          "description": "Checkbox to show popup on order result page",
           "bbox": [
-            804,
+            797,
             3736,
-            847,
-            3763
+            882,
+            3808
           ],
           "center": [
-            823,
-            3749
+            840,
+            3772
           ],
           "confidence": 0.92
         },
@@ -1676,16 +3303,16 @@
           "id": "orderresult_title_input",
           "type": "input",
           "label": "Receipt Delivery Warning",
-          "description": "Title input for Order result page scenario",
+          "description": "Title input for order result receipt delivery warning scenario",
           "bbox": [
-            972,
+            979,
             3754,
-            1218,
-            3799
+            1232,
+            3817
           ],
           "center": [
-            1094,
-            3776
+            1106,
+            3785
           ],
           "confidence": 0.88
         },
@@ -1693,16 +3320,16 @@
           "id": "orderhistory_show_banner",
           "type": "input",
           "label": "Show Banner",
-          "description": "Checkbox to show banner on Order history page",
+          "description": "Checkbox to show banner on order history page",
           "bbox": [
-            637,
-            3925,
-            679,
-            3952
+            616,
+            3943,
+            700,
+            4015
           ],
           "center": [
-            653,
-            3938
+            644,
+            3979
           ],
           "confidence": 0.92
         },
@@ -1710,16 +3337,16 @@
           "id": "orderhistory_show_popup",
           "type": "input",
           "label": "Show Popup",
-          "description": "Checkbox to show popup on Order history page (checked)",
+          "description": "Checkbox to show popup on order history page (checked)",
           "bbox": [
-            804,
-            3925,
-            847,
-            3952
+            797,
+            3943,
+            882,
+            4015
           ],
           "center": [
-            823,
-            3938
+            840,
+            3979
           ],
           "confidence": 0.95
         },
@@ -1727,237 +3354,286 @@
           "id": "orderhistory_title_input",
           "type": "input",
           "label": "History Sync Fatal Scenario",
-          "description": "Title input for Order history page scenario",
+          "description": "Title input for order history sync fatal scenario",
           "bbox": [
-            972,
-            3943,
-            1218,
-            3988
+            979,
+            3961,
+            1232,
+            4024
           ],
           "center": [
-            1094,
-            3965
+            1106,
+            3992
           ],
           "confidence": 0.88
         },
         {
-          "id": "reset_card_balances_button",
+          "id": "reset_card_balances_btn",
           "type": "button",
           "label": "Reset Card Balances",
           "description": "Resets stored test-card balances in this browser",
           "bbox": [
-            616,
-            4141,
-            1008,
-            4186
+            602,
+            4204,
+            1022,
+            4276
           ],
           "center": [
             812,
-            4163
+            4240
           ],
-          "confidence": 0.97
+          "confidence": 0.97,
+          "testid": "settings-reset-card-balances"
         }
       ],
       "transitions": {
-        "tap_info_badge": "developer_settings",
-        "tap_back_to_sign_in": "login",
-        "set_page_delay": "developer_settings",
-        "set_action_delay": "developer_settings",
+        "back_to_sign_in": "login",
+        "show_banner_trigger": "developer_settings",
+        "show_popup_trigger": "developer_settings",
+        "toggle_info_badge": "developer_settings",
         "toggle_robot_vision_mode": "developer_settings",
-        "expand_sign_in_scenario_row": "developer_settings",
-        "tap_show_banner_button": "developer_settings",
-        "tap_show_popup_button": "developer_settings",
-        "tap_reset_card_balances": "developer_settings",
-        "scroll_horizontal_scrollbar": "developer_settings",
-        "configure_signin_scenario": "developer_settings",
-        "configure_cart_scenario": "developer_settings"
+        "set_page_delay_ms": "developer_settings",
+        "set_action_delay_ms": "developer_settings",
+        "reset_card_balances": "developer_settings",
+        "toggle_signin_show_banner": "developer_settings",
+        "toggle_signin_show_popup": "developer_settings",
+        "update_signin_title": "developer_settings",
+        "toggle_cart_show_popup": "developer_settings"
       },
       "screen_hash": "0000000001ff01ff01ff01ff03ff03ff03ff03ff03ff03ff03ff03ff03ff03ff",
-      "is_dynamic": false
+      "is_dynamic": false,
+      "dom_id": "developer_settings"
     }
   },
   "keyboard_map": {
     "keys": {
       "1": [
-        0.455,
-        0.635
+        0.44,
+        0.63
       ],
       "2": [
-        0.513,
-        0.635
+        0.51,
+        0.63
       ],
       "3": [
         0.57,
-        0.635
+        0.63
       ],
       "4": [
-        0.627,
-        0.635
+        0.63,
+        0.63
       ],
       "5": [
-        0.684,
-        0.635
+        0.68,
+        0.63
       ],
       "6": [
-        0.741,
-        0.635
+        0.74,
+        0.63
       ],
       "7": [
-        0.798,
-        0.635
+        0.8,
+        0.63
       ],
       "8": [
-        0.855,
-        0.635
+        0.85,
+        0.63
       ],
       "9": [
-        0.912,
-        0.635
+        0.91,
+        0.63
       ],
       "0": [
-        0.969,
-        0.635
+        0.97,
+        0.63
       ],
       "q": [
-        0.455,
-        0.69
+        0.44,
+        0.7
       ],
       "w": [
-        0.513,
-        0.69
+        0.51,
+        0.7
       ],
       "e": [
         0.57,
-        0.69
+        0.7
       ],
       "r": [
-        0.627,
-        0.69
+        0.63,
+        0.7
       ],
       "t": [
-        0.684,
-        0.69
+        0.68,
+        0.7
       ],
       "y": [
-        0.741,
-        0.69
+        0.74,
+        0.7
       ],
       "u": [
-        0.798,
-        0.69
+        0.8,
+        0.7
       ],
       "i": [
-        0.855,
-        0.69
+        0.85,
+        0.7
       ],
       "o": [
-        0.912,
-        0.69
+        0.91,
+        0.7
       ],
       "p": [
-        0.969,
-        0.69
+        0.97,
+        0.7
       ],
       "a": [
         0.47,
-        0.745
+        0.76
       ],
       "s": [
-        0.527,
-        0.745
+        0.53,
+        0.76
       ],
       "d": [
-        0.584,
-        0.745
+        0.59,
+        0.76
       ],
       "f": [
-        0.641,
-        0.745
+        0.65,
+        0.76
       ],
       "g": [
-        0.698,
-        0.745
+        0.71,
+        0.76
       ],
       "h": [
-        0.755,
-        0.745
+        0.77,
+        0.76
       ],
       "j": [
-        0.812,
-        0.745
+        0.83,
+        0.76
       ],
       "k": [
-        0.869,
-        0.745
+        0.89,
+        0.76
       ],
       "l": [
-        0.926,
-        0.745
+        0.95,
+        0.76
       ],
       "z": [
-        0.455,
-        0.8
+        0.44,
+        0.83
       ],
       "x": [
-        0.513,
-        0.8
+        0.51,
+        0.83
       ],
       "c": [
         0.57,
-        0.8
+        0.83
       ],
       "v": [
-        0.627,
-        0.8
+        0.63,
+        0.83
       ],
       "b": [
-        0.684,
-        0.8
+        0.68,
+        0.83
       ],
       "n": [
-        0.741,
-        0.8
+        0.74,
+        0.83
       ],
       "m": [
-        0.798,
-        0.8
+        0.8,
+        0.83
       ],
       ".": [
-        0.855,
-        0.8
+        0.86,
+        0.83
       ],
       "@": [
-        0.912,
-        0.8
+        0.92,
+        0.83
       ],
       "-": [
-        0.969,
-        0.8
+        0.97,
+        0.83
       ],
       "shift": [
-        0.47,
-        0.855
+        0.46,
+        0.91
       ],
       "_": [
-        0.541,
-        0.855
+        0.54,
+        0.91
       ],
       "space": [
-        0.641,
-        0.855
+        0.65,
+        0.91
       ],
       "backspace": [
-        0.779,
-        0.855
+        0.78,
+        0.91
       ],
       "clear": [
-        0.878,
-        0.855
+        0.88,
+        0.91
       ],
       "done": [
-        0.955,
-        0.855
+        0.96,
+        0.91
       ]
     }
+  },
+  "element_transitions": {
+    "order_history_nav_button": "products",
+    "categories_nav_link": "categories",
+    "order_history_button": "categories",
+    "deals_nav_link": "deals",
+    "loyalty_link": "loyalty",
+    "receipts_nav": "receipts",
+    "support_nav_link": "support",
+    "kiosk_id_label": "support",
+    "store_info_nav": "store_info",
+    "kiosk_id_tab": "products",
+    "reader_check_card": "support",
+    "network_status_card": "support",
+    "store_info_nav_link": "store_info",
+    "order_history_content_button": "categories",
+    "view_history_button": "categories",
+    "support_nav": "support",
+    "receipts_link": "receipts",
+    "support_link": "support",
+    "store_info_link": "store_info",
+    "nexora_phone_x2_card": "deals",
+    "orionbook_pro_14_card": "deals",
+    "vistaview_55_smart_tv_card": "deals",
+    "loyalty_nav_link": "loyalty",
+    "receipts_nav_link": "receipts",
+    "smartphone_category_card": "categories",
+    "laptop_category_card": "categories",
+    "television_category_card": "categories",
+    "audio_category_card": "categories",
+    "order_history_sidebar_button": "categories",
+    "cart_checkout_button": "products",
+    "try_again_button": "login",
+    "user_settings_link": "popup_login_failed",
+    "sign_up_link": "signup",
+    "back_to_sign_in_link": "login",
+    "forgot_password_link": "login",
+    "developer_settings_link": "developer_settings",
+    "back_to_sign_in_button": "login",
+    "show_banner_button": "developer_settings",
+    "show_popup_button": "developer_settings",
+    "info_badge": "developer_settings",
+    "robot_vision_mode_checkbox": "developer_settings",
+    "reset_card_balances_btn": "developer_settings",
+    "signin_show_banner": "developer_settings",
+    "signin_show_popup": "developer_settings",
+    "cart_show_popup": "developer_settings"
   }
 }

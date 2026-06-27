@@ -50,10 +50,14 @@ def tap(x: int, y: int) -> dict:
     return {"success": True, "x": x, "y": y}
 
 
-def type_text(text: str) -> dict:
-    """Type text character-by-character via robot arm keyboard simulator."""
-    # TODO: send keystroke sequence to robot arm
-    print(f"    [ROBOT] type({text!r})")
+def type_text(text: str, clear_first: bool = False) -> dict:
+    """Type text character-by-character via robot arm keyboard simulator.
+
+    clear_first: when True the real robot arm should first send a "select-all"
+    gesture to clear any pre-filled content.  No-op in demo/stub mode.
+    """
+    # TODO: send keystroke sequence to robot arm; if clear_first, precede with select-all gesture
+    print(f"    [ROBOT] type({text!r})" + (" [clear_first]" if clear_first else ""))
     return {"success": True, "text": text}
 
 
@@ -74,3 +78,23 @@ def get_page_scroll_info() -> dict:
     """Return stub scroll info — assume single viewport, no overflow."""
     return {"scrollTop": 0, "scrollLeft": 0, "scrollHeight": 900, "scrollWidth": 1400,
             "viewportHeight": 900, "viewportWidth": 1400}
+
+
+def get_dom_screen_id() -> str:
+    """Not applicable to real robot arm — URL/DOM not accessible via camera."""
+    return ""
+
+
+def get_dom_element_centers() -> list[dict]:
+    """Not applicable to real robot arm — DOM not accessible via camera."""
+    return []
+
+
+def navigate_to_screen(screen_id: str) -> bool:
+    """Not applicable to real robot arm — sidebar nav must be tapped physically."""
+    return False
+
+
+def update_explorer_progress(explored: int, total: int, current_action: str = "") -> None:
+    """No-op in demo/real modes — progress HUD only renders in playwright mode."""
+    pass

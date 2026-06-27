@@ -62,3 +62,62 @@ def prompt_summary(app_map: Optional[AppMap]) -> str:
         for ak, nxt in (sc.get("transitions") or {}).items():
             lines.append(f"    {ak} --> {nxt}")
     return "\n".join(lines)
+
+
+def element_inventory_for_prompt(app_map: Optional[AppMap]) -> str:
+    """Rich per-element text format for Tier-2 test planning.
+
+    Includes pixel coordinates, element types, labels, and descriptions so
+    Claude can plan concrete tap/type steps without seeing any screenshot.
+    This IS the visual description of the app — extracted once by App Explorer.
+    """
+    if not app_map:
+        return ""
+    lines = [
+        f"App: {app_map.get('app_name', 'unknown')}",
+        f"Entry screen: {app_map.get('entry_screen', 'unknown')}",
+        "",
+    ]
+    for sid, sc in (app_map.get("screens") or {}).items():
+        lines.append(f"SCREEN: {sid}")
+        lines.append(f"  Description: {sc.get('description', '')}")
+        lines.append("  Interactive elements:")
+        for el in sc.get("elements") or []:
+            cx, cy = el.get("center") or [0, 0]
+            lines.append(
+                f"    - id={el['id']!r}  type={el.get('type', '?')}  "
+                f"label={el.get('label', '')!r}  "
+                f"coords=({int(cx)},{int(cy)})  "
+                f"note={el.get('description', '')!r}"
+            )
+        transitions = sc.get("transitions") or {}
+        if transitions:
+            lines.append("  Navigation transitions:")
+            for ak, nxt in transitions.items():
+                lines.append(f"    {ak}  →  {nxt}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def get_element(app_map: Optional[AppMap], screen_id: str, element_id: str) -> Optional[dict]:
+    """Return an element dict from the map, or None if not found."""
+    if not app_map:
+        return None
+    sc = (app_map.get("screens") or {}).get(screen_id)
+    if not sc:
+        return None
+    return next((e for e in (sc.get("elements") or []) if e.get("id") == element_id), None)
+
+
+def version_hash(app_map: Optional[AppMap]) -> str:
+    """Return a short hash representing the app_map's content version.
+
+    Used as part of the plan cache key so cached plans are automatically
+    invalidated when App Explorer re-runs and the map changes.
+    """
+    if not app_map:
+        return "no_map"
+    explored_at = app_map.get("explored_at", "")
+    screen_ids  = ",".join(sorted((app_map.get("screens") or {}).keys()))
+    import hashlib
+    return hashlib.md5(f"{explored_at}|{screen_ids}".encode()).hexdigest()[:10]

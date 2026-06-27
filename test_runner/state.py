@@ -33,7 +33,10 @@ class TestRunnerState(TypedDict):
 
     # ── Per-test-case working state ───────────────────────────────────────────
     current_tc: Optional[TestCase]
-    # planned_steps: list[str] in the existing format ["tap: X", "type: Y", "verify: Z"]
+    # structured_plan: Tier-1/2 plan with pixel coords — executed without LLM calls.
+    # None → fall through to Tier-3 (legacy vision-agent path).
+    structured_plan: Optional[dict]
+    # planned_steps: Tier-3 fallback format ["tap: X", "type: Y", "verify: Z"]
     planned_steps: list[str]
     credential_scenario: str   # "valid" | "invalid"
     # start_image: the screenshot to use as the entry point for this test case

@@ -1,15 +1,32 @@
 """
-execute_action — reset the browser to the source screen, execute the queued
+execute_action — navigate to the source screen (smartly) and execute the queued
 action's steps via the live robot backend, then capture a real screenshot.
 
+Session strategy (avoids repeated logout/login):
+  1. If browser DOM already shows the source screen → execute directly (no reset).
+  2. If both current screen and source screen are authenticated (post-login) →
+       navigate via sidebar without logging out.
+  3. Otherwise → full reset (localStorage clear) + approach-path replay.
+
 Works with any ROBOT_BACKEND (playwright for browser, real for hardware arm).
-No demo_navigation dict — every result comes from an actual capture_screen() call.
 """
 import time
 from pathlib import Path
 from vision_agent import robot
 from vision_agent.config import settings
 from app_explorer.state import ExplorerState, ExplorationAction
+
+def _requires_valid_login(screen_id: str, approach_paths: dict) -> bool:
+    """Return True if this screen can only be reached after a valid login.
+
+    Inspects the screen's approach path for any action with credential_scenario="valid".
+    Generic: works for any app — no hardcoded screen-name lists.
+    """
+    for action in approach_paths.get(screen_id, []):
+        if action.get("credential_scenario") == "valid":
+            return True
+    return False
+
 
 def _resolve(value: str, credentials: dict) -> str:
     """Substitute credential placeholders written by SUGGEST_EXPLORABLE_ACTIONS."""
@@ -75,6 +92,22 @@ def _run_steps(steps: list, screen_id: str, app_map: dict, credentials: dict) ->
             time.sleep(0.2)
 
 
+def _do_reset_and_replay(
+    action: ExplorationAction,
+    approach_paths: dict,
+    app_map: dict,
+    credentials: dict,
+) -> None:
+    """Full reset: clear session storage, navigate to entry URL, replay approach path."""
+    robot.reset_to_entry()
+    time.sleep(0.8)
+    approach = approach_paths.get(action["screen_id"], [])
+    for past_action in approach:
+        print(f"    [REPLAY] {past_action['screen_id']}::{past_action['action_key']}")
+        _run_steps(past_action["steps"], past_action["screen_id"], app_map, credentials)
+        time.sleep(0.6)
+
+
 def execute_action(state: ExplorerState) -> dict:
     queue          = list(state["exploration_queue"])
     action: ExplorationAction = queue.pop(0)
@@ -82,21 +115,59 @@ def execute_action(state: ExplorerState) -> dict:
     credentials    = state.get("credentials") or {}
     app_map        = state.get("app_map") or {}
     approach_paths = state.get("approach_paths") or {}
+    known_screens  = app_map.get("screens") or {}
 
     full_key = f"{action['screen_id']}::{action['action_key']}"
     print(f"\n  [ACTION] {full_key}")
     print(f"           {action['description']}")
 
-    # ── Reset browser to entry URL ────────────────────────────────────────────
-    robot.reset_to_entry()
-    time.sleep(0.8)
+    # Live progress HUD — shows in the kiosk browser window (playwright mode only; no-op elsewhere)
+    total_known = len(explored) + len(queue) + 1  # +1 for the action we just popped
+    robot.update_explorer_progress(len(explored), total_known, full_key)
 
-    # ── Replay approach path to reach the source screen ───────────────────────
-    approach = approach_paths.get(action["screen_id"], [])
-    for past_action in approach:
-        print(f"    [REPLAY] {past_action['screen_id']}::{past_action['action_key']}")
-        _run_steps(past_action["steps"], past_action["screen_id"], app_map, credentials)
-        time.sleep(0.6)
+    # ── Smart session: avoid logout/login wherever possible ───────────────────
+    # Strategy: check the live browser DOM to decide the cheapest path to the
+    # source screen.  Falls back to full reset+replay when DOM check fails.
+    reset_needed = True
+    try:
+        current_dom = robot.get_dom_screen_id()   # "" in demo/real modes
+        source_sid  = action["screen_id"]
+        source_dom  = (known_screens.get(source_sid) or {}).get("dom_id", "")
+
+        # Resolve current DOM id → explorer screen_id (for approach_path lookup)
+        current_sid = next(
+            (sid for sid, sc in known_screens.items() if sc.get("dom_id") == current_dom),
+            current_dom,  # fallback: treat DOM id as screen_id
+        )
+
+        if source_dom and current_dom and current_dom == source_dom:
+            # Browser is already on the correct source screen.
+            print(f"    [SMART] Already on '{source_sid}' — skip reset+replay")
+            reset_needed = False
+
+        elif (
+            _requires_valid_login(current_sid, approach_paths)
+            and _requires_valid_login(source_sid, approach_paths)
+        ):
+            # Both current and target screens require valid login — already authenticated.
+            # Navigate via sidebar (one click) instead of full logout + replay.
+            try:
+                navigated = robot.navigate_to_screen(source_sid)
+            except AttributeError:
+                navigated = False   # backend doesn't support direct navigation
+
+            if navigated:
+                new_dom = robot.get_dom_screen_id()
+                print(f"    [SMART] Sidebar nav: '{current_dom}' → '{source_sid}' (DOM now: '{new_dom}')")
+                reset_needed = False
+            else:
+                print(f"    [RESET] Sidebar nav to '{source_sid}' unavailable — full reset")
+
+    except Exception as e:
+        print(f"    [RESET] DOM check failed ({e}) — full reset")
+
+    if reset_needed:
+        _do_reset_and_replay(action, approach_paths, app_map, credentials)
 
     # ── Execute the queued action ─────────────────────────────────────────────
     _run_steps(action["steps"], action["screen_id"], app_map, credentials)

@@ -89,11 +89,14 @@ print("=" * 60)
 runner = create_test_runner()
 initial: TestRunnerState = {
     "test_cases":          test_cases,
-    "app_map":             None,        # not required — agent navigates dynamically
+    # Pass the full app_map so parse_steps can use Tier-1/2 (coordinate lookup + plan cache).
+    # When app_map is None, parse_steps falls through to Tier-3 (legacy vision-agent path).
+    "app_map":             _app_map,
     "credentials":         CREDENTIALS,
     "demo_screens":        DEMO_SCREENS,
     "current_tc_idx":      0,
     "current_tc":          None,
+    "structured_plan":     None,
     "planned_steps":       [],
     "credential_scenario": "",
     "start_image":         str(SCREENSHOTS / "login_page.png"),

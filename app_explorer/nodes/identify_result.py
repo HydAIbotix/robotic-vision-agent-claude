@@ -5,6 +5,7 @@ record the transition in the AppMap, and flag whether a new screen was discovere
 import base64
 import json
 from langchain_core.messages import HumanMessage
+from vision_agent import robot
 from vision_agent.storage import get_storage
 from vision_agent.llm import get_llm
 from vision_agent.screen_cache import compute_hash, lookup_screen
@@ -25,6 +26,29 @@ def _record_transition(app_map: dict, action: dict, result_screen_id: str) -> di
     return new_map
 
 
+def _record_element_transition(app_map: dict, action: dict, result_screen_id: str) -> dict:
+    """Track element_id → destination globally for cross-screen deduplication.
+
+    When a single-tap action on element 'sign_out_button' leads to 'signin', this is
+    stored once.  explore_screen then skips 'sign_out' actions on every other screen
+    because the destination ('signin') is already fully explored.
+
+    Only single-tap actions are tracked — multi-step flows (login form, etc.) are
+    screen-specific and should not be globally deduplicated.
+    """
+    steps = action.get("steps") or []
+    if len(steps) != 1 or steps[0].get("action_type") != "tap":
+        return app_map
+    element_id = steps[0].get("element_id", "")
+    if not element_id or not result_screen_id:
+        return app_map
+    element_transitions = dict(app_map.get("element_transitions") or {})
+    if element_id not in element_transitions:
+        element_transitions[element_id] = result_screen_id
+        return {**app_map, "element_transitions": element_transitions}
+    return app_map
+
+
 def identify_result(state: ExplorerState) -> dict:
     action = state.get("last_executed_action")
     if not action:
@@ -33,35 +57,71 @@ def identify_result(state: ExplorerState) -> dict:
     image_bytes = get_storage().load(state["current_image_path"])
     app_map     = state["app_map"]
 
-    # ── Fast path: perceptual-hash lookup ────────────────────────────────────
-    # lookup_screen only matches screens that have been fully analyzed by
-    # explore_screen (those have a screen_hash).  Skeleton screens created by
-    # identify_result (elements:[]) have no hash, so they fall through to Claude.
-    cached = lookup_screen(image_bytes, app_map)
-    if cached:
-        result_screen_id = cached["screen_id"]
-        print(f"\n  [RESULT]  {action['screen_id']}::{action['action_key']}  ->  '{result_screen_id}'  (hash-hit, 0 LLM calls)")
-        new_map       = _record_transition(app_map, action, result_screen_id)
-        approach_paths = dict(state.get("approach_paths") or {})
-        return {
-            "app_map":               new_map,
-            "current_screen_id":     result_screen_id,
-            "last_result_is_new":    False,
-            "last_result_screen_id": result_screen_id,
-            "approach_paths":        approach_paths,
-        }
+    # ── Primary: DOM-based screen detection (React SPA state navigation) ──────
+    # The kiosk is a SPA — all nav sub-pages share the same URL and visual layout,
+    # so their perceptual hashes collide.  Each screen renders exactly one
+    # data-testid section; get_dom_screen_id() reads it reliably.
+    dom_id        = robot.get_dom_screen_id()    # e.g. "categories", "products", ""
+    known_screens = app_map.get("screens") or {}
+
+    if dom_id:
+        # Find the already-explored screen whose dom_id matches
+        dom_match = next(
+            (sid for sid, sc in known_screens.items() if sc.get("dom_id") == dom_id),
+            None,
+        )
+        if dom_match:
+            # Known screen — fast path, zero LLM calls
+            result_screen_id = dom_match
+            print(f"\n  [RESULT]  {action['screen_id']}::{action['action_key']}  ->  '{result_screen_id}'  (DOM-hit: {dom_id}, 0 LLM calls)")
+            new_map        = _record_transition(app_map, action, result_screen_id)
+            new_map        = _record_element_transition(new_map, action, result_screen_id)
+            approach_paths = dict(state.get("approach_paths") or {})
+            return {
+                "app_map":               new_map,
+                "current_screen_id":     result_screen_id,
+                "last_result_is_new":    False,
+                "last_result_screen_id": result_screen_id,
+                "approach_paths":        approach_paths,
+            }
+        # dom_id not yet mapped → new screen.
+        # Skip perceptual-hash lookup (it will collide with layout-sharing siblings)
+        # and fall straight through to Claude vision with dom_id as the suggested id.
+
+    else:
+        # ── Secondary: perceptual-hash lookup (no DOM signal available) ───────
+        # Only used when backend is real robot arm or demo stubs (no browser DOM).
+        # lookup_screen only matches screens with a screen_hash (fully explored).
+        cached = lookup_screen(image_bytes, app_map)
+        if cached:
+            result_screen_id = cached["screen_id"]
+            print(f"\n  [RESULT]  {action['screen_id']}::{action['action_key']}  ->  '{result_screen_id}'  (hash-hit, 0 LLM calls)")
+            new_map        = _record_transition(app_map, action, result_screen_id)
+            new_map        = _record_element_transition(new_map, action, result_screen_id)
+            approach_paths = dict(state.get("approach_paths") or {})
+            return {
+                "app_map":               new_map,
+                "current_screen_id":     result_screen_id,
+                "last_result_is_new":    False,
+                "last_result_screen_id": result_screen_id,
+                "approach_paths":        approach_paths,
+            }
 
     # ── Slow path: Claude vision identification ───────────────────────────────
     b64 = base64.standard_b64encode(image_bytes).decode()
-    known_screens = "\n".join(
+    known_desc = "\n".join(
         f"  {sid}: {sc['description']}"
-        for sid, sc in (app_map.get("screens") or {}).items()
+        for sid, sc in known_screens.items()
     ) or "  (none yet)"
+
+    # Provide DOM hint so Claude assigns the right screen_id for new SPA screens
+    dom_hint = f"\nDOM screen hint: '{dom_id}' — use this as the screen_id for any new screen." if dom_id else ""
 
     prompt = IDENTIFY_RESULT_SCREEN.format(
         action_description=action["description"],
         from_screen_id=action["screen_id"],
-        known_screens=known_screens,
+        known_screens=known_desc,
+        dom_screen_hint=dom_hint,
     )
 
     llm = get_llm()
@@ -75,13 +135,14 @@ def identify_result(state: ExplorerState) -> dict:
     v = json.loads(raw)
 
     result_screen_id = v["screen_id"]
-    is_new            = v.get("is_new_screen", False)
-    description       = v.get("description", "")
-    transition_type   = v.get("transition_type", "navigation_success")
+    is_new           = v.get("is_new_screen", False)
+    description      = v.get("description", "")
+    transition_type  = v.get("transition_type", "navigation_success")
 
     print(f"\n  [RESULT]  {action['screen_id']}::{action['action_key']}  ->  '{result_screen_id}'  ({'NEW' if is_new else 'known'})  [{transition_type}]")
 
     new_map = _record_transition(app_map, action, result_screen_id)
+    new_map = _record_element_transition(new_map, action, result_screen_id)
 
     # If new screen: add a skeleton entry so explore_screen can flesh it out
     if is_new and result_screen_id not in new_map["screens"]:
@@ -93,9 +154,6 @@ def identify_result(state: ExplorerState) -> dict:
         }
 
     # ── Track approach path so execute_action can reset to any screen ─────────
-    # The approach_path for the new screen = parent screen's path + the action
-    # that led here.  This lets the explorer replay the exact navigation chain
-    # needed to reach any screen from the entry URL before executing an action.
     approach_paths = dict(state.get("approach_paths") or {})
     if is_new and result_screen_id not in approach_paths:
         parent_path = approach_paths.get(action["screen_id"], [])
