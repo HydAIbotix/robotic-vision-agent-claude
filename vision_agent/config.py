@@ -42,5 +42,35 @@ class Settings(BaseSettings):
     app_map_path: str = "app_map.json"
     use_app_map_cache: bool = True
 
+    # ── Hardware robot settings (active when robot_backend="real") ─────────────
+    # Connection
+    robot_ip: str = "192.168.1.100"
+    robot_port: int = 8000
+    robot_id: str = "R-01"
+    default_kiosk_id: str = "K-01"
+
+    # Coordinate spaces
+    # viewport_* = what app_map learned in Playwright mode (pixels)
+    # robot_camera_* = resolution returned by /capture from the real arm
+    viewport_width: int = 1400
+    viewport_height: int = 900
+    robot_camera_width: int = 1920
+    robot_camera_height: int = 1080
+
+    # Physical kiosk screen dimensions (meters) — used for arm pose calculations
+    screen_width_m: float = 0.400
+    screen_height_m: float = 0.300
+
+    # Timeouts (seconds)
+    base_move_timeout_s: float = 60.0
+    arm_move_timeout_s: float = 30.0
+    card_op_timeout_s: float = 30.0
+    robot_poll_interval_s: float = 0.5
+
+    # Management API (FastAPI server for management frontend)
+    api_host: str = "0.0.0.0"
+    api_port: int = 8001
+    db_url: str = "sqlite:///./management.db"  # swap to postgresql://... for production
+
 
 settings = Settings()
