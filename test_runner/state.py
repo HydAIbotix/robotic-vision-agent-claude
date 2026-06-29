@@ -21,6 +21,9 @@ class TestResult(TypedDict):
 
 
 class TestRunnerState(TypedDict):
+    # ── Run identity (used for live event broadcasting) ───────────────────────
+    run_id: str
+
     # ── Static config (set once at start) ────────────────────────────────────
     test_cases: list[TestCase]
     app_map: Optional[dict]   # None → agent navigates dynamically; set if AppMap available

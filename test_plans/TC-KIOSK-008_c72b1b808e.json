@@ -1,0 +1,69 @@
+{
+  "credential_scenario": "valid",
+  "steps": [
+    {
+      "action": "verify",
+      "expected_screen": "login",
+      "description": "Sign in to Generic Kiosk is visible"
+    },
+    {
+      "action": "tap",
+      "screen_id": "login",
+      "element_id": "email_input",
+      "px": 982,
+      "py": 231
+    },
+    {
+      "action": "type",
+      "value": "tester@kiosk.local"
+    },
+    {
+      "action": "tap",
+      "screen_id": "login",
+      "element_id": "password_input",
+      "px": 982,
+      "py": 312
+    },
+    {
+      "action": "type",
+      "value": "Password123"
+    },
+    {
+      "action": "tap",
+      "screen_id": "login",
+      "element_id": "sign_in_button",
+      "px": 982,
+      "py": 385
+    },
+    {
+      "action": "verify",
+      "expected_screen": "products",
+      "description": "Products page is displayed after successful sign in"
+    },
+    {
+      "action": "tap",
+      "screen_id": "products",
+      "element_id": "order_history_nav_button",
+      "px": 1150,
+      "py": 42
+    },
+    {
+      "action": "verify",
+      "expected_screen": "products",
+      "description": "Order History page is displayed with available orders"
+    },
+    {
+      "action": "tap",
+      "screen_id": "products",
+      "element_id": "home_button",
+      "px": 1004,
+      "py": 49
+    },
+    {
+      "action": "verify",
+      "expected_screen": "products",
+      "description": "Products page is displayed after navigating to home"
+    }
+  ],
+  "cache_key": "c72b1b808e"
+}

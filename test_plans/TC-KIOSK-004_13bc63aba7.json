@@ -1,0 +1,69 @@
+{
+  "credential_scenario": "valid",
+  "steps": [
+    {
+      "action": "verify",
+      "expected_screen": "login",
+      "description": "Sign in to Generic Kiosk is visible"
+    },
+    {
+      "action": "tap",
+      "screen_id": "login",
+      "element_id": "email_input",
+      "px": 982,
+      "py": 231
+    },
+    {
+      "action": "type",
+      "value": "tester@kiosk.local"
+    },
+    {
+      "action": "tap",
+      "screen_id": "login",
+      "element_id": "password_input",
+      "px": 982,
+      "py": 312
+    },
+    {
+      "action": "type",
+      "value": "Password123"
+    },
+    {
+      "action": "tap",
+      "screen_id": "login",
+      "element_id": "sign_in_button",
+      "px": 982,
+      "py": 385
+    },
+    {
+      "action": "verify",
+      "expected_screen": "products",
+      "description": "Products page is displayed after successful sign in"
+    },
+    {
+      "action": "tap",
+      "screen_id": "products",
+      "element_id": "audiopulse_increment_button",
+      "px": 1275,
+      "py": 693
+    },
+    {
+      "action": "verify",
+      "expected_screen": "products",
+      "description": "AudioPulse Pro Buds quantity is one"
+    },
+    {
+      "action": "tap",
+      "screen_id": "products",
+      "element_id": "audiopulse_add_to_cart_button",
+      "px": 1127,
+      "py": 843
+    },
+    {
+      "action": "verify",
+      "expected_screen": "products",
+      "description": "Status shows product added to cart and Cart / Checkout count is one"
+    }
+  ],
+  "cache_key": "13bc63aba7"
+}

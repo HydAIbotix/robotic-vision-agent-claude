@@ -1,0 +1,45 @@
+{
+  "credential_scenario": "valid",
+  "steps": [
+    {
+      "action": "verify",
+      "expected_screen": "login",
+      "description": "login screen is visible"
+    },
+    {
+      "action": "tap",
+      "screen_id": "login",
+      "element_id": "email_input",
+      "px": 982,
+      "py": 231
+    },
+    {
+      "action": "type",
+      "value": "tester@kiosk.local"
+    },
+    {
+      "action": "tap",
+      "screen_id": "login",
+      "element_id": "password_input",
+      "px": 982,
+      "py": 312
+    },
+    {
+      "action": "type",
+      "value": "Password123"
+    },
+    {
+      "action": "tap",
+      "screen_id": "login",
+      "element_id": "sign_in_button",
+      "px": 982,
+      "py": 385
+    },
+    {
+      "action": "verify",
+      "expected_screen": "products",
+      "description": "products page is displayed after successful login with valid credentials"
+    }
+  ],
+  "cache_key": "f697a77c90"
+}

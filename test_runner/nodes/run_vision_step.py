@@ -15,6 +15,7 @@ from pathlib import Path
 from vision_agent import robot
 from vision_agent.config import settings
 from test_runner.state import TestRunnerState, TestResult
+from test_runner import broadcaster
 
 
 # ── Tier 1/2: structured plan execution ──────────────────────────────────────
@@ -33,7 +34,23 @@ def _resolve_credentials(value: str, credential_scenario: str, credentials: dict
     )
 
 
-def _execute_structured_plan(plan: dict, credentials: dict) -> tuple[list[dict], str]:
+def _load_device_map() -> dict[str, dict]:
+    """Load device positions from DB keyed by alias (e.g. 'TVM'). Returns {} on error."""
+    try:
+        from api.database import SessionLocal
+        from api import models as _models
+        db = SessionLocal()
+        try:
+            devices = db.query(_models.DeviceConfig).all()
+            return {d.alias: {"pos_x": d.pos_x, "pos_y": d.pos_y, "pos_theta": d.pos_theta}
+                    for d in devices}
+        finally:
+            db.close()
+    except Exception:
+        return {}
+
+
+def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", test_id: str = "") -> tuple[list[dict], str]:
     """
     Execute every step in the structured plan using stored pixel coordinates.
 
@@ -45,8 +62,21 @@ def _execute_structured_plan(plan: dict, credentials: dict) -> tuple[list[dict],
     """
     step_results: list[dict] = []
     scenario = plan.get("credential_scenario", "valid")
+    device_map  = _load_device_map()
+    current_dev: str | None = None
 
     for i, step in enumerate(plan.get("steps") or [], 1):
+        # ── device routing — move robot before first step on each new device ──
+        step_dev = step.get("device")
+        if step_dev and step_dev != current_dev:
+            dev_cfg = device_map.get(step_dev)
+            if dev_cfg:
+                print(f"    [ROBOT] Moving to device '{step_dev}' @ ({dev_cfg['pos_x']}, {dev_cfg['pos_y']}, {dev_cfg['pos_theta']}°)")
+                robot.move_to_position(dev_cfg["pos_x"], dev_cfg["pos_y"], dev_cfg["pos_theta"])
+                time.sleep(0.8)  # allow robot/camera to settle
+            else:
+                print(f"    [ROBOT] Device '{step_dev}' not in device map — skipping move")
+            current_dev = step_dev
         action = step.get("action", "")
 
         # ── verify ────────────────────────────────────────────────────────────
@@ -58,23 +88,16 @@ def _execute_structured_plan(plan: dict, credentials: dict) -> tuple[list[dict],
                 if not actual:
                     # DOM not available in this backend — skip verify, log warning
                     print(f"    {i:>2}. verify  '{desc}'  [DOM unavailable — skipped]")
-                    step_results.append({
-                        "step": f"verify: {desc}",
-                        "success": True,
-                        "note": "DOM unavailable — skipped",
-                        "method": "dom",
-                    })
+                    sr = {"step": f"verify: {desc}", "success": True, "note": "DOM unavailable — skipped", "method": "dom"}
+                    step_results.append(sr)
+                    if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
                     continue
                 success = (actual == expected)
                 status  = "PASS" if success else "FAIL"
                 print(f"    {i:>2}. verify  expected={expected!r}  actual={actual!r}  [{status}]")
-                step_results.append({
-                    "step":            f"verify: {desc}",
-                    "success":         success,
-                    "expected_screen": expected,
-                    "actual_screen":   actual,
-                    "method":          "dom",
-                })
+                sr = {"step": f"verify: {desc}", "success": success, "expected_screen": expected, "actual_screen": actual, "method": "dom"}
+                step_results.append(sr)
+                if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
                 if not success:
                     return step_results, "failed"
             continue
@@ -88,13 +111,9 @@ def _execute_structured_plan(plan: dict, credentials: dict) -> tuple[list[dict],
             print(f"    {i:>2}. tap   {eid!r} @ ({px},{py})  [{sid}]")
             robot.tap(px, py)
             time.sleep(0.5)
-            step_results.append({
-                "step":       f"tap: {eid} @ ({px},{py})",
-                "success":    True,
-                "method":     "app_map",
-                "screen_id":  sid,
-                "element_id": eid,
-            })
+            sr = {"step": f"tap: {eid} @ ({px},{py})", "success": True, "method": "app_map", "screen_id": sid, "element_id": eid}
+            step_results.append(sr)
+            if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
             continue
 
         # ── type ──────────────────────────────────────────────────────────────
@@ -103,11 +122,9 @@ def _execute_structured_plan(plan: dict, credentials: dict) -> tuple[list[dict],
             print(f"    {i:>2}. type  {value!r}")
             robot.type_text(value, clear_first=True)
             time.sleep(0.3)
-            step_results.append({
-                "step":    f"type: {value[:30]}",
-                "success": True,
-                "method":  "app_map",
-            })
+            sr = {"step": f"type: {value[:30]}", "success": True, "method": "app_map"}
+            step_results.append(sr)
+            if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
             continue
 
         # ── unknown ───────────────────────────────────────────────────────────
@@ -212,9 +229,20 @@ def run_vision_step(state: TestRunnerState) -> dict:
     structured_plan     = state.get("structured_plan")
     credentials         = state.get("credentials") or {}
     credential_scenario = state.get("credential_scenario", "valid")
+    run_id              = state.get("run_id", "")
 
     print(f"\n  {'─'*55}")
     print(f"  [RUN] {tc['test_id']}  —  {tc['summary']}")
+
+    # Broadcast test-case start so the UI can show which TC is currently running
+    if run_id:
+        broadcaster.emit(run_id, {
+            "event":    "test_started",
+            "run_id":   run_id,
+            "test_id":  tc["test_id"],
+            "summary":  tc["summary"],
+            "total_steps": len((structured_plan or {}).get("steps") or []),
+        })
 
     # ── Tier 1 / 2: execute from structured plan (app_map coordinates) ────────
     if structured_plan and settings.robot_backend == "playwright":
@@ -225,7 +253,7 @@ def run_vision_step(state: TestRunnerState) -> dict:
         robot.reset_to_entry()
         time.sleep(1.2)
 
-        step_results, outcome = _execute_structured_plan(structured_plan, credentials)
+        step_results, outcome = _execute_structured_plan(structured_plan, credentials, run_id=run_id, test_id=tc["test_id"])
         passed = sum(1 for r in step_results if r["success"])
 
         # On failure: optionally fall through to Tier 3 for diagnosis

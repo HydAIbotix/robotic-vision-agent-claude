@@ -1,0 +1,45 @@
+{
+  "credential_scenario": "invalid",
+  "steps": [
+    {
+      "action": "verify",
+      "expected_screen": "login",
+      "description": "Sign in to Generic Kiosk is visible"
+    },
+    {
+      "action": "tap",
+      "screen_id": "login",
+      "element_id": "email_input",
+      "px": 982,
+      "py": 231
+    },
+    {
+      "action": "type",
+      "value": "baduser"
+    },
+    {
+      "action": "tap",
+      "screen_id": "login",
+      "element_id": "password_input",
+      "px": 982,
+      "py": 312
+    },
+    {
+      "action": "type",
+      "value": "wrongpass"
+    },
+    {
+      "action": "tap",
+      "screen_id": "login",
+      "element_id": "sign_in_button",
+      "px": 982,
+      "py": 385
+    },
+    {
+      "action": "verify",
+      "expected_screen": "popup_login_failed",
+      "description": "Login failed modal is displayed with incorrect username or password message"
+    }
+  ],
+  "cache_key": "027d3c8417"
+}

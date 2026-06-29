@@ -95,6 +95,13 @@ def navigate_to_screen(screen_id: str) -> bool:
     return False
 
 
+def move_to_position(x: float, y: float, theta: float) -> dict:
+    """Drive the robot base to (x, y) with heading theta (degrees) before interacting with a device."""
+    # TODO: send navigation goal to robot base controller
+    print(f"    [ROBOT] move_to_position(x={x}, y={y}, θ={theta}°)")
+    return {"success": True, "x": x, "y": y, "theta": theta}
+
+
 def update_explorer_progress(explored: int, total: int, current_action: str = "") -> None:
     """No-op in demo/real modes — progress HUD only renders in playwright mode."""
     pass

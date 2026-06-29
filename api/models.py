@@ -83,6 +83,38 @@ class TestResult(Base):
     run           = relationship("TestRun", back_populates="results")
 
 
+class Defect(Base):
+    __tablename__ = "defects"
+    id                 = Column(Integer, primary_key=True)
+    run_id             = Column(String(50), ForeignKey("test_runs.run_id"))
+    test_id            = Column(String(50))
+    title              = Column(Text)
+    description        = Column(Text)
+    steps_to_reproduce = Column(Text)
+    root_cause         = Column(Text)
+    probable_fix       = Column(Text)
+    severity           = Column(String(20))   # critical | high | medium | low
+    priority           = Column(String(10))   # P1 | P2 | P3 | P4
+    jira_key           = Column(String(50))   # e.g. KIOSK-123
+    jira_url           = Column(String(500))
+    status             = Column(String(20), default="open")
+    evidence_json      = Column(JSON)         # list of screenshot paths
+    created_at         = Column(DateTime, default=datetime.utcnow)
+
+
+class DeviceConfig(Base):
+    """One entry per physical device the robot visits (TVM, MPOS, RSV, etc.)."""
+    __tablename__ = "device_configs"
+    id          = Column(Integer, primary_key=True)
+    alias       = Column(String(50), unique=True, nullable=False)  # e.g. "TVM"
+    description = Column(String(200))                               # e.g. "Ticket Vending Machine"
+    pos_x       = Column(Float, default=0.0)   # metres from robot home
+    pos_y       = Column(Float, default=0.0)
+    pos_theta   = Column(Float, default=0.0)   # heading in degrees
+    created_at  = Column(DateTime, default=datetime.utcnow)
+    updated_at  = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class RobotEvent(Base):
     __tablename__ = "robot_events"
     id           = Column(Integer, primary_key=True)

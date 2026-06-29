@@ -19,6 +19,19 @@ Endpoints:
     GET  /api/robots            — robot status (real backend only)
     POST /api/explore           — trigger app explorer
 """
+import sys
+import io
+
+# Windows default stdout/stderr use cp1252 which can't encode many Unicode chars
+# (emoji, em-dash, etc.) that appear in Claude API responses and test output.
+# Reconfigure to UTF-8 before any other code runs so all print() calls are safe.
+for _s in ('stdout', 'stderr'):
+    _stream = getattr(sys, _s)
+    if hasattr(_stream, 'reconfigure'):
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+    elif hasattr(_stream, 'buffer'):
+        setattr(sys, _s, io.TextIOWrapper(_stream.buffer, encoding='utf-8', errors='replace'))
+
 import json
 import threading
 import asyncio
@@ -53,9 +66,15 @@ _ws_lock = threading.Lock()
 # Active run threads
 _active_runs: dict[str, dict] = {}
 
+# The running asyncio event loop — captured at startup so background threads
+# can submit coroutines to it via asyncio.run_coroutine_threadsafe().
+_main_loop: asyncio.AbstractEventLoop | None = None
+
 
 @app.on_event("startup")
-def startup():
+async def startup():
+    global _main_loop
+    _main_loop = asyncio.get_running_loop()
     init_db()
     print(f"  [API] Management API ready at http://{settings.api_host}:{settings.api_port}")
 
@@ -71,8 +90,8 @@ def health():
 
 class RunRequest(BaseModel):
     robot_id:   str = "R-01"
-    kiosk_id:   str = "K-01"
-    excel_path: str
+    kiosk_id:   str = ""          # derived from test cases if empty
+    excel_path: str = ""          # reads from DB when empty
     filter_tc:  Optional[str] = None
     mode:       str = "playwright"   # playwright | real | demo
     credentials: dict = {
@@ -157,6 +176,31 @@ async def run_ws(run_id: str, ws: WebSocket):
                 conns.remove(ws)
 
 
+@app.get("/api/runs/{run_id}/defects")
+def get_run_defects(run_id: str, db: Session = Depends(get_db)):
+    defects = db.query(models.Defect).filter_by(run_id=run_id).all()
+    return [
+        {
+            "id":                 d.id,
+            "run_id":             d.run_id,
+            "test_id":            d.test_id,
+            "title":              d.title,
+            "description":        d.description,
+            "steps_to_reproduce": d.steps_to_reproduce,
+            "root_cause":         d.root_cause,
+            "probable_fix":       d.probable_fix,
+            "severity":           d.severity,
+            "priority":           d.priority,
+            "jira_key":           d.jira_key,
+            "jira_url":           d.jira_url,
+            "status":             d.status,
+            "evidence":           d.evidence_json or [],
+            "created_at":         d.created_at.isoformat() if d.created_at else None,
+        }
+        for d in defects
+    ]
+
+
 # ── Test Cases ────────────────────────────────────────────────────────────────
 
 @app.get("/api/test-cases")
@@ -167,16 +211,26 @@ def list_test_cases(kiosk_id: Optional[str] = None, db: Session = Depends(get_db
     return [_tc_summary(t) for t in q.order_by(models.TestCase.test_id).all()]
 
 
+def _infer_kiosk_id(test_id: str, steps_raw: str = "") -> str:
+    """Derive kiosk_id from test_id prefix or step content."""
+    tid = test_id.upper()
+    text = (test_id + " " + steps_raw).upper()
+    if "K-01" in text or "K1" in text or "KIOSK-1" in text or "KIOSK 1" in text:
+        return "K-01"
+    if "K-02" in text or "K2" in text or "KIOSK-2" in text or "KIOSK 2" in text:
+        return "K-02"
+    return "K-01"  # safe default
+
+
 @app.post("/api/test-cases/upload")
 def upload_test_cases(
     file: UploadFile = File(...),
-    kiosk_id: str = "K-02",
+    kiosk_id: Optional[str] = None,  # auto-detected from test content when omitted
     db: Session = Depends(get_db),
 ):
-    import tempfile, openpyxl
+    import tempfile
     from test_runner.reader.excel_reader import read_test_cases
 
-    # Save upload to temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
         tmp.write(file.file.read())
         tmp_path = tmp.name
@@ -188,13 +242,14 @@ def upload_test_cases(
 
     saved = 0
     for tc in cases:
+        tc_kiosk = kiosk_id or _infer_kiosk_id(tc["test_id"], tc.get("steps_raw", ""))
         existing = db.query(models.TestCase).filter_by(test_id=tc["test_id"]).first()
         if existing:
             for k, v in tc.items():
                 setattr(existing, k, v)
-            existing.kiosk_id = kiosk_id
+            existing.kiosk_id = tc_kiosk
         else:
-            db.add(models.TestCase(kiosk_id=kiosk_id, **tc))
+            db.add(models.TestCase(kiosk_id=tc_kiosk, **tc))
             saved += 1
     db.commit()
     return {"imported": len(cases), "new": saved}
@@ -202,9 +257,15 @@ def upload_test_cases(
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
+def _device_summary(d: models.DeviceConfig) -> dict:
+    return {"alias": d.alias, "description": d.description or "",
+            "pos_x": d.pos_x, "pos_y": d.pos_y, "pos_theta": d.pos_theta}
+
+
 @app.get("/api/config")
 def get_config(db: Session = Depends(get_db)):
-    kiosks = db.query(models.KioskConfig).all()
+    kiosks  = db.query(models.KioskConfig).all()
+    devices = db.query(models.DeviceConfig).order_by(models.DeviceConfig.alias).all()
     return {
         "robot_backend":  settings.robot_backend,
         "robot_ip":       settings.robot_ip,
@@ -212,7 +273,42 @@ def get_config(db: Session = Depends(get_db)):
         "viewport":       {"width": settings.viewport_width, "height": settings.viewport_height},
         "camera":         {"width": settings.robot_camera_width, "height": settings.robot_camera_height},
         "kiosks":         [_kiosk_summary(k) for k in kiosks],
+        "devices":        [_device_summary(d) for d in devices],
     }
+
+
+class DeviceConfigRequest(BaseModel):
+    alias:       str
+    description: str = ""
+    pos_x:       float = 0.0
+    pos_y:       float = 0.0
+    pos_theta:   float = 0.0
+
+
+@app.get("/api/config/devices")
+def list_devices(db: Session = Depends(get_db)):
+    return [_device_summary(d) for d in db.query(models.DeviceConfig).order_by(models.DeviceConfig.alias).all()]
+
+
+@app.put("/api/config/device")
+def upsert_device(req: DeviceConfigRequest, db: Session = Depends(get_db)):
+    existing = db.query(models.DeviceConfig).filter_by(alias=req.alias).first()
+    if existing:
+        for k, v in req.model_dump().items():
+            setattr(existing, k, v)
+        existing.updated_at = datetime.utcnow()
+    else:
+        db.add(models.DeviceConfig(**req.model_dump()))
+    db.commit()
+    return {"status": "ok", "alias": req.alias}
+
+
+@app.delete("/api/config/device/{alias}", status_code=204)
+def delete_device(alias: str, db: Session = Depends(get_db)):
+    d = db.query(models.DeviceConfig).filter_by(alias=alias).first()
+    if d:
+        db.delete(d)
+        db.commit()
 
 
 class KioskConfigRequest(BaseModel):
@@ -252,6 +348,192 @@ def robot_status():
         return {"mode": "real", "robots": [get_status()]}
     except Exception as e:
         return {"mode": "real", "robots": [], "error": str(e)}
+
+
+# ── TC Plan (Claude-powered, cached) ─────────────────────────────────────────
+
+_TC_PLAN_PROMPT = """\
+You are a test automation planner for a physical kiosk touchscreen testing system.
+
+DEVICE MAP (a single robot moves to each device before interacting with its touchscreen):
+{device_map}
+
+A robotic arm physically moves to the device's position, then taps coordinates on its touchscreen.
+Playwright (headless browser) is used as a substitute during development — same tap coordinates.
+
+CHANNEL DEFINITIONS (follow these exactly):
+- "robot": ANY interaction with a physical device touchscreen from the device map above.
+  Includes tapping buttons, typing on on-screen keyboards, navigating menus.
+  Even if the word "click", "enter", "select", or "navigate" is used — if the target is
+  a physical device screen, the channel is "robot", not "web".
+- "web": ONLY interactions with external web applications that are NOT a physical device
+  (e.g. a CRM system, backend admin portal, browser-based management dashboard).
+- "db": Direct database queries, SQL checks, or backend record verification.
+- "validation": Assertions, verifications, checking expected outcomes, confirming state.
+
+KIOSK APP MAP (screens and elements with exact pixel coordinates):
+{element_inventory}
+
+TEST CASE TO PLAN:
+ID: {test_id}
+Summary: {summary}
+Description: {description}
+
+Steps (raw):
+{steps_raw}
+
+Expected Results (raw):
+{expected_results_raw}
+
+YOUR TASKS:
+1. Parse each test step into one or more machine-executable sub-steps.
+2. Assign the correct channel per step (use the definitions above strictly).
+3. For every step: set "device" to the alias of the target device from the device map above
+   (e.g. "TVM", "MPOS"). For web/db/validation steps not tied to a physical device, omit "device".
+4. For "robot" tap steps: look up the screen_id and element from the app map; use the exact px/py.
+5. For "robot" type steps: use credential placeholders {{valid_email}}, {{valid_password}} for login fields.
+6. Identify required_config — data the tester MUST provide before the test:
+   - Include: email (login), password, card_number (ONLY if a specific pre-existing card is needed).
+   - EXCLUDE: amount / balance (card balance is managed by the system automatically).
+   - EXCLUDE: anything generated at runtime (card numbers created by the reader, transaction IDs, etc.).
+7. Set credential_scenario: "valid" or "invalid" based on whether the test uses correct credentials.
+
+Return ONLY valid JSON — no markdown fences, no extra text:
+{{
+  "test_id": "{test_id}",
+  "credential_scenario": "valid",
+  "required_config": [
+    {{"key": "email", "label": "Login Email", "type": "text"}},
+    {{"key": "password", "label": "Password", "type": "password"}}
+  ],
+  "steps": [
+    {{
+      "action": "verify",
+      "channel": "validation",
+      "description": "Login screen is visible",
+      "expected_screen": "login"
+    }},
+    {{
+      "action": "tap",
+      "channel": "robot",
+      "device": "TVM",
+      "description": "Tap email input field",
+      "screen_id": "login",
+      "element_id": "email_input",
+      "px": 700,
+      "py": 412
+    }},
+    {{
+      "action": "type",
+      "channel": "robot",
+      "description": "Type login email",
+      "value": "{{valid_email}}"
+    }},
+    {{
+      "action": "tap",
+      "channel": "robot",
+      "description": "Tap Sign In button",
+      "screen_id": "login",
+      "element_id": "sign_in_button",
+      "px": 700,
+      "py": 560
+    }},
+    {{
+      "action": "verify",
+      "channel": "validation",
+      "description": "Landed on products screen after login",
+      "expected_screen": "products"
+    }}
+  ]
+}}
+"""
+
+
+class TcPlanRequest(BaseModel):
+    test_id: str
+    summary: str
+    description: str = ""
+    steps_raw: str
+    expected_results_raw: str = ""
+    force: bool = False   # True → regenerate even if cached
+
+
+@app.post("/api/tc-plan")
+def get_tc_plan(req: TcPlanRequest, db: Session = Depends(get_db)):
+    """Generate (or return cached) Claude-powered structured plan for a test case."""
+    plan_dir  = Path("test_plans")
+    plan_dir.mkdir(exist_ok=True)
+    plan_file = plan_dir / f"{req.test_id}.json"
+
+    # Return cached plan unless force=True
+    if plan_file.exists() and not req.force:
+        try:
+            return json.loads(plan_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass  # corrupt cache — regenerate
+
+    # Build device map context from DB (one-time config, embedded in plan at generation time)
+    devices = db.query(models.DeviceConfig).order_by(models.DeviceConfig.alias).all()
+    if devices:
+        device_map = "\n".join(
+            f"- {d.alias} ({d.description}): physical position "
+            f"(x={d.pos_x:.2f}m, y={d.pos_y:.2f}m, θ={d.pos_theta:.1f}°)"
+            for d in devices
+        )
+    else:
+        device_map = (
+            "No devices configured yet — infer the device name from the test steps verbatim "
+            "and tag each robot step with the device name you identify (e.g. 'TVM', 'MPOS')."
+        )
+
+    # Load app map element inventory (may be empty if not yet explored)
+    app_map = None
+    if Path(settings.app_map_path).exists():
+        from app_map import store as app_map_store
+        app_map = app_map_store.load(settings.app_map_path)
+    inventory = ""
+    if app_map:
+        from app_map import store as app_map_store
+        inventory = app_map_store.element_inventory_for_prompt(app_map)
+    if not inventory:
+        inventory = "App map not yet available — classify channels from context only; omit px/py/element_id."
+
+    # Call Claude
+    try:
+        from langchain_core.messages import HumanMessage
+        from vision_agent.llm import get_llm
+        prompt = _TC_PLAN_PROMPT.format(
+            device_map=device_map,
+            test_id=req.test_id,
+            summary=req.summary,
+            description=req.description or req.summary,
+            steps_raw=req.steps_raw,
+            expected_results_raw=req.expected_results_raw,
+            element_inventory=inventory,
+        )
+        llm = get_llm()
+        raw = llm.invoke([HumanMessage(content=prompt)]).content.strip()
+        # Strip markdown fences if Claude wraps the JSON
+        if "```" in raw:
+            raw = raw.split("```")[1].lstrip("json").strip()
+        plan = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise HTTPException(500, f"Claude returned invalid JSON: {e}")
+    except Exception as e:
+        raise HTTPException(500, f"Plan generation failed: {e}")
+
+    # Stamp and cache
+    plan["generated_at"] = datetime.utcnow().isoformat() + "Z"
+    plan_file.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
+    return plan
+
+
+@app.delete("/api/tc-plan/{test_id}", status_code=204)
+def delete_tc_plan(test_id: str):
+    """Remove cached plan so next GET regenerates it via Claude."""
+    p = Path("test_plans") / f"{test_id}.json"
+    if p.exists():
+        p.unlink()
 
 
 # ── App Explorer ──────────────────────────────────────────────────────────────
@@ -329,6 +611,33 @@ def delete_app_map():
         p.unlink()
 
 
+@app.get("/api/screenshots/annotated")
+def list_annotated_screenshots():
+    """List annotated screenshots grouped by screen_id."""
+    shots_dir = Path(settings.app_map_path).parent / "screenshots" / "annotated"
+    if not shots_dir.exists():
+        return {}
+    result: dict[str, list[str]] = {}
+    for f in sorted(shots_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True):
+        # filename: {screen_id}_{timestamp}.png — split on last underscore+digits
+        name = f.stem  # e.g. "login_1720000000000"
+        # screen_id is everything before the last _<digits> suffix
+        parts = name.rsplit("_", 1)
+        screen_id = parts[0] if len(parts) == 2 and parts[1].isdigit() else name
+        result.setdefault(screen_id, []).append(f.name)
+    return result
+
+
+@app.get("/api/screenshots/annotated/{filename}")
+def get_annotated_screenshot(filename: str):
+    from fastapi.responses import FileResponse
+    shots_dir = Path(settings.app_map_path).parent / "screenshots" / "annotated"
+    path = shots_dir / filename
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, "Not found")
+    return FileResponse(str(path))
+
+
 @app.get("/api/screenshots")
 def list_screenshots():
     shots_dir = Path(settings.app_map_path).parent / "screenshots"
@@ -388,14 +697,18 @@ def get_app_map():
 # ── Background workers ─────────────────────────────────────────────────────────
 
 def _broadcast(run_id: str, data: dict):
-    """Send event to all WebSocket clients watching this run."""
+    """Send event to all WebSocket clients watching this run (thread-safe)."""
     msg = json.dumps(data)
     with _ws_lock:
-        for ws in list(_ws_connections.get(run_id, [])):
-            try:
+        sockets = list(_ws_connections.get(run_id, []))
+    for ws in sockets:
+        try:
+            if _main_loop and _main_loop.is_running():
+                asyncio.run_coroutine_threadsafe(ws.send_text(msg), _main_loop)
+            else:
                 asyncio.run(ws.send_text(msg))
-            except Exception:
-                pass
+        except Exception:
+            pass
 
 
 def _execute_run(run_id: str, req: RunRequest):
@@ -411,17 +724,46 @@ def _execute_run(run_id: str, req: RunRequest):
         db.commit()
         _broadcast(run_id, {"event": "run_started", "run_id": run_id})
 
-        from test_runner.reader.excel_reader import read_test_cases
         from vision_agent import robot
         from app_map import store as app_map_store
         from test_runner.agent import create_test_runner
         from test_runner.state import TestRunnerState
 
-        all_cases = read_test_cases(req.excel_path)
-        test_cases = (
-            [tc for tc in all_cases if tc["test_id"].startswith(req.filter_tc)]
-            if req.filter_tc else all_cases
-        )
+        # Load test cases — from DB (preferred) or Excel file as fallback
+        if req.excel_path:
+            from test_runner.reader.excel_reader import read_test_cases
+            all_cases = read_test_cases(req.excel_path)
+        else:
+            # Read from the DB; add preconditions="" so the shape matches excel_reader output
+            all_cases = [
+                {**_tc_summary(t), "preconditions": getattr(t, "preconditions", "")}
+                for t in db.query(models.TestCase).order_by(models.TestCase.test_id).all()
+            ]
+
+        if req.filter_tc:
+            filter_ids = [f.strip() for f in req.filter_tc.split(',') if f.strip()]
+            test_cases = [
+                tc for tc in all_cases
+                if any(tc["test_id"] == fid or tc["test_id"].startswith(fid) for fid in filter_ids)
+            ]
+        else:
+            test_cases = all_cases
+
+        if not test_cases:
+            avail = [t["test_id"] for t in all_cases[:10]]
+            src = req.excel_path or "database"
+            raise ValueError(
+                f"No test cases found matching filter '{req.filter_tc or '*'}' "
+                f"in {src}. Available: {avail}"
+            )
+
+        # Derive kiosk_id from the selected test cases when not explicitly set
+        if not run.kiosk_id:
+            kiosk_ids = list(dict.fromkeys(
+                tc.get("kiosk_id", "") for tc in test_cases if tc.get("kiosk_id")
+            ))
+            run.kiosk_id = ",".join(kiosk_ids) if kiosk_ids else "K-01"
+            db.commit()
 
         _app_map = None
         if Path(settings.app_map_path).exists():
@@ -429,8 +771,12 @@ def _execute_run(run_id: str, req: RunRequest):
             if "keyboard_map" in _app_map:
                 robot.set_keyboard_map(_app_map["keyboard_map"])
 
+        from test_runner import broadcaster as _broadcaster
+        _broadcaster.register(run_id, lambda data: _broadcast(run_id, data))
+
         runner = create_test_runner()
         initial: TestRunnerState = {
+            "run_id":              run_id,
             "test_cases":          test_cases,
             "app_map":             _app_map,
             "credentials":         req.credentials,
@@ -444,7 +790,15 @@ def _execute_run(run_id: str, req: RunRequest):
             "test_results":        [],
             "summary":             "",
         }
-        final = runner.invoke(initial)
+        try:
+            final = runner.invoke(initial)
+        finally:
+            _broadcaster.unregister(run_id)
+            # Close the Playwright browser at end of run regardless of outcome
+            try:
+                robot.stop()
+            except Exception:
+                pass
 
         test_results = final.get("test_results") or []
         for tr in test_results:
@@ -459,11 +813,15 @@ def _execute_run(run_id: str, req: RunRequest):
                 completed_at  = datetime.utcnow(),
             )
             db.add(result)
+            steps  = tr.get("step_results") or []
+            failed = [s for s in steps if not s.get("success", True)]
             _broadcast(run_id, {
-                "event":    "test_result",
-                "run_id":   run_id,
-                "test_id":  tr.get("test_id"),
-                "outcome":  outcome,
+                "event":          "test_result",
+                "run_id":         run_id,
+                "test_id":        tr.get("test_id"),
+                "outcome":        outcome,
+                "vision_summary": tr.get("vision_summary", ""),
+                "failed_steps":   [s.get("step") for s in failed[:3] if s.get("step")],
             })
 
         run.total        = len(test_results)
@@ -475,12 +833,52 @@ def _execute_run(run_id: str, req: RunRequest):
         _broadcast(run_id, {"event": "run_completed", "run_id": run_id,
                              "total": run.total, "passed": run.passed, "failed": run.failed})
 
+        # Trigger defect intelligence sub-agent for any failed TCs
+        if run.failed > 0:
+            failed_results = [
+                tr for tr in test_results
+                if tr.get("outcome") != "passed"
+            ]
+            threading.Thread(
+                target=_run_defect_agent,
+                args=(run_id, req.kiosk_id, failed_results),
+                daemon=True,
+            ).start()
+
     except Exception as e:
+        try:
+            robot.stop()
+        except Exception:
+            pass
         run.status = "failed"
         run.error  = str(e)
         run.completed_at = datetime.utcnow()
         db.commit()
         _broadcast(run_id, {"event": "run_error", "run_id": run_id, "error": str(e)})
+
+
+def _run_defect_agent(run_id: str, kiosk_id: str, failed_results: list):
+    """Background thread: run the Defect Intelligence sub-agent after a run with failures."""
+    from defect_agent.agent import create_defect_agent
+    from defect_agent.state import DefectAgentState
+    from test_runner import broadcaster as _broadcaster
+
+    print(f"\n  [DEFECT] Starting defect intelligence for run {run_id} ({len(failed_results)} failures)")
+    _broadcaster.register(run_id, lambda data: _broadcast(run_id, data))
+    try:
+        agent = create_defect_agent()
+        initial: DefectAgentState = {
+            "run_id":         run_id,
+            "kiosk_id":       kiosk_id,
+            "failed_results": failed_results,
+            "evaluations":    [],
+            "defects":        [],
+        }
+        agent.invoke(initial)
+    except Exception as e:
+        print(f"  [DEFECT] Error: {e}")
+    finally:
+        _broadcaster.unregister(run_id)
 
 
 def _run_explorer(explore_id: str, kiosk_url: str):
@@ -523,6 +921,7 @@ def _run_summary(r: models.TestRun) -> dict:
         "passed":       r.passed,
         "failed":       r.failed,
         "filter_tc":    r.filter_tc,
+        "error":        r.error,
         "started_at":   r.started_at.isoformat() if r.started_at else None,
         "completed_at": r.completed_at.isoformat() if r.completed_at else None,
         "created_at":   r.created_at.isoformat() if r.created_at else None,

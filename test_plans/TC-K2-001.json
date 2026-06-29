@@ -1,0 +1,77 @@
+{
+  "test_id": "TC-K2-001",
+  "credential_scenario": "valid",
+  "required_config": [
+    {
+      "key": "email",
+      "label": "Login Email",
+      "type": "text"
+    },
+    {
+      "key": "password",
+      "label": "Password",
+      "type": "password"
+    }
+  ],
+  "steps": [
+    {
+      "action": "verify",
+      "channel": "validation",
+      "description": "Login screen is visible on Kiosk-2",
+      "expected_screen": "login"
+    },
+    {
+      "action": "tap",
+      "channel": "robot",
+      "description": "Tap email input field",
+      "screen_id": "login",
+      "element_id": "email_input",
+      "px": 981,
+      "py": 226
+    },
+    {
+      "action": "type",
+      "channel": "robot",
+      "description": "Type valid login email",
+      "value": "{valid_email}"
+    },
+    {
+      "action": "tap",
+      "channel": "robot",
+      "description": "Tap password input field",
+      "screen_id": "login",
+      "element_id": "password_input",
+      "px": 981,
+      "py": 342
+    },
+    {
+      "action": "type",
+      "channel": "robot",
+      "description": "Type valid login password",
+      "value": "{valid_password}"
+    },
+    {
+      "action": "tap",
+      "channel": "robot",
+      "description": "Tap Sign In button to submit credentials",
+      "screen_id": "login",
+      "element_id": "sign_in_button",
+      "px": 981,
+      "py": 400
+    },
+    {
+      "action": "verify",
+      "channel": "validation",
+      "description": "Products page is displayed after successful login",
+      "expected_screen": "products"
+    },
+    {
+      "action": "verify",
+      "channel": "validation",
+      "description": "Sign Out button is visible confirming authenticated session",
+      "expected_screen": "products",
+      "element_id": "sign_out_button"
+    }
+  ],
+  "generated_at": "2026-06-29T08:10:38.416396Z"
+}
