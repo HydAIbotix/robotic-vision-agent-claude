@@ -50,7 +50,7 @@ def _load_device_map() -> dict[str, dict]:
         return {}
 
 
-def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", test_id: str = "") -> tuple[list[dict], str]:
+def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", test_id: str = "", app_map: dict = None) -> tuple[list[dict], str]:
     """
     Execute every step in the structured plan using stored pixel coordinates.
 
@@ -83,24 +83,43 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
         if action == "verify":
             expected = step.get("expected_screen", "")
             desc     = step.get("description", "")
-            if expected:
-                actual = robot.get_dom_screen_id()
-                if not actual:
-                    # expected_screen is set but DOM detection returned nothing —
-                    # treat as FAIL so false positives are caught (auto-pass masked real failures before)
-                    print(f"    {i:>2}. verify  expected={expected!r}  [DOM detection returned empty — FAIL]")
-                    sr = {"step": f"verify: {desc}", "success": False, "note": f"DOM screen detection unavailable (expected: {expected})", "method": "dom", "expected_screen": expected, "actual_screen": ""}
-                    step_results.append(sr)
-                    if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
-                    return step_results, "failed"
-                success = (actual == expected)
-                status  = "PASS" if success else "FAIL"
-                print(f"    {i:>2}. verify  expected={expected!r}  actual={actual!r}  [{status}]")
-                sr = {"step": f"verify: {desc}", "success": success, "expected_screen": expected, "actual_screen": actual, "method": "dom"}
+            if not expected:
+                # No expected_screen → cannot verify; log a warning and skip.
+                # Regenerate the plan to get proper screen assertions.
+                print(f"    {i:>2}. verify  [no expected_screen — SKIPPED, plan may need regeneration]  {desc!r}")
+                sr = {"step": f"verify: {desc}", "success": True, "note": "no expected_screen in plan — check skipped", "method": "skipped"}
                 step_results.append(sr)
                 if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
-                if not success:
-                    return step_results, "failed"
+                continue
+
+            # Build save path for camera-based backends (playwright ignores it)
+            verify_save = ""
+            if settings.robot_backend != "playwright":
+                ts = int(time.time() * 1000)
+                verify_save = str(Path(settings.screenshots_dir) / f"verify_{test_id}_{ts}.png")
+                Path(settings.screenshots_dir).mkdir(parents=True, exist_ok=True)
+
+            vr     = robot.verify_current_screen(expected, app_map or {}, verify_save)
+            actual = vr["actual_screen"]
+            success = vr["match"]
+            method  = vr.get("method", "unknown")
+
+            if not actual and not success:
+                # Screen detection returned nothing — treat as FAIL
+                print(f"    {i:>2}. verify  expected={expected!r}  [{method}: no screen detected — FAIL]")
+                sr = {"step": f"verify: {desc}", "success": False, "note": f"screen detection unavailable via {method} (expected: {expected})", "method": method, "expected_screen": expected, "actual_screen": ""}
+                step_results.append(sr)
+                if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
+                return step_results, "failed"
+
+            status = "PASS" if success else "FAIL"
+            conf   = f"  conf={vr['confidence']:.2f}" if "confidence" in vr else ""
+            print(f"    {i:>2}. verify  expected={expected!r}  actual={actual!r}  [{status}]  [{method}{conf}]")
+            sr = {"step": f"verify: {desc}", "success": success, "expected_screen": expected, "actual_screen": actual, "method": method}
+            step_results.append(sr)
+            if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
+            if not success:
+                return step_results, "failed"
             continue
 
         # ── tap ───────────────────────────────────────────────────────────────
@@ -245,20 +264,31 @@ def run_vision_step(state: TestRunnerState) -> dict:
             "total_steps": len((structured_plan or {}).get("steps") or []),
         })
 
-    # ── Tier 1 / 2: execute from structured plan (app_map coordinates) ────────
-    if structured_plan and settings.robot_backend == "playwright":
-        print(f"  [RUN] Tier-1/2 — executing {len(structured_plan.get('steps') or [])} steps from app_map (0 LLM calls)")
+    app_map = state.get("app_map") or {}
 
-        # Reset to app entry and wait for the SPA to finish rendering
-        # before the first DOM screen check (verify step).
+    # ── Tier 1 / 2: execute from structured plan (app_map coordinates) ────────
+    # Works for ALL backends:
+    #   playwright → DOM-based verify (get_dom_screen_id, no image/LLM)
+    #   real robot → camera-based verify (reference screenshot comparison, no LLM)
+    #   demo       → verify always passes (scripted demo path)
+    if structured_plan:
+        backend = settings.robot_backend
+        print(f"  [RUN] Tier-1/2 [{backend}] — executing {len(structured_plan.get('steps') or [])} steps from app_map (0 LLM calls)")
+
+        # Reset to app entry and wait for the SPA / camera to settle before
+        # the first verify step.
         robot.reset_to_entry()
         time.sleep(1.2)
 
-        step_results, outcome = _execute_structured_plan(structured_plan, credentials, run_id=run_id, test_id=tc["test_id"])
+        step_results, outcome = _execute_structured_plan(
+            structured_plan, credentials,
+            run_id=run_id, test_id=tc["test_id"], app_map=app_map,
+        )
         passed = sum(1 for r in step_results if r["success"])
 
-        # On failure: optionally fall through to Tier 3 for diagnosis
-        # For now: record failure and move on (keeps execution fast).
+        # On failure: record and move on.  Tier 3 fallback is intentionally not
+        # automatic — Tier 1/2 failure already carries the exact failing step,
+        # which is more useful than a Tier 3 re-run that may mask the real cause.
         print(f"\n  [RESULT] {tc['test_id']}  {outcome.upper()}  ({passed}/{len(step_results)} steps passed)")
 
         test_result: TestResult = {
@@ -266,15 +296,12 @@ def run_vision_step(state: TestRunnerState) -> dict:
             "summary":        tc["summary"],
             "outcome":        outcome,
             "step_results":   step_results,
-            "vision_summary": f"Executed via app_map ({outcome})",
+            "vision_summary": f"Executed via app_map [{backend}] ({outcome})",
         }
         return {"test_results": [*(state.get("test_results") or []), test_result]}
 
     # ── Tier 3: VisionAgent (screenshot + Claude vision per step) ─────────────
-    tier = "Tier-3 vision-agent"
-    if structured_plan and settings.robot_backend != "playwright":
-        tier = "Tier-3 vision-agent (structured plan not used — non-playwright backend)"
-    print(f"  [RUN] {tier}")
+    print(f"  [RUN] Tier-3 vision-agent")
 
     result = _run_tier3(state, tc)
 

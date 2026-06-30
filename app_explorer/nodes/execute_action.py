@@ -36,7 +36,7 @@ def _resolve(value: str, credentials: dict) -> str:
     invalid = credentials.get("invalid", {})
     return (
         value
-        .replace("{{valid_email}}",      valid.get("email",    "tester@kiosk.local"))
+        .replace("{{valid_email}}",      valid.get("email",    "tester@example.com"))
         .replace("{{valid_password}}",   valid.get("password", "Password123"))
         .replace("{{invalid_email}}",    invalid.get("email",  "baduser@example.com"))
         .replace("{{invalid_password}}", invalid.get("password", "WrongPass!"))
@@ -121,7 +121,7 @@ def execute_action(state: ExplorerState) -> dict:
     print(f"\n  [ACTION] {full_key}")
     print(f"           {action['description']}")
 
-    # Live progress HUD — shows in the kiosk browser window (playwright mode only; no-op elsewhere)
+    # Live progress HUD — shows in the browser window (playwright mode only; no-op elsewhere)
     total_known = len(explored) + len(queue) + 1  # +1 for the action we just popped
     robot.update_explorer_progress(len(explored), total_known, full_key)
 

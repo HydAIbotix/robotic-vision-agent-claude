@@ -20,6 +20,40 @@ _browser = None
 _page    = None
 _keyboard_map: dict = {}   # populated by set_keyboard_map() after App Explorer runs
 _progress_injected: bool = False  # True once the HUD overlay div has been created
+_dom_to_screen_id: dict | None = None  # reverse lookup: dom_id → app_map screen_id
+
+
+def _load_dom_to_screen_cache() -> dict:
+    """Build and cache a reverse lookup: normalized dom_id → app_map screen_id.
+
+    The App Explorer names screens semantically (e.g. "login") while data-testid
+    may use a different word (e.g. "signin-screen" → "signin"). This mapping
+    bridges the two so verify steps compare apples to apples.
+    Loaded once from app_map.json; invalidated by setting _dom_to_screen_id = None.
+    """
+    global _dom_to_screen_id
+    if _dom_to_screen_id is not None:
+        return _dom_to_screen_id
+    try:
+        import json
+        from pathlib import Path
+        from vision_agent.config import settings
+        path = Path(getattr(settings, "app_map_path", "app_map.json"))
+        if path.exists():
+            data = json.loads(path.read_text())
+            mapping: dict = {}
+            for screen_key, screen_data in data.get("screens", {}).items():
+                if not isinstance(screen_data, dict):
+                    continue
+                dom_id = (screen_data.get("dom_id") or "").strip()
+                if dom_id:
+                    mapping[dom_id] = screen_key
+            _dom_to_screen_id = mapping
+            return mapping
+    except Exception:
+        pass
+    _dom_to_screen_id = {}
+    return {}
 
 
 def _ensure_page():
@@ -138,15 +172,22 @@ def tap(x: int, y: int) -> dict:
         cx, cy, snap_type = coords[0], coords[1], coords[2]
         # Real mouse click — fires full browser event chain so React onFocus etc. trigger.
         page.mouse.click(cx, cy)
-        page.wait_for_timeout(300)
         if snap_type == "exact":
             print(f"  [PLAYWRIGHT] click({cx}, {cy})")
         else:
             print(f"  [PLAYWRIGHT] tap-snap {snap_type} → ({x},{y}) → ({cx},{cy})")
     else:
         page.mouse.click(x, y)
-        page.wait_for_timeout(300)
         print(f"  [PLAYWRIGHT] click({x}, {y}) [raw]")
+
+    # Wait for React SPA route changes to finish rendering.
+    # 300ms is too short for login/checkout navigations (200-700ms). We wait up to
+    # 1200ms for the DOM to stop mutating (networkidle is too strict for WebSocket apps).
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=1200)
+    except Exception:
+        pass  # timeout fires on non-navigating clicks — that is expected and fine
+    page.wait_for_timeout(200)  # brief extra settle for React re-renders
 
     return {"success": True, "x": x, "y": y}
 
@@ -333,7 +374,19 @@ def get_dom_screen_id() -> str:
         return ""
 
     if not testid:
-        return ""
+        # Fallback: derive screen_id from the URL path.
+        # Works for any SPA using clean routing (e.g. /payment → "payment",
+        # /card-payment → "card_payment").  Allows verification of screens
+        # that exist in the kiosk but haven't been added to the app_map yet.
+        try:
+            url  = _ensure_page().url
+            part = url.split("?")[0].split("#")[0].rstrip("/").split("/")[-1]
+            if part and part not in ("", "index.html", "index"):
+                testid = part
+            else:
+                return ""
+        except Exception:
+            return ""
 
     # Normalize to snake_case screen_id
     sid = testid
@@ -341,7 +394,27 @@ def get_dom_screen_id() -> str:
         if sid.endswith(suffix):
             sid = sid[:-len(suffix)]
             break
-    return sid.lstrip("-").replace("-", "_")
+    sid = sid.lstrip("-").replace("-", "_")
+
+    # Resolve to the canonical app_map screen_id via dom_id reverse lookup.
+    # Handles cases where Explorer named a screen differently from its data-testid
+    # (e.g. app_map "login" ↔ data-testid "signin-screen" → DOM sid "signin").
+    dom_map = _load_dom_to_screen_cache()
+    return dom_map.get(sid, sid)
+
+
+def verify_current_screen(expected_screen_id: str, app_map: dict, save_path: str = "") -> dict:
+    """DOM-based screen verification (playwright backend).
+
+    Uses get_dom_screen_id() — no screenshot, no LLM call.
+    Same speed as before; save_path is accepted but unused (no image captured).
+    """
+    actual = get_dom_screen_id()
+    return {
+        "actual_screen": actual,
+        "match": bool(actual) and (actual == expected_screen_id),
+        "method": "dom",
+    }
 
 
 def get_dom_element_centers() -> list[dict]:

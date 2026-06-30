@@ -1,5 +1,5 @@
 SUGGEST_EXPLORABLE_ACTIONS = """\
-You are systematically exploring a kiosk application to build a complete navigation map.
+You are systematically exploring a touch-screen application to build a complete navigation map.
 Your goal: identify every distinct UI path that can be triggered from this screen.
 
 Current screen: {screen_id}
@@ -31,26 +31,43 @@ Return ONLY valid JSON:
 Rules:
 - CRITICAL: ONLY generate actions using the elements listed above on THIS screen.
   Do NOT plan cross-screen flows. Each action must end after the FIRST navigation or form submit.
-- Each navigation button or link = one action with a single tap step
+- Each unconditional navigation button or link = one action with a single tap step
 - Each form submit = one compound action: fill all required fields THEN tap submit
 - For forms with auth: generate TWO actions — one with valid credentials, one with invalid
 - Use {{{{valid_email}}}}, {{{{valid_password}}}}, {{{{invalid_email}}}}, {{{{invalid_password}}}} as placeholders
-- Quantity stepper + / - buttons: one action each (just tap, no credentials)
-- "Add to Cart" buttons: include a preceding qty increment step first
-- Skip static text, images, decorative elements
-- SKIP display-only "cards": info panels, stat tiles, device-status widgets, quick-info cards
-  whose label is a noun phrase (e.g. "Reader", "Network Status", "Kiosk ID") with no
-  verb/action text. These are display elements — tapping them stays on the same screen.
-  Only include tapping a card if it has explicit action text like "Tap to...", "Select...",
-  "Configure...", or is clearly a navigation tile to a different screen.
-- SKIP global actions already explored from other screens — specifically: sign_out/logout
-  (always goes to login), home/back buttons (always go to a fixed screen). These are
-  recorded once globally; you do not need to repeat them from every screen.
-- Maximum 12 actions per screen
+- Stepper controls (+/-/increment/decrement/up/down arrows): one action per direction, tap only
+- CONDITIONAL NAVIGATION (critical): Some navigation elements only trigger a screen transition
+  when the application has the correct state. Reason from the element labels and descriptions:
+    • A counter or badge showing zero or empty state: "Cart (0)", "0 items selected",
+      "Basket: empty", "0 guests", "Amount: $0.00", "Nothing in queue"
+    • A proceed/confirm action that logically needs prior input to be meaningful:
+      "Proceed to Payment", "Confirm Booking", "Submit Order", "Place Bid", "Continue"
+    • Any element whose own description implies a dependency on other elements on this screen
+  For each gated element: examine the OTHER elements on this screen and identify which ones
+  satisfy its precondition — quantity controls, add-item buttons, selection tiles, input
+  fields, checkboxes, toggles, radio buttons, date pickers, etc. Generate ONE multi-step
+  action that: (1) performs the prerequisite setup steps in logical order, (2) taps the
+  gated element as the final step. Do NOT generate a bare single-tap for a gated element —
+  it will not navigate and will record a misleading dead-end in the map. Always prioritise
+  gated-navigation actions; include them even if the per-screen limit is otherwise reached.
+- Skip static text, images, decorative dividers, background illustrations
+- SKIP display-only widgets: status panels, info tiles, or metric displays whose label is a
+  noun phrase with no action verb (e.g. read-only device status, health indicators,
+  identifier labels, live statistics). They do not navigate. Only include a widget when it
+  carries explicit action language ("Tap to configure", "Select", "Edit") or clearly leads
+  to a different screen.
+- SKIP globally-redundant actions: persistent navigation elements that always lead to the
+  same fixed screen (sign-out, home, back) need only be recorded once across the whole app.
+  Skip them on any screen where that destination is already in the navigation map.
+- action_key naming: Use short verb+noun task-outcome names. Do NOT embed any screen name
+  (current or any other) inside the action_key — this silently breaks deduplication logic.
+  Good: "open_cart", "submit_valid_login", "proceed_to_payment", "increment_item_qty".
+  Bad: "from_login_to_home", "checkout_from_products", "navigate_screen_a_to_b".
+- Maximum 15 actions per screen
 """
 
 MAP_KEYBOARD = """\
-A custom virtual keyboard is visible on screen as part of a kiosk application.
+A custom virtual keyboard is visible on screen as part of a touch-screen application.
 Map every tappable key to its center position as normalized coordinates (0.0–1.0,
 where [0,0] is top-left and [1,1] is bottom-right).
 
@@ -78,7 +95,7 @@ Rules:
 """
 
 ANALYZE_AND_SUGGEST = """\
-Analyze this kiosk touchscreen screenshot. Return BOTH a screen analysis AND explorable actions in a single JSON response.
+Analyze this touch-screen application screenshot. Return BOTH a screen analysis AND explorable actions in a single JSON response.
 
 Credentials available:
   valid:   email={valid_email} / password={valid_password}
@@ -130,7 +147,7 @@ Action rules:
 """
 
 BATCH_SCROLL_ELEMENTS = """\
-Below are {count} screenshots of the SAME kiosk screen captured at different vertical scroll positions.
+Below are {count} screenshots of the SAME screen captured at different vertical scroll positions.
 Each screenshot is labelled with its scroll_y offset (pixels scrolled from the top of the page).
 
 For EACH screenshot, identify interactive elements that are visible.

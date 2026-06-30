@@ -85,6 +85,11 @@ def get_dom_screen_id() -> str:
     return ""
 
 
+def verify_current_screen(expected_screen_id: str, app_map: dict, save_path: str = "") -> dict:
+    """Demo mode: verification always passes — demo screens follow a pre-scripted path."""
+    return {"actual_screen": expected_screen_id, "match": True, "method": "demo"}
+
+
 def get_dom_element_centers() -> list[dict]:
     """Not applicable to real robot arm — DOM not accessible via camera."""
     return []

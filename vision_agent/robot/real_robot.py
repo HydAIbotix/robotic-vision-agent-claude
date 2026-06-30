@@ -226,8 +226,77 @@ def tap(x: int, y: int) -> dict:
         "cmd_id":           cmd_id,
     })
     _poll("/arm/state", cmd_id, settings.arm_move_timeout_s, abort_ep="/arm/abort")
-    time.sleep(0.2)
+    # After the arm confirms tap complete, the kiosk still needs time to process the touch
+    # event and complete any navigation (e.g. login API call + React re-render takes 300-700ms).
+    # 0.2s was too short and caused the next camera capture to land mid-transition.
+    time.sleep(0.8)
     return {"success": True, "x": x, "y": y, "u": u, "v": v}
+
+
+def _image_similarity(path1: str, path2: str) -> float:
+    """Pixel-level similarity between two images.  Returns 0.0 (different) – 1.0 (identical).
+
+    Images are resized to 160×100 before comparison so the cost is negligible (~2 ms).
+    Uses mean squared error over RGB channels — no extra dependencies beyond PIL/numpy.
+    """
+    try:
+        from PIL import Image
+        import numpy as np
+        TARGET = (160, 100)
+        img1 = np.array(Image.open(path1).convert("RGB").resize(TARGET), dtype=float)
+        img2 = np.array(Image.open(path2).convert("RGB").resize(TARGET), dtype=float)
+        mse  = float(np.mean((img1 - img2) ** 2))
+        return 1.0 - mse / (255.0 ** 2)
+    except Exception:
+        return 0.0
+
+
+def verify_current_screen(expected_screen_id: str, app_map: dict, save_path: str = "") -> dict:
+    """Camera-based screen verification (real-robot backend).
+
+    Captures the kiosk screen via the robot arm camera, then compares the image against
+    the reference_screenshot stored per-screen in app_map (written by the App Explorer).
+    No LLM call — pure image similarity.  Requires PIL + numpy (standard in the project).
+
+    Returns {"actual_screen": str, "match": bool, "method": "camera_reference", "confidence": float}.
+    The "actual_screen" is the app_map key whose reference screenshot is most similar to the
+    current camera frame.  Empty string means no screen reached the 0.70 similarity threshold.
+    """
+    if not save_path:
+        save_path = f"./screenshots/verify_{int(time.time() * 1000)}.png"
+
+    result       = capture_screen(save_path)
+    current_path = result["image_path"]
+
+    screens     = (app_map or {}).get("screens", {})
+    best_screen = ""
+    best_score  = -1.0
+
+    for screen_id, screen_data in screens.items():
+        ref_path = (screen_data or {}).get("reference_screenshot", "")
+        if not ref_path or not Path(ref_path).exists():
+            continue
+        score = _image_similarity(current_path, ref_path)
+        if score > best_score:
+            best_score  = score
+            best_screen = screen_id
+
+    if not best_screen or best_score < 0.70:
+        return {
+            "actual_screen": "",
+            "match":         False,
+            "method":        "camera_reference",
+            "confidence":    round(max(best_score, 0.0), 3),
+            "screenshot":    current_path,
+        }
+
+    return {
+        "actual_screen": best_screen,
+        "match":         (best_screen == expected_screen_id),
+        "method":        "camera_reference",
+        "confidence":    round(best_score, 3),
+        "screenshot":    current_path,
+    }
 
 
 def type_text(text: str, clear_first: bool = False) -> dict:

@@ -484,16 +484,21 @@ class TcPlanRequest(BaseModel):
 @app.post("/api/tc-plan")
 def get_tc_plan(req: TcPlanRequest, db: Session = Depends(get_db)):
     """Generate (or return cached) Claude-powered structured plan for a test case."""
-    plan_dir  = Path("test_plans")
-    plan_dir.mkdir(exist_ok=True)
-    plan_file = plan_dir / f"{req.test_id}.json"
+    from test_runner import plan_cache as _plan_cache
+    from app_map import store as app_map_store
 
-    # Return cached plan unless force=True
-    if plan_file.exists() and not req.force:
-        try:
-            return json.loads(plan_file.read_text(encoding="utf-8"))
-        except Exception:
-            pass  # corrupt cache — regenerate
+    # Load app map once — needed for both cache key and element inventory
+    app_map = None
+    if Path(settings.app_map_path).exists():
+        app_map = app_map_store.load(settings.app_map_path)
+    map_version = app_map_store.version_hash(app_map)
+
+    # Return cached plan unless force=True.
+    # Uses the same plan_cache module as the test runner so UI and runner share one file.
+    if not req.force:
+        cached = _plan_cache.load(req.test_id, req.steps_raw or "", map_version)
+        if cached and _plan_cache.is_valid(cached, app_map):
+            return cached
 
     # Build device map context from DB (one-time config, embedded in plan at generation time)
     devices = db.query(models.DeviceConfig).order_by(models.DeviceConfig.alias).all()
@@ -509,14 +514,9 @@ def get_tc_plan(req: TcPlanRequest, db: Session = Depends(get_db)):
             "and tag each robot step with the device name you identify (e.g. 'TVM', 'MPOS')."
         )
 
-    # Load app map element inventory (may be empty if not yet explored)
-    app_map = None
-    if Path(settings.app_map_path).exists():
-        from app_map import store as app_map_store
-        app_map = app_map_store.load(settings.app_map_path)
+    # Build element inventory for the prompt
     inventory = ""
     if app_map:
-        from app_map import store as app_map_store
         inventory = app_map_store.element_inventory_for_prompt(app_map)
     if not inventory:
         inventory = "App map not yet available — classify channels from context only; omit px/py/element_id."
@@ -545,18 +545,18 @@ def get_tc_plan(req: TcPlanRequest, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(500, f"Plan generation failed: {e}")
 
-    # Stamp and cache
+    # Stamp and save using the shared plan_cache (same file the test runner reads)
     plan["generated_at"] = datetime.utcnow().isoformat() + "Z"
-    plan_file.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
+    _plan_cache.invalidate_all_for(req.test_id)  # remove any stale hash-based files
+    _plan_cache.save(plan, req.test_id, req.steps_raw or "", map_version)
     return plan
 
 
 @app.delete("/api/tc-plan/{test_id}", status_code=204)
 def delete_tc_plan(test_id: str):
-    """Remove cached plan so next GET regenerates it via Claude."""
-    p = Path("test_plans") / f"{test_id}.json"
-    if p.exists():
-        p.unlink()
+    """Remove all cached plans for this test_id so the next request regenerates via Claude."""
+    from test_runner import plan_cache as _plan_cache
+    _plan_cache.invalidate_all_for(test_id)
 
 
 # ── App Explorer ──────────────────────────────────────────────────────────────

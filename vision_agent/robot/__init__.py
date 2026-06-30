@@ -17,6 +17,7 @@ if _s.robot_backend == "playwright":
         set_demo_screens, set_keyboard_map, reset_to_entry, stop,
         scroll_page, get_page_scroll_info, get_dom_screen_id, get_dom_element_centers,
         navigate_to_screen, update_explorer_progress,
+        verify_current_screen,
     )
     from vision_agent.robot.stubs import move_to_position  # noqa: F401  (playwright has no base movement)
 
@@ -26,6 +27,7 @@ elif _s.robot_backend == "real":
         set_demo_screens, set_keyboard_map, reset_to_entry,
         scroll_page, get_page_scroll_info, get_dom_screen_id, get_dom_element_centers,
         navigate_to_screen, update_explorer_progress,
+        verify_current_screen,
         # Real-robot-only extras (imported directly in scripts that need them)
         setup, navigate_to_kiosk, calibrate,
         card_pick, card_tap, card_replace,
@@ -44,6 +46,7 @@ else:  # "demo" (default)
         set_demo_screens, set_keyboard_map, move_to_position,
         scroll_page, get_page_scroll_info, get_dom_screen_id, get_dom_element_centers,
         navigate_to_screen, update_explorer_progress,
+        verify_current_screen,
     )
     def reset_to_entry() -> None: pass                  # noqa: E704
     def stop() -> None: pass                            # noqa: E704

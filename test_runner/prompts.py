@@ -20,24 +20,46 @@ Credentials:
 App element inventory (ALL screens, elements, and pixel coordinates):
 {element_inventory}
 
-Your job:
+PREREQUISITE ANALYSIS — apply this to every app, not just kiosks:
+Raw test steps are written by humans as high-level summaries. They are often abbreviated and skip
+implicit prerequisites. Before translating each step, ask: "Would this step actually succeed if a
+robot ran it right now, given only the steps that came before?"
+
+Rules:
+1. If a step navigates to a screen that REQUIRES prior state (e.g. cart, checkout, payment,
+   confirmation), verify that state was established by an earlier step. If not, INSERT the
+   missing prerequisite steps using elements from the app map above.
+   Examples:
+   - "Go to cart" / "Checkout" / "Proceed to payment" → items must be in the cart first.
+     If no add-to-cart step exists before this, INSERT one (or more, if the app requires
+     selecting a quantity/product first) using the relevant element from the app map.
+   - "Submit order" / "Place order" → cart must be non-empty AND checkout must be initiated.
+   - "Pay" / "Enter card" → must be on the payment screen, which requires a non-empty cart.
+2. Any element that has a disabled or inactive state when a condition is not met must be
+   preceded by the steps that satisfy that condition.
+3. Form submissions: all required fields must be filled before tapping submit.
+4. Do NOT blindly translate raw steps word-for-word. Produce the COMPLETE executable sequence.
+   Infer and insert missing steps from the app map whenever the raw steps skip prerequisites.
+
+YOUR TASKS:
 1. Determine credential_scenario: "valid" or "invalid" (look for "invalid"/"wrong" in the test steps).
-2. Map each human-readable test step to one or more machine steps using ONLY the elements listed above.
-3. For tap steps: include the screen_id the element belongs to and its exact px/py from the inventory.
-4. For type steps: substitute the actual credential values (not placeholders).
-5. For verify steps: include the expected_screen id (from the inventory) and a human description.
-   Use DOM screen comparison — no visual check needed.
+2. Apply prerequisite analysis (above) to produce the COMPLETE executable sequence.
+3. Map each human-readable test step to one or more machine steps using ONLY the elements listed above.
+4. For tap steps: include the screen_id the element belongs to and its exact px/py from the inventory.
+5. For type steps: substitute the actual credential values (not placeholders).
+6. For verify steps: ALWAYS include expected_screen (the screen_id from the inventory where verification
+   should occur). Use DOM screen comparison — no visual check needed.
 
 Return ONLY valid JSON — no markdown fences:
 {{
   "credential_scenario": "valid",
   "steps": [
-    {{"action": "verify", "expected_screen": "signin",   "description": "login screen is visible"}},
-    {{"action": "tap",    "screen_id": "signin", "element_id": "email_input",    "px": 700, "py": 412}},
+    {{"action": "verify", "expected_screen": "login",    "description": "login screen is visible"}},
+    {{"action": "tap",    "screen_id": "login", "element_id": "email_input",    "px": 700, "py": 412}},
     {{"action": "type",   "value": "{valid_email}"}},
-    {{"action": "tap",    "screen_id": "signin", "element_id": "password_input", "px": 700, "py": 498}},
+    {{"action": "tap",    "screen_id": "login", "element_id": "password_input", "px": 700, "py": 498}},
     {{"action": "type",   "value": "{valid_password}"}},
-    {{"action": "tap",    "screen_id": "signin", "element_id": "sign_in_button", "px": 700, "py": 560}},
+    {{"action": "tap",    "screen_id": "login", "element_id": "sign_in_button", "px": 700, "py": 560}},
     {{"action": "verify", "expected_screen": "products", "description": "products page is displayed"}}
   ]
 }}
@@ -47,7 +69,7 @@ Rules:
 - Do not invent element ids or coordinates — copy them exactly from the inventory.
 - A "tap" step that focuses a text field must be immediately followed by a "type" step.
 - "User presents payment card" → tap the mock-approval button (look for it in the inventory).
-- If a step's expected outcome is a specific screen, set expected_screen to that screen's id.
+- Every verify step MUST have expected_screen set to the screen_id where that verification occurs.
 - For invalid-credential tests: set credential_scenario="invalid" and use the invalid values.
 """
 

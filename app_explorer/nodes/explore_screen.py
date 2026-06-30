@@ -27,7 +27,24 @@ from vision_agent import robot
 from app_explorer.state import ExplorerState, ExplorationAction
 from app_explorer.prompts import SUGGEST_EXPLORABLE_ACTIONS, BATCH_SCROLL_ELEMENTS, MAP_KEYBOARD
 
-_DYNAMIC_SCREEN_KEYWORDS = {"cart", "order", "history", "search", "result", "basket", "checkout_items"}
+# Screen IDs containing these keywords are marked is_dynamic=True in the app_map.
+# Dynamic screens display user-specific or query-specific content that changes between visits
+# (e.g. cart contents, search results, order history, booking details).
+# Extend this set for domains not covered here — the list is not app-specific.
+_DYNAMIC_SCREEN_KEYWORDS = {
+    # Shopping / commerce
+    "cart", "basket", "bag", "wishlist",
+    # Transactions / orders
+    "order", "transaction", "receipt", "invoice", "payment",
+    # Search / filter
+    "search", "result", "filter", "query",
+    # User activity / history
+    "history", "activity", "log", "timeline", "audit",
+    # Scheduling / reservations
+    "booking", "reservation", "appointment", "schedule",
+    # User-specific data
+    "profile", "account", "dashboard", "personalised", "personalized",
+}
 _VIEWPORT_W = 1400
 _VIEWPORT_H = 900
 
@@ -154,7 +171,7 @@ def _collect_scrolled_elements(base_elements: list, image_path: str, screen_id: 
             el = dict(el)
             el["bbox"]   = _norm_to_px(el.get("bbox",   [0.0, 0.0, 0.0, 0.0]), img_w, img_h)
             el["center"] = _norm_to_px(el.get("center", [0.5, 0.5]),            img_w, img_h)
-            # Shift y by the scroll offset → absolute kiosk pixel y
+            # Shift y by the scroll offset → absolute screen pixel y
             el["center"][1] += sy
             if el.get("bbox") and len(el["bbox"]) == 4:
                 el["bbox"][1] += sy
@@ -402,18 +419,24 @@ def explore_screen(state: ExplorerState) -> dict:
             print(f"  [EXPLORE] DOM screen: '{dom_id}'")
 
         app_map["screens"][screen_id] = {
-            "screen_id":   screen_id,
-            "description": screen["description"],
-            "elements":    elements,
-            "transitions": existing.get("transitions") or {},
-            "screen_hash": screen_hash,
-            "is_dynamic":  is_dynamic,
-            "dom_id":      dom_id,   # DOM testid → reliably identifies SPA state views
+            "screen_id":            screen_id,
+            "description":          screen["description"],
+            "elements":             elements,
+            "transitions":          existing.get("transitions") or {},
+            "screen_hash":          screen_hash,
+            "is_dynamic":           is_dynamic,
+            "dom_id":               dom_id,   # DOM testid → reliably identifies SPA state views
+            "reference_screenshot": state["current_image_path"],  # raw capture for real-robot verification
         }
         _save_annotated(state["current_image_path"], screen_id, elements)
     else:
         print(f"\n  [EXPLORE] Re-visiting '{screen_id}' ({len(existing['elements'])} elements already mapped)")
         elements = existing["elements"]
+        # Always refresh the reference screenshot — needed for real-robot camera verification.
+        app_map["screens"][screen_id] = {
+            **existing,
+            "reference_screenshot": state["current_image_path"],
+        }
 
     # ── 4. Map the virtual keyboard (once per app) ────────────────────────────
     app_map = _map_keyboard(elements, app_map)
@@ -432,7 +455,7 @@ def explore_screen(state: ExplorerState) -> dict:
         screen_id=screen_id,
         screen_description=screen["description"],
         elements_text=elements_text,
-        valid_email=valid.get("email", "tester@kiosk.local"),
+        valid_email=valid.get("email", "tester@example.com"),
         valid_password=valid.get("password", "Password123"),
         invalid_email=invalid.get("email", "baduser@example.com"),
         invalid_password=invalid.get("password", "WrongPass!"),
@@ -473,16 +496,18 @@ def explore_screen(state: ExplorerState) -> dict:
 
             # Element-level dedup: if we already know where this exact element leads
             # and that destination is fully explored, there is no new information to gain.
+            # Exception: if the known destination IS this screen (element stayed put),
+            # don't dedup — the element has an unmet precondition; a multi-step action
+            # that sets up the required state may navigate to a new screen.
             if eid and eid in element_transitions:
                 known_dest = element_transitions[eid]
-                if known_dest in fully_explored_ids:
+                if known_dest in fully_explored_ids and known_dest != screen_id:
                     skipped_dedup += 1
                     continue
 
-            # Action-key dedup: skip nav actions whose action_key names a fully-mapped
-            # screen (e.g. "navigate_categories" once categories is in fully_explored_ids).
-            # Guard: len(sid) >= 5 prevents short ids like "cart" (4 chars) from
-            # false-matching substrings in unrelated action keys.
+            # Action-key dedup: skip nav actions whose action_key embeds a fully-mapped
+            # screen name (e.g. "navigate_reports" once "reports" is fully explored).
+            # Guard: len(sid) >= 5 avoids false matches for very short screen IDs.
             action_key_lower = a["action_key"].lower()
             if any(sid in action_key_lower for sid in fully_explored_ids if len(sid) >= 5):
                 skipped_dedup += 1

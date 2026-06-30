@@ -57,10 +57,10 @@ def identify_result(state: ExplorerState) -> dict:
     image_bytes = get_storage().load(state["current_image_path"])
     app_map     = state["app_map"]
 
-    # ── Primary: DOM-based screen detection (React SPA state navigation) ──────
-    # The kiosk is a SPA — all nav sub-pages share the same URL and visual layout,
-    # so their perceptual hashes collide.  Each screen renders exactly one
-    # data-testid section; get_dom_screen_id() reads it reliably.
+    # ── Primary: DOM-based screen detection (SPA state navigation) ───────────
+    # SPA apps share the same URL across views — perceptual hashes collide between
+    # screens that have a similar layout.  get_dom_screen_id() reads a stable
+    # DOM marker (e.g. data-testid) to reliably identify the current view.
     dom_id        = robot.get_dom_screen_id()    # e.g. "categories", "products", ""
     known_screens = app_map.get("screens") or {}
 
@@ -75,7 +75,12 @@ def identify_result(state: ExplorerState) -> dict:
             result_screen_id = dom_match
             print(f"\n  [RESULT]  {action['screen_id']}::{action['action_key']}  ->  '{result_screen_id}'  (DOM-hit: {dom_id}, 0 LLM calls)")
             new_map        = _record_transition(app_map, action, result_screen_id)
-            new_map        = _record_element_transition(new_map, action, result_screen_id)
+            # Only record element_transitions for genuine cross-screen navigations.
+            # Staying on the source screen means the element has an unmet precondition
+            # (e.g. a button that needs prior state set up before it navigates).
+            # Do not record this as permanent — a multi-step action may navigate successfully.
+            if result_screen_id != action["screen_id"]:
+                new_map = _record_element_transition(new_map, action, result_screen_id)
             approach_paths = dict(state.get("approach_paths") or {})
             return {
                 "app_map":               new_map,
@@ -97,7 +102,8 @@ def identify_result(state: ExplorerState) -> dict:
             result_screen_id = cached["screen_id"]
             print(f"\n  [RESULT]  {action['screen_id']}::{action['action_key']}  ->  '{result_screen_id}'  (hash-hit, 0 LLM calls)")
             new_map        = _record_transition(app_map, action, result_screen_id)
-            new_map        = _record_element_transition(new_map, action, result_screen_id)
+            if result_screen_id != action["screen_id"]:
+                new_map = _record_element_transition(new_map, action, result_screen_id)
             approach_paths = dict(state.get("approach_paths") or {})
             return {
                 "app_map":               new_map,
@@ -142,7 +148,8 @@ def identify_result(state: ExplorerState) -> dict:
     print(f"\n  [RESULT]  {action['screen_id']}::{action['action_key']}  ->  '{result_screen_id}'  ({'NEW' if is_new else 'known'})  [{transition_type}]")
 
     new_map = _record_transition(app_map, action, result_screen_id)
-    new_map = _record_element_transition(new_map, action, result_screen_id)
+    if result_screen_id != action["screen_id"]:
+        new_map = _record_element_transition(new_map, action, result_screen_id)
 
     # If new screen: add a skeleton entry so explore_screen can flesh it out
     if is_new and result_screen_id not in new_map["screens"]:
