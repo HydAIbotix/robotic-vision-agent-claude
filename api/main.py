@@ -385,18 +385,41 @@ Steps (raw):
 Expected Results (raw):
 {expected_results_raw}
 
+PREREQUISITE ANALYSIS — apply this to every app, not just kiosks:
+Raw test steps are written by humans as high-level summaries. They are often abbreviated and skip
+implicit prerequisites. Before translating each step, ask: "Would this step actually succeed if a
+robot ran it right now, given only the steps that came before?"
+
+Rules:
+1. If a step navigates to a screen that REQUIRES prior state (e.g. cart, checkout, payment,
+   confirmation), verify that state was established by an earlier step. If not, INSERT the
+   missing prerequisite steps using elements from the app map above.
+   Examples:
+   - "Go to cart" / "Checkout" / "Proceed to payment" → items must be in the cart first.
+     If no add-to-cart step exists before this, INSERT one (or more, if the app requires
+     selecting a quantity/product first) using the relevant element from the app map.
+   - "Submit order" / "Place order" → cart must be non-empty AND checkout must be initiated.
+   - "Pay" / "Enter card" → must be on the payment screen, which requires a non-empty cart.
+2. Any element that has a disabled or inactive state when a condition is not met (a "Checkout"
+   button disabled when cart is empty, a "Submit" button disabled when form is incomplete)
+   must be preceded by the steps that satisfy that condition.
+3. Form submissions: all required fields must be filled before tapping submit.
+4. Do NOT blindly translate raw steps word-for-word. Produce the COMPLETE executable sequence.
+   Infer and insert missing steps from the app map whenever the raw steps skip prerequisites.
+
 YOUR TASKS:
-1. Parse each test step into one or more machine-executable sub-steps.
-2. Assign the correct channel per step (use the definitions above strictly).
-3. For every step: set "device" to the alias of the target device from the device map above
+1. Apply the prerequisite analysis above, inserting any missing steps before translating.
+2. Parse each raw step into one or more machine-executable sub-steps.
+3. Assign the correct channel per step (use the definitions above strictly).
+4. For every step: set "device" to the alias of the target device from the device map above
    (e.g. "TVM", "MPOS"). For web/db/validation steps not tied to a physical device, omit "device".
-4. For "robot" tap steps: look up the screen_id and element from the app map; use the exact px/py.
-5. For "robot" type steps: use credential placeholders {{valid_email}}, {{valid_password}} for login fields.
-6. Identify required_config — data the tester MUST provide before the test:
+5. For "robot" tap steps: look up the screen_id and element from the app map; use the exact px/py.
+6. For "robot" type steps: use credential placeholders {{valid_email}}, {{valid_password}} for login fields.
+7. Identify required_config — data the tester MUST provide before the test:
    - Include: email (login), password, card_number (ONLY if a specific pre-existing card is needed).
    - EXCLUDE: amount / balance (card balance is managed by the system automatically).
    - EXCLUDE: anything generated at runtime (card numbers created by the reader, transaction IDs, etc.).
-7. Set credential_scenario: "valid" or "invalid" based on whether the test uses correct credentials.
+8. Set credential_scenario: "valid" or "invalid" based on whether the test uses correct credentials.
 
 Return ONLY valid JSON — no markdown fences, no extra text:
 {{

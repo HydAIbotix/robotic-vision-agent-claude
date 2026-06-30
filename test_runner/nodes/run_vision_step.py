@@ -86,12 +86,13 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             if expected:
                 actual = robot.get_dom_screen_id()
                 if not actual:
-                    # DOM not available in this backend — skip verify, log warning
-                    print(f"    {i:>2}. verify  '{desc}'  [DOM unavailable — skipped]")
-                    sr = {"step": f"verify: {desc}", "success": True, "note": "DOM unavailable — skipped", "method": "dom"}
+                    # expected_screen is set but DOM detection returned nothing —
+                    # treat as FAIL so false positives are caught (auto-pass masked real failures before)
+                    print(f"    {i:>2}. verify  expected={expected!r}  [DOM detection returned empty — FAIL]")
+                    sr = {"step": f"verify: {desc}", "success": False, "note": f"DOM screen detection unavailable (expected: {expected})", "method": "dom", "expected_screen": expected, "actual_screen": ""}
                     step_results.append(sr)
                     if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
-                    continue
+                    return step_results, "failed"
                 success = (actual == expected)
                 status  = "PASS" if success else "FAIL"
                 print(f"    {i:>2}. verify  expected={expected!r}  actual={actual!r}  [{status}]")

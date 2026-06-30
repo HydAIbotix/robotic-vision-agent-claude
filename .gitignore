@@ -25,6 +25,7 @@ screenshots/
 results/
 *.log
 *.db
+test_plans/
 
 # ── Test artefacts ────────────────────────────────────────────────────────────
 .pytest_cache/

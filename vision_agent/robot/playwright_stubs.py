@@ -308,22 +308,24 @@ def get_dom_screen_id() -> str:
     try:
         testid: str = page.evaluate("""() => {
             const vpArea = window.innerWidth * window.innerHeight;
-            const candidates = [];
+            // Two buckets with different thresholds:
+            //   screen/page/view testids → 5 % (catches card-style screens like signin)
+            //   everything else          → 25 % (avoids small widgets)
+            const screenLike = [], others = [];
             for (const el of document.querySelectorAll('[data-testid]')) {
                 const r = el.getBoundingClientRect();
                 const area = r.width * r.height;
-                if (area < vpArea * 0.25) continue;  // too small — skip
+                if (area === 0) continue;
                 const tid = el.getAttribute('data-testid') || '';
-                if (tid) candidates.push({testid: tid, area: area});
+                if (!tid) continue;
+                if (tid.includes('screen') || tid.includes('page') || tid.includes('view')) {
+                    if (area >= vpArea * 0.05) screenLike.push({testid: tid, area: area});
+                } else {
+                    if (area >= vpArea * 0.25) others.push({testid: tid, area: area});
+                }
             }
-            if (!candidates.length) return '';
-            // Prefer testids with common screen-level suffixes/keywords
-            const screenLike = candidates.filter(c =>
-                c.testid.includes('screen') ||
-                c.testid.includes('page')   ||
-                c.testid.includes('view')
-            );
-            const ranked = screenLike.length ? screenLike : candidates;
+            const ranked = screenLike.length ? screenLike : others;
+            if (!ranked.length) return '';
             ranked.sort((a, b) => b.area - a.area);
             return ranked[0].testid;
         }""")
