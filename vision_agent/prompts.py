@@ -1,16 +1,17 @@
 ANALYZE_SCREEN = """\
-Analyze this kiosk touchscreen screenshot and identify every visible interactive element.
+Analyze this UI screenshot and identify every visible interactive element.
+This may be a touchscreen kiosk, web app, mobile app, or any other UI.
 
 Return ONLY valid JSON — no markdown fences, no explanation:
 {
-  "screen_id": "<login|products|cart|payment|order_history|success|unknown>",
+  "screen_id": "<descriptive snake_case identifier inferred from the screen content, e.g. login, product_list, shopping_cart, card_payment_reader, order_confirmation, checkout_summary, loyalty_dashboard>",
   "description": "<one sentence describing this screen's purpose>",
   "elements": [
     {
-      "id": "<short_snake_case_unique_id>",
-      "type": "<button|input|text|link|image|dropdown|stepper>",
-      "label": "<visible text or placeholder>",
-      "description": "<what happens when tapped or typed into>",
+      "id": "<short snake_case id derived from the element label, e.g. sign_in_button, email_input, use_mock_approval_button>",
+      "type": "<button|input|text|link|image|dropdown|stepper|checkbox|radio|toggle>",
+      "label": "<the exact visible text, placeholder, or aria-label of this element>",
+      "description": "<what happens when tapped, clicked, or typed into>",
       "bbox": [x1_norm, y1_norm, x2_norm, y2_norm],
       "center": [cx_norm, cy_norm],
       "confidence": 0.95
@@ -19,19 +20,21 @@ Return ONLY valid JSON — no markdown fences, no explanation:
 }
 
 Coordinate rules (all values NORMALIZED 0.0–1.0):
-- 0.0 = left/top edge of image, 1.0 = right/bottom edge
+- 0.0 = left/top edge, 1.0 = right/bottom edge
 - "center" is the EXACT tap point — the visual midpoint of the interactive hit area
-- "confidence" measures certainty about the CENTER coordinates only:
-    0.90–1.00 : element boundary clearly visible, center unambiguous
-    0.70–0.89 : element visible but edges soft, partially occluded, or very small
-    below 0.70 : element inferred from context, coordinates are estimated
+- "confidence" rates certainty about the center coordinates:
+    0.90–1.00 : boundary clearly visible, center unambiguous
+    0.70–0.89 : visible but edges soft, partially occluded, or very small
+    below 0.70 : inferred from context, coordinates are estimated
 
 Content rules:
-- Include ALL interactive elements: buttons, inputs, links, quantity ±, nav items, tabs
-- Unique snake_case IDs matching the label, e.g. "sign_in_button", "email_input"
+- Include ALL interactive elements: buttons, inputs, links, quantity ±, nav items, tabs, toggles
+- Generate snake_case IDs that faithfully reflect the label text (no abbreviation or invention)
+  e.g. label "Use Mock Approval / Complete Order" → id "use_mock_approval_complete_order_button"
+- For long labels, include the most distinctive words, not a truncation
 - Omit purely decorative text, dividers, and background images
-- For quantity steppers include + and - as separate elements
-- EXCLUDE on-screen / virtual keyboard keys — the robot types text directly; individual keys are not needed
+- For quantity steppers include + and − as separate elements
+- EXCLUDE on-screen / virtual keyboard keys — text is typed directly; keys are not needed
 - Limit to the 25 most task-relevant elements if more are present
 """
 
@@ -57,24 +60,30 @@ Return ONLY valid JSON — no markdown fences:
 """
 
 PLAN_STEPS = """\
-You control a robotic arm that physically taps a kiosk touchscreen.
+You control an automation agent (robotic arm or browser driver) that interacts with a UI.
 
 Task: {task_description}
 
 Current screen: [{screen_id}] {screen_description}
 
-Available elements:
+Available elements on this screen:
 {elements}
 
-Decompose the task into the minimum ordered atomic steps using ONLY these forms:
-  tap: <element_id>
-  type: <text to enter>
-  verify: <text or condition to confirm on screen>
+Decompose the task into the minimum ordered atomic steps using ONLY these action forms:
+  tap: <element_id>          — interact with an element by its exact id
+  type: <text to enter>      — type text into the currently focused field
+  verify: <condition>        — assert a visible condition or piece of text is present
 
-Use element IDs exactly as listed. One action per step.
+STRICT RULES:
+1. ONLY generate "tap:" steps for element IDs that appear verbatim in "Available elements" above.
+   Do NOT invent element IDs, guess button names, or reference elements that are not listed.
+2. If the task requires an element that is NOT visible on this screen, end your plan with:
+   "verify: <describe what you need to see next>" — and stop. Do not add more steps after that.
+3. Match element IDs exactly as listed — copy them character-for-character.
+4. One action per array item. Return ONLY a JSON array of strings.
 
-Return ONLY a JSON array:
-["tap: email_input", "type: user@example.com", "tap: sign_in_button"]
+Example:
+["tap: email_input", "type: user@example.com", "tap: sign_in_button", "verify: dashboard is shown"]
 """
 
 VALIDATE_STEP = """\

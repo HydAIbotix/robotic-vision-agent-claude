@@ -18,6 +18,7 @@ if _s.robot_backend == "playwright":
         scroll_page, get_page_scroll_info, get_dom_screen_id, get_dom_element_centers,
         navigate_to_screen, update_explorer_progress,
         verify_current_screen,
+        get_aria_snapshot, text_is_present, query_element_text, get_element_bounding_box,
     )
     from vision_agent.robot.stubs import move_to_position  # noqa: F401  (playwright has no base movement)
 
@@ -33,6 +34,9 @@ elif _s.robot_backend == "real":
         card_pick, card_tap, card_replace,
         get_events, get_status, get_base_pose, get_arm_state,
     )
+    from vision_agent.robot.stubs import (              # noqa: F401
+        get_aria_snapshot, text_is_present, query_element_text, get_element_bounding_box,
+    )
     # move_to_position must be implemented in real_robot.py when hardware arrives
     try:
         from vision_agent.robot.real_robot import move_to_position  # noqa: F401
@@ -47,6 +51,7 @@ else:  # "demo" (default)
         scroll_page, get_page_scroll_info, get_dom_screen_id, get_dom_element_centers,
         navigate_to_screen, update_explorer_progress,
         verify_current_screen,
+        get_aria_snapshot, text_is_present, query_element_text, get_element_bounding_box,
     )
     def reset_to_entry() -> None: pass                  # noqa: E704
     def stop() -> None: pass                            # noqa: E704

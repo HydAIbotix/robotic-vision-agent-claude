@@ -19,7 +19,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 from langchain_core.messages import HumanMessage
 from vision_agent.nodes.analyze import analyze_screen as _analyze
-from vision_agent.llm import get_llm
+from vision_agent.llm import get_llm, get_explorer_llm
 from vision_agent.screen_cache import compute_hash
 from vision_agent.storage import get_storage
 from vision_agent.config import settings
@@ -151,7 +151,7 @@ def _collect_scrolled_elements(base_elements: list, image_path: str, screen_id: 
     })
 
     # ── One LLM call for all scroll screenshots ───────────────────────────────
-    llm = get_llm()
+    llm = get_explorer_llm()
     raw = llm.invoke([HumanMessage(content=content)]).content.strip()
     if "```" in raw:
         raw = raw.split("```")[1].lstrip("json").strip()
@@ -402,8 +402,12 @@ def explore_screen(state: ExplorerState) -> dict:
     app_map  = {**state["app_map"], "screens": dict(state["app_map"].get("screens") or {})}
     existing = app_map["screens"].get(screen_id, {})
 
-    if not existing.get("elements"):
-        # New screen or skeleton (elements:[]) from identify_result — full capture
+    if not existing.get("elements") or existing.get("is_dynamic"):
+        # New screen, skeleton, OR dynamic screen (cart/payment/etc.) — always full re-capture.
+        # Dynamic screens change content between visits (cart empty vs. with items, payment
+        # state, order history), so stored elements may be stale.  Re-analyzing on every visit
+        # ensures the walkthrough sees the proceed-to-payment button when the cart has items,
+        # even if the main exploration first visited the cart when it was empty.
         elements = screen.get("elements") or []
         elements = _dom_correct_elements(elements)   # fix coordinates using live DOM positions
         elements = _collect_scrolled_elements(elements, state["current_image_path"], screen_id)
@@ -411,7 +415,12 @@ def explore_screen(state: ExplorerState) -> dict:
         image_bytes = get_storage().load(state["current_image_path"])
         screen_hash = compute_hash(image_bytes)
         is_dynamic  = any(kw in screen_id.lower() for kw in _DYNAMIC_SCREEN_KEYWORDS)
-        label       = "New screen" if screen_id not in app_map["screens"] else "Skeleton updated"
+        if screen_id not in app_map["screens"]:
+            label = "New screen"
+        elif existing.get("is_dynamic"):
+            label = "Dynamic re-capture"
+        else:
+            label = "Skeleton updated"
         tag         = "DYNAMIC" if is_dynamic else "STATIC"
         dom_id      = robot.get_dom_screen_id()   # e.g. "products", "categories", ""
         print(f"\n  [EXPLORE] {label}: '{screen_id}' [{tag}]  {len(elements)} elements  hash={screen_hash[:12]}…")
@@ -430,9 +439,9 @@ def explore_screen(state: ExplorerState) -> dict:
         }
         _save_annotated(state["current_image_path"], screen_id, elements)
     else:
-        print(f"\n  [EXPLORE] Re-visiting '{screen_id}' ({len(existing['elements'])} elements already mapped)")
+        # Static screen already fully mapped — just refresh the reference screenshot.
+        print(f"\n  [EXPLORE] Re-visiting static '{screen_id}' ({len(existing['elements'])} elements already mapped)")
         elements = existing["elements"]
-        # Always refresh the reference screenshot — needed for real-robot camera verification.
         app_map["screens"][screen_id] = {
             **existing,
             "reference_screenshot": state["current_image_path"],
@@ -461,7 +470,7 @@ def explore_screen(state: ExplorerState) -> dict:
         invalid_password=invalid.get("password", "WrongPass!"),
     )
 
-    llm = get_llm()
+    llm = get_explorer_llm()
     raw = llm.invoke([HumanMessage(content=prompt)]).content.strip()
     if "```" in raw:
         raw = raw.split("```")[1].lstrip("json").strip()

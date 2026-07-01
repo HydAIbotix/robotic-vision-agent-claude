@@ -28,6 +28,7 @@ class ExplorerState(TypedDict):
     entry_image_path: str
     credentials: dict              # {"valid": {"email": ..., "password": ...}, "invalid": {...}}
     app_map_path: str              # file to save the finished AppMap
+    exploration_mode: str          # "claude" | "playwright_aria"
 
     # ── Working state ─────────────────────────────────────────────────────────
     app_map: AppMap

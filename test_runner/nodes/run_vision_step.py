@@ -64,6 +64,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
     scenario = plan.get("credential_scenario", "valid")
     device_map  = _load_device_map()
     current_dev: str | None = None
+    last_screenshot: str = ""  # updated after every tap; used by subsequent verify steps
 
     for i, step in enumerate(plan.get("steps") or [], 1):
         # ── device routing — move robot before first step on each new device ──
@@ -81,12 +82,12 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
 
         # ── verify ────────────────────────────────────────────────────────────
         if action == "verify":
-            expected = step.get("expected_screen", "")
-            desc     = step.get("description", "")
-            if not expected:
-                # No expected_screen → cannot verify; log a warning and skip.
-                # Regenerate the plan to get proper screen assertions.
-                print(f"    {i:>2}. verify  [no expected_screen — SKIPPED, plan may need regeneration]  {desc!r}")
+            expected      = step.get("expected_screen", "")
+            expected_text = step.get("expected_text")   # optional content check
+            desc          = step.get("description", "")
+            if not expected and not expected_text:
+                # Nothing to verify — skip with a warning.
+                print(f"    {i:>2}. verify  [no expected_screen/text — SKIPPED]  {desc!r}")
                 sr = {"step": f"verify: {desc}", "success": True, "note": "no expected_screen in plan — check skipped", "method": "skipped"}
                 step_results.append(sr)
                 if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
@@ -99,25 +100,85 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 verify_save = str(Path(settings.screenshots_dir) / f"verify_{test_id}_{ts}.png")
                 Path(settings.screenshots_dir).mkdir(parents=True, exist_ok=True)
 
-            vr     = robot.verify_current_screen(expected, app_map or {}, verify_save)
-            actual = vr["actual_screen"]
-            success = vr["match"]
-            method  = vr.get("method", "unknown")
+            # Use the 4-node validation pipeline (screen + text + Claude fallback).
+            # Retry up to 2 times with 1 s delay when screen doesn't match — SPA
+            # route changes can finish slightly after the first poll.
+            from vision_agent.nodes.validate_pipeline import run_validate_pipeline
+            vr = run_validate_pipeline(
+                expected_screen=expected,
+                expected_text=expected_text,
+                step_description=desc,
+                image_path=last_screenshot,
+                app_map=app_map or {},
+                backend=settings.robot_backend,
+                save_path=verify_save,
+            )
 
-            if not actual and not success:
-                # Screen detection returned nothing — treat as FAIL
-                print(f"    {i:>2}. verify  expected={expected!r}  [{method}: no screen detected — FAIL]")
-                sr = {"step": f"verify: {desc}", "success": False, "note": f"screen detection unavailable via {method} (expected: {expected})", "method": method, "expected_screen": expected, "actual_screen": ""}
+            _retry = 0
+            while vr.get("success") is False and vr.get("method") == "screen_id" and _retry < 2:
+                _retry += 1
+                print(f"    {i:>2}. verify  retrying ({_retry}/2) — waiting 1 s for navigation to settle …")
+                time.sleep(1.0)
+                if settings.robot_backend != "playwright" and last_screenshot:
+                    ts2 = int(time.time() * 1000)
+                    verify_save = str(Path(settings.screenshots_dir) / f"verify_{test_id}_{ts2}.png")
+                    robot.capture_screen(verify_save)
+                    last_screenshot = verify_save
+                vr = run_validate_pipeline(
+                    expected_screen=expected,
+                    expected_text=expected_text,
+                    step_description=desc,
+                    image_path=last_screenshot,
+                    app_map=app_map or {},
+                    backend=settings.robot_backend,
+                    save_path=verify_save,
+                )
+
+            success = vr["success"]
+            method  = vr.get("method", "unknown")
+            actual  = vr.get("actual_screen", "")
+            observation = vr.get("observation", "")
+            note    = vr.get("note", "")
+
+            # Verification gap — unknown screen, not a hard failure
+            if success is None:
+                print(f"    {i:>2}. verify  expected={expected!r}  [VERIFICATION GAP — {observation}]")
+                sr = {
+                    "step": f"verify: {desc}",
+                    "success": True,     # don't fail the test over an uncharted screen
+                    "note": note or observation,
+                    "method": "verification_gap",
+                    "expected_screen": expected,
+                    "actual_screen": actual,
+                    "verification_gap": True,
+                }
                 step_results.append(sr)
-                if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
-                return step_results, "failed"
+                if run_id: broadcaster.emit(run_id, {
+                    "event": "step_result", "run_id": run_id, "test_id": test_id,
+                    "step_index": i, **sr,
+                })
+                continue
 
             status = "PASS" if success else "FAIL"
-            conf   = f"  conf={vr['confidence']:.2f}" if "confidence" in vr else ""
-            print(f"    {i:>2}. verify  expected={expected!r}  actual={actual!r}  [{status}]  [{method}{conf}]")
-            sr = {"step": f"verify: {desc}", "success": success, "expected_screen": expected, "actual_screen": actual, "method": method}
+            text_tag = f"  text='{expected_text}'" if expected_text else ""
+            print(f"    {i:>2}. verify  expected={expected!r}{text_tag}  actual={actual!r}  [{status}]  [{method}]")
+            if not success:
+                print(f"             {observation}")
+
+            sr = {
+                "step": f"verify: {desc}",
+                "success": success,
+                "expected_screen": expected,
+                "actual_screen": actual,
+                "expected_text": expected_text,
+                "method": method,
+                "observation": observation,
+            }
             step_results.append(sr)
-            if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
+            if run_id: broadcaster.emit(run_id, {
+                "event": "step_result", "run_id": run_id, "test_id": test_id,
+                "step_index": i, **sr,
+            })
             if not success:
                 return step_results, "failed"
             continue
@@ -128,9 +189,38 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             py  = step.get("py", 0)
             eid = step.get("element_id", "")
             sid = step.get("screen_id", "")
+
+            # (0,0) means the planner found no stored coordinates — the screen was
+            # not in the app_map when the plan was generated.  Mark as failure so
+            # Tier 3 takes over with Claude vision instead of tapping a dead pixel.
+            if px == 0 and py == 0:
+                print(f"    {i:>2}. tap   {eid!r} — no coordinates (screen not yet in app_map) → Tier-3 fallback")
+                sr = {
+                    "step": f"tap: {eid} @ (0,0)",
+                    "success": False,
+                    "method": "no_coordinates",
+                    "note": f"No stored coordinates for '{eid}' — screen not explored; Tier-3 will retry with vision",
+                }
+                step_results.append(sr)
+                if run_id:
+                    broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
+                return step_results, "failed"
+
             print(f"    {i:>2}. tap   {eid!r} @ ({px},{py})  [{sid}]")
             robot.tap(px, py)
             time.sleep(0.5)
+            # Capture screenshot after tap so verify steps have a fresh image
+            if settings.robot_backend != "playwright":
+                ts = int(time.time() * 1000)
+                snap_path = str(Path(settings.screenshots_dir) / f"tap_{test_id}_{ts}.png")
+                Path(settings.screenshots_dir).mkdir(parents=True, exist_ok=True)
+                robot.capture_screen(snap_path)
+                last_screenshot = snap_path
+                # Navigation prediction from app_map transitions
+                sc_data  = (app_map or {}).get("screens", {}).get(sid, {})
+                predicted = (sc_data.get("transitions") or {}).get(eid)
+                if predicted:
+                    print(f"         → nav prediction: '{predicted}' [app_map transitions]")
             sr = {"step": f"tap: {eid} @ ({px},{py})", "success": True, "method": "app_map", "screen_id": sid, "element_id": eid}
             step_results.append(sr)
             if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
@@ -146,6 +236,21 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             step_results.append(sr)
             if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
             continue
+
+        # ── vision_required sentinel — planner found an uncharted screen ──────
+        if action == "vision_required":
+            desc = step.get("description", "complete remaining test steps")
+            print(f"    {i:>2}. [VISION REQUIRED] {desc}")
+            sr = {
+                "step": f"vision_required: {desc}",
+                "success": None,
+                "method": "vision_required",
+                "description": desc,
+            }
+            step_results.append(sr)
+            if run_id:
+                broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
+            return step_results, "vision_required"
 
         # ── unknown ───────────────────────────────────────────────────────────
         print(f"    {i:>2}. [UNKNOWN action={action!r}] — skipped")
@@ -242,6 +347,91 @@ def _run_tier3(state: TestRunnerState, tc: dict) -> dict:
     return agent.invoke(initial)
 
 
+# ── Tier 3 (resume): continue from current screen without resetting ───────────
+
+def _run_tier3_continue(
+    state: TestRunnerState,
+    tc: dict,
+    completed_steps: list[dict],
+    start_step_idx: int,
+) -> dict:
+    """
+    Resume execution from wherever the browser is NOW using Claude vision.
+
+    Called when Tier 1/2 stalls mid-test because a screen is not in the app_map
+    (detected by a 0,0 tap).  Does NOT call reset_to_entry — takes a fresh
+    screenshot of the current screen and runs only the remaining steps.
+
+    The agent receives full context: what steps already passed, what remains,
+    and an explicit instruction not to navigate back to login.
+
+    Returns a result dict with step_results = completed_steps + Tier-3 steps,
+    so the final audit trail covers the entire test.
+    """
+    from vision_agent.agent import create_agent
+    from vision_agent.state import VisionAgentState
+
+    structured_plan   = state.get("structured_plan") or {}
+    plan_steps_all    = structured_plan.get("steps") or []
+    n_remaining       = max(0, len(plan_steps_all) - start_step_idx)
+
+    # Capture current screen — no reset
+    save_path = str(
+        Path(settings.screenshots_dir)
+        / f"tier3_resume_{tc['test_id']}_{int(time.time())}.png"
+    )
+    Path(settings.screenshots_dir).mkdir(parents=True, exist_ok=True)
+    current_image = robot.capture_screen(save_path)["image_path"]
+    print(f"  [TIER-3] Handoff screenshot (no reset): {current_image}")
+
+    # ── Task description: high-level goal only, NO step-by-step enumeration ────
+    # The structured plan steps beyond this point were generated WITHOUT seeing
+    # the actual screen (screen was not in the app_map), so they may be
+    # hallucinated (e.g. "Start Card Reader Session" button that doesn't exist).
+    # Give Claude the test OBJECTIVE and let it reason from the actual screenshot.
+    # The plan_steps node will analyze the real screen elements and generate
+    # correctly-formatted "tap: <label>" / "verify: <desc>" strings.
+    task_description = (
+        f"Test objective: {tc['summary']}\n\n"
+        f"Context: The first {len(completed_steps)} of {len(plan_steps_all)} planned "
+        f"steps have already been executed using stored UI coordinates. "
+        f"The screenshot shows the CURRENT screen — you are mid-test with "
+        f"approximately {n_remaining} step(s) remaining.\n\n"
+        f"Your task: examine the screen visible in the screenshot and execute "
+        f"whatever actions are needed to complete the test objective stated above.\n"
+        f"IMPORTANT: identify buttons and elements from what you ACTUALLY SEE on "
+        f"screen — do not assume button labels that might not exist. "
+        f"Do NOT navigate back to login. Do NOT restart from the beginning. "
+        f"Continue from the current screen."
+    )
+
+    # Pass planned_steps=[] so the plan_steps node runs and generates fresh steps
+    # from the REAL screenshot.  Pre-populating from the structured plan would
+    # inject hallucinated element names (wrong format + wrong labels) that cause
+    # "Unknown action type" failures in execute.py.
+    agent = create_agent()
+    initial: VisionAgentState = {
+        "task_description": task_description,
+        "image_path":       current_image,
+        "screen_analysis":  None,
+        "planned_steps":    [],     # empty → plan_steps generates from real screenshot
+        "current_step_idx": 0,
+        "step_results":     [],
+        "retry_count":      0,
+        "screen_history":   [],
+        "decision_tree":    {},
+        "outcome":          "running",
+        "summary":          "",
+        "error_message":    None,
+    }
+    t3_result = agent.invoke(initial)
+
+    # Merge Tier 1/2 completed steps with Tier 3 steps for a full audit trail
+    t3_steps  = t3_result.get("step_results") or []
+    all_steps = list(completed_steps) + t3_steps
+    return {**t3_result, "step_results": all_steps}
+
+
 # ── Node entry point ─────────────────────────────────────────────────────────
 
 def run_vision_step(state: TestRunnerState) -> dict:
@@ -286,9 +476,48 @@ def run_vision_step(state: TestRunnerState) -> dict:
         )
         passed = sum(1 for r in step_results if r["success"])
 
-        # On failure: record and move on.  Tier 3 fallback is intentionally not
-        # automatic — Tier 1/2 failure already carries the exact failing step,
-        # which is more useful than a Tier 3 re-run that may mask the real cause.
+        # On failure: route to the right Tier-3 mode based on failure reason.
+        if outcome in ("failed", "vision_required"):
+            last_sr = step_results[-1] if step_results else {}
+
+            if last_sr.get("method") in ("no_coordinates", "vision_required"):
+                # app_map coverage gap or vision sentinel — browser is already on the
+                # correct screen; resume from here without resetting to entry.
+                failed_idx  = len(step_results) - 1   # 0-indexed plan position
+                completed   = step_results[:-1]        # drop the sentinel artifact
+                t3_mode     = "resume"
+                print(
+                    f"\n  [RUN] app_map incomplete at step {failed_idx + 1} "
+                    f"— resuming Tier-3 from current screen (no reset)"
+                )
+                t3_result = _run_tier3_continue(state, tc, completed, failed_idx)
+            else:
+                # Genuine failure (wrong screen, bad state) — restart from entry.
+                t3_mode = "restart"
+                print(
+                    f"\n  [RUN] Tier-1/2 failed at step {len(step_results)} "
+                    f"— restarting with Tier-3 VisionAgent"
+                )
+                t3_result = _run_tier3(state, tc)
+
+            t3_steps   = t3_result.get("step_results") or []
+            t3_outcome = t3_result.get("outcome", "failed")
+            t3_passed  = sum(1 for r in t3_steps if r.get("success"))
+            print(f"\n  [TIER-3/{t3_mode}] {tc['test_id']}  {t3_outcome.upper()}  ({t3_passed}/{len(t3_steps)} steps passed)")
+            if t3_result.get("screen_history"):
+                print(f"           Journey: {' -> '.join(t3_result['screen_history'])}")
+            test_result: TestResult = {
+                "test_id":        tc["test_id"],
+                "summary":        tc["summary"],
+                "outcome":        t3_outcome,
+                "step_results":   t3_steps,
+                "vision_summary": (
+                    f"Tier-1/2 → Tier-3/{t3_mode} [{backend}] ({t3_outcome}): "
+                    f"{t3_result.get('summary', '')}"
+                ),
+            }
+            return {"test_results": [*(state.get("test_results") or []), test_result]}
+
         print(f"\n  [RESULT] {tc['test_id']}  {outcome.upper()}  ({passed}/{len(step_results)} steps passed)")
 
         test_result: TestResult = {

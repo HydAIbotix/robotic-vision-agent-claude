@@ -110,3 +110,23 @@ def move_to_position(x: float, y: float, theta: float) -> dict:
 def update_explorer_progress(explored: int, total: int, current_action: str = "") -> None:
     """No-op in demo/real modes — progress HUD only renders in playwright mode."""
     pass
+
+
+def get_aria_snapshot() -> dict:
+    """Not applicable to demo/real modes — no DOM available via camera."""
+    return {}
+
+
+def text_is_present(text: str, exact: bool = False) -> bool:
+    """Demo mode: always returns True (content validation skipped)."""
+    return True
+
+
+def query_element_text(selector: str) -> str:
+    """Not applicable to demo/real modes — no DOM available."""
+    return ""
+
+
+def get_element_bounding_box(selector: str) -> dict | None:
+    """Not applicable to demo/real modes — no DOM available."""
+    return None

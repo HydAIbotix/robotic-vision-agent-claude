@@ -9,11 +9,76 @@ from vision_agent import robot
 from vision_agent.config import settings
 
 
-def _find_element(analysis, target: str) -> dict | None:
-    """Match by element id first, then by label (case-insensitive)."""
-    for el in analysis["elements"]:
-        if el["id"] == target or el["label"].strip().lower() == target.lower():
+import re as _re
+
+_STOP_WORDS = frozenset({
+    "button", "input", "link", "field", "the", "a", "an", "is", "on",
+    "for", "to", "in", "of", "and", "or", "use", "tap", "click",
+})
+
+
+def _find_element(analysis: dict, target: str) -> dict | None:
+    """
+    Match a planned-step target string to a screen element.
+
+    Tries in priority order so the best match wins:
+      1. Exact element id
+      2. Exact label (case-insensitive)
+      3. Either string fully contains the other (case-insensitive)
+      4. Normalised alphanumeric match (strips punctuation/spaces)
+      5. Significant-keyword overlap — words in the target that appear in
+         the element's label or id (after removing stop words)
+
+    This allows planning steps like "tap: use_mock_approval_button" to match
+    an element whose label is "Use Mock Approval / Complete Order", or
+    "tap: sign_in_button" to match label "Sign In", across any app.
+    """
+    elements = analysis.get("elements") or []
+    if not elements:
+        return None
+
+    tgt_lower = target.strip().lower()
+    tgt_norm  = _re.sub(r"[^a-z0-9]", "", tgt_lower)
+
+    # 1. Exact id
+    for el in elements:
+        if el.get("id") == target:
             return el
+
+    # 2. Exact label (case-insensitive)
+    for el in elements:
+        if el.get("label", "").strip().lower() == tgt_lower:
+            return el
+
+    # 3. Full containment either way
+    for el in elements:
+        el_lower = el.get("label", "").strip().lower()
+        if el_lower and (tgt_lower in el_lower or el_lower in tgt_lower):
+            return el
+
+    # 4. Normalised alphanumeric containment (ignores / - spaces punctuation)
+    for el in elements:
+        el_norm = _re.sub(r"[^a-z0-9]", "", el.get("label", "").strip().lower())
+        if tgt_norm and el_norm and (tgt_norm in el_norm or el_norm in tgt_norm):
+            return el
+
+    # 5. Keyword overlap — split target on _ and spaces; remove stop words
+    tgt_words = {
+        w for w in _re.split(r"[_\s]+", tgt_lower) if w and w not in _STOP_WORDS
+    }
+    if tgt_words:
+        best_el, best_score = None, 0
+        for el in elements:
+            el_text = (el.get("label", "") + " " + el.get("id", "")).lower()
+            el_words = set(_re.split(r"[_\s/,.\-]+", el_text))
+            overlap  = len(tgt_words & el_words)
+            if overlap > best_score:
+                best_score, best_el = overlap, el
+        if best_el:
+            matched_label = best_el.get("label", "")
+            print(f"    [MATCH] '{target}' → '{matched_label}' (keyword overlap={best_score})")
+            return best_el
+
     return None
 
 

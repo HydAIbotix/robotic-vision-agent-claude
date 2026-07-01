@@ -267,13 +267,14 @@ def get_config(db: Session = Depends(get_db)):
     kiosks  = db.query(models.KioskConfig).all()
     devices = db.query(models.DeviceConfig).order_by(models.DeviceConfig.alias).all()
     return {
-        "robot_backend":  settings.robot_backend,
-        "robot_ip":       settings.robot_ip,
-        "robot_id":       settings.robot_id,
-        "viewport":       {"width": settings.viewport_width, "height": settings.viewport_height},
-        "camera":         {"width": settings.robot_camera_width, "height": settings.robot_camera_height},
-        "kiosks":         [_kiosk_summary(k) for k in kiosks],
-        "devices":        [_device_summary(d) for d in devices],
+        "robot_backend":    settings.robot_backend,
+        "robot_ip":         settings.robot_ip,
+        "robot_id":         settings.robot_id,
+        "exploration_mode": _runtime_exploration_mode,
+        "viewport":         {"width": settings.viewport_width, "height": settings.viewport_height},
+        "camera":           {"width": settings.robot_camera_width, "height": settings.robot_camera_height},
+        "kiosks":           [_kiosk_summary(k) for k in kiosks],
+        "devices":          [_device_summary(d) for d in devices],
     }
 
 
@@ -557,6 +558,87 @@ def delete_tc_plan(test_id: str):
     """Remove all cached plans for this test_id so the next request regenerates via Claude."""
     from test_runner import plan_cache as _plan_cache
     _plan_cache.invalidate_all_for(test_id)
+
+
+# ── Exploration mode (runtime override — survives until server restart) ────────
+
+# Starts from .env / settings; overridable at runtime via PATCH /api/explore-config.
+_runtime_exploration_mode: str = settings.exploration_mode
+
+
+class ExploreConfigPatch(BaseModel):
+    mode: str  # "claude" | "playwright_aria"
+
+
+@app.get("/api/explore-config")
+def get_explore_config():
+    backend = settings.robot_backend
+    effective = (
+        "claude"
+        if backend == "real" and _runtime_exploration_mode == "playwright_aria"
+        else _runtime_exploration_mode
+    )
+    return {
+        "mode":           _runtime_exploration_mode,
+        "effective_mode": effective,
+        "robot_backend":  backend,
+        "locked":         backend == "real",
+        "lock_reason":    "Playwright ARIA requires browser access — not available with a real robot arm." if backend == "real" else None,
+    }
+
+
+@app.patch("/api/explore-config")
+def set_explore_config(body: ExploreConfigPatch):
+    global _runtime_exploration_mode
+    allowed = {"claude", "playwright_aria"}
+    if body.mode not in allowed:
+        raise HTTPException(400, f"mode must be one of {sorted(allowed)}")
+    if body.mode == "playwright_aria" and settings.robot_backend == "real":
+        raise HTTPException(400, "playwright_aria is not available when robot_backend=real")
+    _runtime_exploration_mode = body.mode
+    return {"mode": _runtime_exploration_mode, "status": "ok"}
+
+
+# ── Human verdict override (for AMBIGUOUS test results) ────────────────────────
+
+class VerdictOverride(BaseModel):
+    test_id:    str
+    verdict:    str   # "passed" | "failed"
+    reviewer:   str = "human"
+
+
+@app.patch("/api/runs/{run_id}/verdict")
+def submit_verdict(run_id: str, body: VerdictOverride, db: Session = Depends(get_db)):
+    run = db.query(models.TestRun).filter_by(run_id=run_id).first()
+    if not run:
+        raise HTTPException(404, "Run not found")
+    result = (
+        db.query(models.TestResult)
+        .filter_by(run_id=run_id, test_id=body.test_id)
+        .first()
+    )
+    if not result:
+        raise HTTPException(404, f"No result for test_id={body.test_id} in run {run_id}")
+    if body.verdict not in ("passed", "failed"):
+        raise HTTPException(400, "verdict must be 'passed' or 'failed'")
+
+    old_outcome = result.outcome
+    result.outcome = body.verdict
+
+    # Re-compute run totals
+    run.passed = sum(1 for r in run.results if r.outcome == "passed")
+    run.failed = run.total - run.passed
+    db.commit()
+
+    _broadcast(run_id, {
+        "event":      "verdict_override",
+        "run_id":     run_id,
+        "test_id":    body.test_id,
+        "old_outcome": old_outcome,
+        "new_outcome": body.verdict,
+        "reviewer":   body.reviewer,
+    })
+    return {"status": "ok", "test_id": body.test_id, "outcome": body.verdict}
 
 
 # ── App Explorer ──────────────────────────────────────────────────────────────
@@ -906,12 +988,17 @@ def _run_defect_agent(run_id: str, kiosk_id: str, failed_results: list):
 
 def _run_explorer(explore_id: str, kiosk_url: str):
     """Background thread: run the app explorer and record success/failure."""
-    import subprocess, sys
+    import os
+    import subprocess
     try:
+        env = os.environ.copy()
+        # Pass the runtime override so the subprocess picks it up via pydantic-settings
+        env["EXPLORATION_MODE"] = _runtime_exploration_mode
         result = subprocess.run(
             [sys.executable, "run_explorer.py"],
             stderr=subprocess.PIPE,
             text=True,
+            env=env,
         )
         if result.returncode == 0:
             _explore_jobs[explore_id] = {

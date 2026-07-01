@@ -7,7 +7,7 @@ import json
 from langchain_core.messages import HumanMessage
 from vision_agent import robot
 from vision_agent.storage import get_storage
-from vision_agent.llm import get_llm
+from vision_agent.llm import get_explorer_llm
 from vision_agent.screen_cache import compute_hash, lookup_screen
 from app_explorer.state import ExplorerState
 from app_explorer.prompts import IDENTIFY_RESULT_SCREEN
@@ -130,7 +130,7 @@ def identify_result(state: ExplorerState) -> dict:
         dom_screen_hint=dom_hint,
     )
 
-    llm = get_llm()
+    llm = get_explorer_llm()
     msg = HumanMessage(content=[
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
         {"type": "text", "text": prompt},

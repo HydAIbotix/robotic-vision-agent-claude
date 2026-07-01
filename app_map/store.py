@@ -121,3 +121,28 @@ def version_hash(app_map: Optional[AppMap]) -> str:
     screen_ids  = ",".join(sorted((app_map.get("screens") or {}).keys()))
     import hashlib
     return hashlib.md5(f"{explored_at}|{screen_ids}".encode()).hexdigest()[:10]
+
+
+# Module-level cache: explored_at timestamp → {screen_id: hex_hash_str}
+_HASH_CACHE: dict[str, dict[str, str]] = {}
+
+
+def get_phash_cache(app_map: Optional[AppMap]) -> dict[str, str]:
+    """Return {screen_id: hex_hash} extracted from stored screen_hash values in app_map.
+
+    The cache is keyed by explored_at so it auto-invalidates when Explorer re-runs.
+    All validate calls in a single test run share the same dict — no repeated lookups.
+    """
+    key = ((app_map or {}).get("explored_at") or "")
+    if key and key in _HASH_CACHE:
+        return _HASH_CACHE[key]
+
+    cache: dict[str, str] = {}
+    for sid, sc in ((app_map or {}).get("screens") or {}).items():
+        h = (sc or {}).get("screen_hash", "")
+        if h:
+            cache[sid] = h
+
+    if key:
+        _HASH_CACHE[key] = cache
+    return cache

@@ -127,6 +127,17 @@ def parse_steps(state: TestRunnerState) -> dict:
         print(f"  [PARSE] Tier-2 — planning from app_map element inventory (1 text call)")
         plan = _tier2_plan(tc, app_map, credentials)
         if plan:
+            # Safety net: any tap with an empty element_id is a hallucinated step —
+            # convert it to a vision_required sentinel so Tier-3 picks up from there.
+            _n_converted = 0
+            for step in plan.get("steps") or []:
+                if step.get("action") == "tap" and not step.get("element_id"):
+                    step["action"]      = "vision_required"
+                    step["description"] = step.get("description") or "complete remaining test steps via vision"
+                    _n_converted += 1
+            if _n_converted:
+                print(f"  [PARSE] ⚠ {_n_converted} empty-element tap(s) converted → vision_required")
+
             n = len(plan.get("steps") or [])
             print(f"  [PARSE] Tier-2 plan: {n} steps")
             _print_plan(plan)
@@ -162,3 +173,5 @@ def _print_plan(plan: dict) -> None:
             print(f"    {i:>2}. type  {val[:40]!r}")
         elif action == "verify":
             print(f"    {i:>2}. verify screen={step.get('expected_screen','')}  — {step.get('description','')}")
+        elif action == "vision_required":
+            print(f"    {i:>2}. [VISION REQUIRED] {step.get('description','')}")

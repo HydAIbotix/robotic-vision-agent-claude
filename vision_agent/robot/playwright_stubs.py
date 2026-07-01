@@ -181,13 +181,15 @@ def tap(x: int, y: int) -> dict:
         print(f"  [PLAYWRIGHT] click({x}, {y}) [raw]")
 
     # Wait for React SPA route changes to finish rendering.
-    # 300ms is too short for login/checkout navigations (200-700ms). We wait up to
-    # 1200ms for the DOM to stop mutating (networkidle is too strict for WebSocket apps).
+    # 1200ms timeout for the load state; for already-loaded SPAs this completes
+    # immediately, so wait_for_timeout provides the real settle window.
+    # 800ms handles slow checkout/cart navigations (add-to-cart toast can take ~600ms
+    # to clear before the cart button tap registers on the correct target).
     try:
         page.wait_for_load_state("domcontentloaded", timeout=1200)
     except Exception:
         pass  # timeout fires on non-navigating clicks — that is expected and fine
-    page.wait_for_timeout(200)  # brief extra settle for React re-renders
+    page.wait_for_timeout(800)  # settle for React re-renders + toast dismiss
 
     return {"success": True, "x": x, "y": y}
 
@@ -547,6 +549,73 @@ def update_explorer_progress(explored: int, total: int, current_action: str = ""
         )
     except Exception:
         pass   # never crash exploration because of the HUD overlay
+
+
+def get_aria_snapshot() -> dict:
+    """Return the full ARIA accessibility tree of the current page.
+
+    Replaces Claude vision for element discovery in playwright mode.
+    Zero LLM calls — the browser parses and returns the tree directly.
+    Returns {} on error (caller should fall back to Claude vision).
+    """
+    page = _ensure_page()
+    try:
+        snapshot = page.accessibility.snapshot(interesting_only=True)
+        return snapshot or {}
+    except Exception as e:
+        print(f"  [PLAYWRIGHT] get_aria_snapshot error: {e}")
+        return {}
+
+
+def text_is_present(text: str, exact: bool = False) -> bool:
+    """Check whether text is visible anywhere on the current page.
+
+    Uses DOM text query — zero screenshot, zero LLM cost.
+    Replaces Claude vision / OCR for text-content validation.
+    """
+    page = _ensure_page()
+    try:
+        loc = page.get_by_text(text, exact=exact)
+        return loc.count() > 0
+    except Exception:
+        return False
+
+
+def query_element_text(selector: str) -> str:
+    """Return the visible text content of the first element matching selector.
+
+    selector: CSS selector or data-testid pattern, e.g. '[data-testid="cart-total"]'
+    Returns "" on miss or error.
+    """
+    page = _ensure_page()
+    try:
+        loc = page.locator(selector)
+        if loc.count() > 0:
+            return (loc.first.inner_text() or "").strip()
+        return ""
+    except Exception:
+        return ""
+
+
+def get_element_bounding_box(selector: str) -> dict | None:
+    """Return pixel bounding box for the first element matching selector.
+
+    Returns {"x": ..., "y": ..., "width": ..., "height": ..., "cx": ..., "cy": ...}
+    where cx/cy are the center coordinates.  Returns None on miss.
+    """
+    page = _ensure_page()
+    try:
+        loc = page.locator(selector)
+        if loc.count() == 0:
+            return None
+        box = loc.first.bounding_box()
+        if box is None:
+            return None
+        box["cx"] = round(box["x"] + box["width"] / 2)
+        box["cy"] = round(box["y"] + box["height"] / 2)
+        return box
+    except Exception:
+        return None
 
 
 def set_demo_screens(paths: list[str]) -> None:

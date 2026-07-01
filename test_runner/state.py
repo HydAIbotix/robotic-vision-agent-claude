@@ -18,6 +18,7 @@ class TestResult(TypedDict):
     outcome: str          # "passed" | "failed" | "error"
     step_results: list    # list[StepResult] from vision_agent.state
     vision_summary: str   # the agent's own summary string
+    conclusive_verdict: dict  # verdict from conclusive_verdict node; {} if not yet run
 
 
 class TestRunnerState(TypedDict):

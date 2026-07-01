@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     vision_backend: Literal["anthropic", "bedrock"] = "anthropic"
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-6"
+    # Opus for exploration — reasons better about conditional navigation and gated flows
+    anthropic_explorer_model: str = "claude-opus-4-8"
 
     # AWS Bedrock (active only when vision_backend="bedrock")
     bedrock_region: str = "us-east-1"
@@ -41,6 +43,12 @@ class Settings(BaseSettings):
     # App Explorer coordinate cache — skip analyze_screen LLM call for known static screens
     app_map_path: str = "app_map.json"
     use_app_map_cache: bool = True
+
+    # App Explorer mode:
+    #   "claude"          — screenshot → Claude vision → elements (default; works for all backends)
+    #   "playwright_aria" — ARIA accessibility tree → elements (playwright backend only; 0 LLM calls)
+    # When robot_backend="real", exploration_mode is forced to "claude" automatically.
+    exploration_mode: str = "claude"
 
     # ── Hardware robot settings (active when robot_backend="real") ─────────────
     # Connection

@@ -1,8 +1,8 @@
 PLAN_FROM_MAP = """\
-You are planning the execution of a kiosk test case.
-The kiosk has already been explored — you have the complete screen and element inventory below,
-including exact pixel coordinates for every interactive element.
-You do NOT need a screenshot: the inventory IS the visual description of the app, pre-extracted.
+You are planning the execution of an automated test case.
+The application under test has been explored — you have the complete screen and element
+inventory below, including exact pixel coordinates for every interactive element.
+You do NOT need a screenshot: the inventory IS the visual description of the app.
 
 Test Case: {test_id}
 Summary:   {summary}
@@ -20,35 +20,37 @@ Credentials:
 App element inventory (ALL screens, elements, and pixel coordinates):
 {element_inventory}
 
-PREREQUISITE ANALYSIS — apply this to every app, not just kiosks:
-Raw test steps are written by humans as high-level summaries. They are often abbreviated and skip
-implicit prerequisites. Before translating each step, ask: "Would this step actually succeed if a
-robot ran it right now, given only the steps that came before?"
+═══ UNKNOWN SCREENS / ELEMENTS — READ THIS FIRST ════════════════════
+Check the inventory BEFORE planning any step.
 
-Rules:
-1. If a step navigates to a screen that REQUIRES prior state (e.g. cart, checkout, payment,
-   confirmation), verify that state was established by an earlier step. If not, INSERT the
-   missing prerequisite steps using elements from the app map above.
-   Examples:
-   - "Go to cart" / "Checkout" / "Proceed to payment" → items must be in the cart first.
-     If no add-to-cart step exists before this, INSERT one (or more, if the app requires
-     selecting a quantity/product first) using the relevant element from the app map.
-   - "Submit order" / "Place order" → cart must be non-empty AND checkout must be initiated.
-   - "Pay" / "Enter card" → must be on the payment screen, which requires a non-empty cart.
-2. Any element that has a disabled or inactive state when a condition is not met must be
-   preceded by the steps that satisfy that condition.
+If a step requires a screen or element that is NOT in the inventory:
+  ✗  Do NOT invent an element_id.
+  ✗  Do NOT output px:0, py:0 with a guessed element_id.
+  ✗  Do NOT output an empty element_id ("").
+  ✓  Output this sentinel and STOP — do not add any more steps after it:
+       {{"action": "vision_required", "description": "<what the test still needs to do from here>"}}
+
+The runtime switches to live Claude Vision for everything after the sentinel.
+A tap step with element_id "" or px:0/py:0 is WRONG — use vision_required instead.
+
+═══ PREREQUISITE ANALYSIS ═══════════════════════════════════════════
+Raw test steps are high-level summaries that skip implicit prerequisites.
+Ask: "Would this step succeed if a robot ran it right now?"
+
+1. If a step navigates to a screen requiring prior state (items in cart before checkout,
+   form filled before submit), INSERT missing prerequisite steps from the inventory.
+2. Disabled elements must be preceded by steps that satisfy their precondition.
 3. Form submissions: all required fields must be filled before tapping submit.
-4. Do NOT blindly translate raw steps word-for-word. Produce the COMPLETE executable sequence.
-   Infer and insert missing steps from the app map whenever the raw steps skip prerequisites.
+4. Produce the COMPLETE executable sequence — do not blindly translate word-for-word.
 
-YOUR TASKS:
-1. Determine credential_scenario: "valid" or "invalid" (look for "invalid"/"wrong" in the test steps).
-2. Apply prerequisite analysis (above) to produce the COMPLETE executable sequence.
-3. Map each human-readable test step to one or more machine steps using ONLY the elements listed above.
-4. For tap steps: include the screen_id the element belongs to and its exact px/py from the inventory.
-5. For type steps: substitute the actual credential values (not placeholders).
-6. For verify steps: ALWAYS include expected_screen (the screen_id from the inventory where verification
-   should occur). Use DOM screen comparison — no visual check needed.
+═══ YOUR TASKS ══════════════════════════════════════════════════════
+1. Determine credential_scenario: "valid" or "invalid".
+2. For EVERY step: verify the screen_id AND element_id exist verbatim in the inventory.
+   If either is missing → emit vision_required and stop.
+3. Apply prerequisite analysis to produce the COMPLETE executable sequence.
+4. For tap steps: copy screen_id, element_id, px, py EXACTLY from the inventory.
+5. For type steps: substitute actual credential values.
+6. For verify steps: include expected_screen (the screen_id from the inventory).
 
 Return ONLY valid JSON — no markdown fences:
 {{
@@ -60,21 +62,21 @@ Return ONLY valid JSON — no markdown fences:
     {{"action": "tap",    "screen_id": "login", "element_id": "password_input", "px": 700, "py": 498}},
     {{"action": "type",   "value": "{valid_password}"}},
     {{"action": "tap",    "screen_id": "login", "element_id": "sign_in_button", "px": 700, "py": 560}},
-    {{"action": "verify", "expected_screen": "products", "description": "products page is displayed"}}
+    {{"action": "verify", "expected_screen": "products", "description": "products page is displayed"}},
+    {{"action": "vision_required", "description": "complete payment and verify order success"}}
   ]
 }}
 
-Rules:
-- Use ONLY element ids and screen ids that appear verbatim in the inventory above.
-- Do not invent element ids or coordinates — copy them exactly from the inventory.
-- A "tap" step that focuses a text field must be immediately followed by a "type" step.
-- "User presents payment card" → tap the mock-approval button (look for it in the inventory).
-- Every verify step MUST have expected_screen set to the screen_id where that verification occurs.
-- For invalid-credential tests: set credential_scenario="invalid" and use the invalid values.
+Additional rules:
+- ONLY use element_id and screen_id values that appear verbatim in the inventory.
+- Every verify step MUST have expected_screen (the screen_id where verification occurs).
+- Add expected_text only when the test explicitly checks a specific value (order total,
+  error message text, transaction ID, etc.).
+- For invalid-credential tests: credential_scenario="invalid", use the invalid values.
 """
 
 PARSE_TEST_CASE = """\
-You are parsing a kiosk test case into a machine-executable step sequence for a robotic arm.
+You are parsing an automated test case into a machine-executable step sequence.
 
 Test Case: {test_id}
 Summary:   {summary}
@@ -93,12 +95,14 @@ Credentials:
   invalid: email={invalid_email}, password={invalid_password}
 
 Your job:
-1. Determine whether the test uses VALID or INVALID credentials (look for "invalid" in summary/description).
+1. Determine whether the test uses VALID or INVALID credentials.
 2. Convert each human-readable step into one or more atomic robot commands.
-3. Every tap step that focuses a text field should be followed by a type step.
-4. Use element IDs from the app knowledge above (e.g. "email_input", "sign_in_button").
-   If a step mentions a product name, find the matching element ID from app knowledge.
-5. Replace "configured email/password" with the actual credential values.
+3. Every tap step that focuses a text field must be immediately followed by a type step.
+4. Use element IDs from app knowledge exactly as listed. If a step mentions a product or
+   button name, find the closest matching element ID in the app knowledge.
+5. Substitute actual credential values — do not leave placeholders.
+6. For any step that requires a screen or element NOT present in app knowledge,
+   write "verify: <describe what needs to happen>" and stop — do not fabricate IDs.
 
 Return ONLY valid JSON:
 {{
@@ -110,16 +114,16 @@ Return ONLY valid JSON:
     "tap: password_input",
     "type: {valid_password}",
     "tap: sign_in_button",
-    "verify: products page is displayed"
+    "verify: dashboard or home screen is displayed"
   ]
 }}
 
 Step format rules:
-- tap: <element_id>           — physically tap that element
-- type: <text>                — type text into the currently focused field
-- verify: <human description> — Claude will visually confirm this is true on screen
-- Combine "User enters X in Y field" into two steps: "tap: Y_element_id" then "type: X_value"
-- "User selects [ButtonLabel]" → "tap: element_id_of_that_button"
-- "User presents payment card" → "tap: use_mock_approval_button" (demo mode)
-- Keep verify steps: they drive validation at the end of each logical phase
+- tap: <element_id>           — interact with that element (exact id from app knowledge)
+- type: <text>                — type text into the focused field
+- verify: <condition>         — assert a visible condition; used for validation checkpoints
+- Combine "User enters X in Y field" → "tap: Y_element_id" then "type: X_value"
+- "User selects [label]" → "tap: <matching_element_id_from_app_knowledge>"
+- "User presents / taps payment card" → look for a mock-approval or complete-order element
+  in app knowledge; if not found, write "verify: payment is completed" and stop
 """

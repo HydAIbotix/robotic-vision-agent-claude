@@ -1,6 +1,7 @@
 SUGGEST_EXPLORABLE_ACTIONS = """\
-You are systematically exploring a touch-screen application to build a complete navigation map.
-Your goal: identify every distinct UI path that can be triggered from this screen.
+You are systematically exploring a touch-screen application to build a COMPLETE navigation map.
+Your goal: find every distinct screen the user can reach.  Missing a screen is a critical failure —
+test automation cannot cover what was not discovered.  Err on the side of MORE actions, not fewer.
 
 Current screen: {screen_id}
 Description: {screen_description}
@@ -28,42 +29,52 @@ Return ONLY valid JSON:
   ]
 }}
 
-Rules:
-- CRITICAL: ONLY generate actions using the elements listed above on THIS screen.
-  Do NOT plan cross-screen flows. Each action must end after the FIRST navigation or form submit.
-- Each unconditional navigation button or link = one action with a single tap step
-- Each form submit = one compound action: fill all required fields THEN tap submit
-- For forms with auth: generate TWO actions — one with valid credentials, one with invalid
-- Use {{{{valid_email}}}}, {{{{valid_password}}}}, {{{{invalid_email}}}}, {{{{invalid_password}}}} as placeholders
-- Stepper controls (+/-/increment/decrement/up/down arrows): one action per direction, tap only
-- CONDITIONAL NAVIGATION (critical): Some navigation elements only trigger a screen transition
-  when the application has the correct state. Reason from the element labels and descriptions:
-    • A counter or badge showing zero or empty state: "Cart (0)", "0 items selected",
-      "Basket: empty", "0 guests", "Amount: $0.00", "Nothing in queue"
-    • A proceed/confirm action that logically needs prior input to be meaningful:
-      "Proceed to Payment", "Confirm Booking", "Submit Order", "Place Bid", "Continue"
-    • Any element whose own description implies a dependency on other elements on this screen
-  For each gated element: examine the OTHER elements on this screen and identify which ones
-  satisfy its precondition — quantity controls, add-item buttons, selection tiles, input
-  fields, checkboxes, toggles, radio buttons, date pickers, etc. Generate ONE multi-step
-  action that: (1) performs the prerequisite setup steps in logical order, (2) taps the
-  gated element as the final step. Do NOT generate a bare single-tap for a gated element —
-  it will not navigate and will record a misleading dead-end in the map. Always prioritise
-  gated-navigation actions; include them even if the per-screen limit is otherwise reached.
-- Skip static text, images, decorative dividers, background illustrations
-- SKIP display-only widgets: status panels, info tiles, or metric displays whose label is a
-  noun phrase with no action verb (e.g. read-only device status, health indicators,
-  identifier labels, live statistics). They do not navigate. Only include a widget when it
-  carries explicit action language ("Tap to configure", "Select", "Edit") or clearly leads
-  to a different screen.
-- SKIP globally-redundant actions: persistent navigation elements that always lead to the
-  same fixed screen (sign-out, home, back) need only be recorded once across the whole app.
-  Skip them on any screen where that destination is already in the navigation map.
-- action_key naming: Use short verb+noun task-outcome names. Do NOT embed any screen name
-  (current or any other) inside the action_key — this silently breaks deduplication logic.
-  Good: "open_cart", "submit_valid_login", "proceed_to_payment", "increment_item_qty".
-  Bad: "from_login_to_home", "checkout_from_products", "navigate_screen_a_to_b".
-- Maximum 15 actions per screen
+═══ MANDATORY: FLOW-COMPLETION BUTTONS ════════════════════════════════════════════
+Buttons that advance a multi-step user flow (checkout, payment, booking, order, purchase,
+confirm, submit, proceed, continue, complete, place order) MUST be included — even if you
+think they require prior state.  These are the most important screens in the app.
+
+If the button appears visually active (not greyed out) on this screen, it is reachable now.
+Generate ONE action to tap it directly.
+
+If the button appears disabled or you see a counter/badge at zero:
+  → Build a multi-step action: perform the prerequisite setup steps first (add item, fill
+    form, select option), THEN tap the proceed/checkout/pay button as the final step.
+
+NEVER omit a payment, checkout, proceed, confirm, or submit button.  The downstream test
+suite depends on these screens being in the navigation map.
+
+═══ CONDITIONAL NAVIGATION ════════════════════════════════════════════════════════
+Some buttons only navigate when the app is in the right state:
+    • Cart with 0 items: "Proceed to Payment" stays on the cart page
+    • Form with empty fields: "Submit" shows an error, not a new screen
+    • Booking with no date: "Confirm" is a no-op
+
+For each gated element, identify which OTHER elements on this screen satisfy its precondition
+(quantity controls, add-to-cart, selection tiles, date pickers, checkboxes, input fields)
+and generate ONE multi-step action:
+  (1) prerequisite steps in logical order
+  (2) tap the gated element as the FINAL step
+
+Do NOT generate a bare single-tap for a known gated element — it will stay on the current
+screen and record a misleading dead-end.  Always include gated-navigation actions even if
+the per-screen limit would otherwise be reached.
+
+═══ GENERAL RULES ════════════════════════════════════════════════════════════════
+- ONLY use elements listed above on THIS screen.  Do not plan cross-screen flows.
+- Each action ends after the FIRST navigation or form submit.
+- Each unconditional nav button/link = one action with a single tap step.
+- Each form submit = compound action: fill required fields THEN tap submit.
+- For auth forms: TWO actions — valid credentials + invalid credentials.
+- Use {{{{valid_email}}}}, {{{{valid_password}}}}, {{{{invalid_email}}}}, {{{{invalid_password}}}} as placeholders.
+- Stepper controls (+/-): one action per direction, tap only.
+- Skip purely decorative elements (static text, dividers, background images).
+- Skip read-only display widgets with no action verb (status panels, health indicators).
+- SKIP globally-redundant nav elements already recorded elsewhere (sign-out, home, back).
+- action_key: short verb+noun, no screen names embedded.
+  Good: "open_cart", "submit_valid_login", "proceed_to_payment", "increment_item_qty"
+  Bad:  "from_login_to_home", "checkout_from_products"
+- Maximum 15 actions per screen (flow-completion buttons are exempt from this limit).
 """
 
 MAP_KEYBOARD = """\

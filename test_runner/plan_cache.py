@@ -69,7 +69,9 @@ def is_valid(plan: dict, app_map: Optional[dict]) -> bool:
             continue
         sid = step.get("screen_id", "")
         eid = step.get("element_id", "")
-        if not sid or not eid:
+        if not eid:
+            return False   # empty element_id means the plan hallucinated an unexplored screen
+        if not sid:
             continue
         screen = screens.get(sid)
         if screen is None:
