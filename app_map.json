@@ -2765,22 +2765,7 @@
       "is_dynamic": true,
       "dom_id": "cart",
       "reference_screenshot": "screenshots\\walkthrough_cart_with_item_1782994407.png",
-      "dependencies": [
-        {
-          "element_id": "proceed_to_card_payment_button",
-          "requires": [
-            "increase_quantity_button"
-          ],
-          "reason": "Proceeding to payment needs a non-zero item quantity, established by the quantity stepper",
-          "prerequisite_steps": [
-            {
-              "action_type": "tap",
-              "element_id": "increase_quantity_button",
-              "value": null
-            }
-          ]
-        }
-      ]
+      "dependencies": []
     },
     "tap_card": {
       "screen_id": "tap_card",

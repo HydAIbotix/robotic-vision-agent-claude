@@ -86,6 +86,10 @@ Reason from element type/label/description: a "stepper" writes a count an "Add"/
 button reads; an input writes a value a "Submit" reads; a tile writes a selection.
 
 STRICT SCOPE — avoid misleading macro dependencies:
+  • A quantity stepper (+/−, "increase"/"decrease") is a prerequisite ONLY for that SAME item's
+    Add-to-Cart (the button that reads the quantity). NEVER list a stepper as a prerequisite for a
+    "proceed" / "checkout" / "pay" / "continue" button — those need only a NON-EMPTY cart (an
+    aggregate flow state), which is established earlier by the add-to-cart, not by a quantity change.
   • Only pair elements that operate on the SAME item/entity (a product's own +/− stepper → that
     SAME product's Add-to-Cart; a form's fields → that form's Submit). Match by shared name/label.
   • Do NOT record broad multi-step FLOW dependencies — e.g. a global "Cart / Checkout" or

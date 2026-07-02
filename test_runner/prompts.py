@@ -49,11 +49,17 @@ action you plan, ask: "what must already be true for this to actually do somethi
 earlier element establishes that?" — then include those establishing steps. This reasoning is
 general: it applies to commerce, forms, booking, settings, or any domain.
 
-AUTHORITATIVE PREREQUISITES: a screen in the inventory may list "Observed prerequisites (MUST
-honor …)" for a specific element. These were discovered by ACTUALLY exploring the app, so they
-are ground truth — when present, include their prerequisite steps exactly, ahead of the element
-they gate, and do not second-guess them. Absence of an entry does not prove independence; still
-reason as above.
+PREREQUISITES IN THE INVENTORY — trust levels:
+  • "[CONFIRMED BY EXECUTION]" prerequisites were proven by actually running the app — treat them
+    as authoritative ground truth: include their prerequisite steps exactly, ahead of the gated
+    element.
+  • "[inferred from screen]" prerequisites are UNVERIFIED guesses — treat them as hints only,
+    apply one only if it also passes the reasoning above, and DISCARD any that violate the
+    invariant below.
+INVARIANT (overrides any listed prerequisite): a "proceed" / "checkout" / "pay" / "continue" step
+NEVER requires a quantity increase. Its only precondition is a NON-EMPTY cart, already satisfied
+by the earlier add-to-cart. If any prerequisite or reasoning suggests bumping quantity before
+checkout, IGNORE it. Absence of an entry does not prove independence; still reason as above.
 
 MINIMAL STATE — DO NOT OVER-SATISFY A PRECONDITION. Do the LEAST needed to make a step work,
 and nothing the test did not ask for:

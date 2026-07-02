@@ -114,6 +114,38 @@ def element_inventory_for_prompt(app_map: Optional[AppMap]) -> str:
     return "\n".join(lines)
 
 
+_STEPPER_HINTS = ("increase", "increment", "decrease", "decrement", "quantity", "qty", "_plus", "_minus")
+
+
+def _looks_like_stepper(el_id: str, el_type: str) -> bool:
+    return el_type == "stepper" or any(h in (el_id or "").lower() for h in _STEPPER_HINTS)
+
+
+def _looks_like_add_to_cart(el_id: str) -> bool:
+    low = (el_id or "").lower()
+    return "add" in low and any(k in low for k in ("cart", "bag", "basket"))
+
+
+def sane_dependency(dep: dict, elements: list) -> bool:
+    """Sanity-check an inferred element dependency; reject logically-invalid ones.
+
+    Guards against a recurring LLM hallucination: pairing a QUANTITY STEPPER (+/−) with a
+    consumer that does not read a per-item quantity.  A stepper's only legitimate consumer is
+    that item's Add-to-Cart (which reads the quantity).  A "proceed / checkout / pay" button
+    only needs a NON-EMPTY cart — an aggregate flow state, satisfied by the add-to-cart, NOT a
+    same-screen quantity increment.  So "proceed_to_payment requires increase_quantity" is
+    invalid and would (wrongly) make the planner bump the quantity before checkout.
+
+    This is a generic data-quality invariant, not app-specific logic.
+    """
+    types = {e.get("id"): e.get("type", "") for e in (elements or [])}
+    consumer = dep.get("element_id", "")
+    for r in dep.get("requires") or []:
+        if _looks_like_stepper(r, types.get(r, "")) and not _looks_like_add_to_cart(consumer):
+            return False
+    return True
+
+
 def get_element(app_map: Optional[AppMap], screen_id: str, element_id: str) -> Optional[dict]:
     """Return an element dict from the map, or None if not found."""
     if not app_map:

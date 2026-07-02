@@ -471,7 +471,16 @@ def explore_screen(state: ExplorerState) -> dict:
     # These record which action elements (add / submit / confirm / proceed) consume state
     # set by other elements on this screen, plus the recipe to satisfy the precondition.
     # The test planner reads these instead of re-inferring prerequisites every run.
-    deps = [d for d in (data.get("element_dependencies") or []) if d.get("element_id") and d.get("requires")]
+    from app_map.store import sane_dependency as _sane_dep
+    deps = [
+        d for d in (data.get("element_dependencies") or [])
+        if d.get("element_id") and d.get("requires") and _sane_dep(d, elements)
+    ]
+    _rejected = [d.get("element_id") for d in (data.get("element_dependencies") or [])
+                 if d.get("element_id") and d.get("requires") and not _sane_dep(d, elements)]
+    if _rejected:
+        print(f"  [EXPLORE] '{screen_id}': dropped {len(_rejected)} invalid dependency(ies) "
+              f"(quantity stepper gating a non-add control): {_rejected}")
     if deps:
         app_map["screens"][screen_id] = {
             **app_map["screens"].get(screen_id, {}),
