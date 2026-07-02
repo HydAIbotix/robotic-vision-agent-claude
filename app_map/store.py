@@ -95,6 +95,21 @@ def element_inventory_for_prompt(app_map: Optional[AppMap]) -> str:
             lines.append("  Navigation transitions:")
             for ak, nxt in transitions.items():
                 lines.append(f"    {ak}  →  {nxt}")
+        # Observed element dependencies (ground truth captured during exploration):
+        # which action elements require prior state, and the recipe to satisfy it.
+        deps = sc.get("dependencies") or []
+        if deps:
+            lines.append("  Observed prerequisites (MUST honor — discovered during exploration):")
+            for d in deps:
+                req = ", ".join(d.get("requires") or [])
+                tag = " [CONFIRMED BY EXECUTION]" if d.get("observed") else " [inferred from screen]"
+                lines.append(f"    '{d.get('element_id','')}' requires [{req}]{tag} — {d.get('reason','')}")
+                pre = d.get("prerequisite_steps") or []
+                if pre:
+                    recipe = " → ".join(
+                        f"{s.get('action_type','tap')}:{s.get('element_id','')}" for s in pre
+                    )
+                    lines.append(f"        prerequisite steps: {recipe} → (then tap '{d.get('element_id','')}')")
         lines.append("")
     return "\n".join(lines)
 

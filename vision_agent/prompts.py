@@ -81,9 +81,28 @@ STRICT RULES:
    "verify: <describe what you need to see next>" — and stop. Do not add more steps after that.
 3. Match element IDs exactly as listed — copy them character-for-character.
 4. One action per array item. Return ONLY a JSON array of strings.
+5. PRECONDITION REASONING (critical — you are often here because a previous step failed):
+   Before tapping a "proceed", "checkout", "continue", "pay", "confirm", or "submit" button,
+   check that its precondition is met on THIS screen. These buttons do nothing when the required
+   state is missing, and tapping them again will fail exactly as before.
+   - Cart/checkout with an empty cart or a "(0)" badge → first add an item. If a quantity
+     stepper "+"/increment element exists, tap it to raise the quantity to at least 1, THEN
+     tap add-to-cart, THEN proceed to checkout.
+   - Submit/confirm with empty required fields → fill the fields first.
+   Plan the prerequisite steps first, then the gated action. Do not repeat a step that just
+   failed without first changing the state that made it fail.
+6. CREDENTIALS (login / sign-in):
+   - Use ONLY the exact email and password given in the Task above. They come from the test
+     configuration. NEVER invent, guess, or reuse a placeholder/example email or password.
+   - If a login screen is shown but the Task gives no credentials, do NOT attempt to log in —
+     emit "verify: cannot log in — no credentials provided in task" and stop.
+   - You normally should NOT be on a login screen mid-test. If you unexpectedly are, the earlier
+     session may still be valid; prefer continuing the task over re-authenticating.
 
-Example:
-["tap: email_input", "type: user@example.com", "tap: sign_in_button", "verify: dashboard is shown"]
+Example (note: "type:" values are illustrative — substitute real values from the Task):
+["tap: search_input", "type: wireless headphones", "tap: search_button", "verify: results are shown"]
+Example (empty-cart recovery — add item before checkout):
+["tap: nexora_phone_increment_button", "tap: nexora_phone_add_to_cart_button", "tap: cart_checkout_button", "verify: cart screen shows one item"]
 """
 
 VALIDATE_STEP = """\

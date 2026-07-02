@@ -19,7 +19,7 @@ Three-tier strategy (tried in order, stops at first success):
 """
 import json
 from langchain_core.messages import HumanMessage
-from vision_agent.llm import get_llm
+from vision_agent.llm import get_llm, invoke_json
 from app_map import store as app_map_store
 from test_runner import plan_cache
 from test_runner.state import TestRunnerState
@@ -46,26 +46,29 @@ def _tier2_plan(tc: dict, app_map: dict, credentials: dict) -> dict | None:
     prompt = PLAN_FROM_MAP.format(
         test_id=tc["test_id"],
         summary=tc["summary"],
+        description=tc.get("description", "") or "(none provided)",
+        preconditions=tc.get("preconditions", "") or "(none provided — derive every step's prerequisites yourself from the app_map and observed prerequisites)",
         steps_raw=tc["steps_raw"],
         expected_results_raw=tc["expected_results_raw"],
         element_inventory=inventory,
-        valid_email=valid.get("email",       "tester@kiosk.local"),
-        valid_password=valid.get("password", "Password123"),
-        invalid_email=invalid.get("email",       "baduser@example.com"),
-        invalid_password=invalid.get("password", "WrongPass!"),
+        valid_email=valid.get("email",       ""),
+        valid_password=valid.get("password", ""),
+        invalid_email=invalid.get("email",       ""),
+        invalid_password=invalid.get("password", ""),
     )
 
-    llm = get_llm()
-    raw = llm.invoke([HumanMessage(content=prompt)]).content.strip()
-    if "```" in raw:
-        raw = raw.split("```")[1].lstrip("json").strip()
-    try:
-        plan = json.loads(raw)
-    except json.JSONDecodeError as e:
-        print(f"  [PARSE] Tier-2 JSON parse error: {e}")
+    plan = invoke_json(get_llm(), [HumanMessage(content=prompt)], default=None, label="plan_from_map")
+    if not plan or not isinstance(plan, dict):
         return None
 
-    # Resolve credential placeholders in type steps
+    # Surface the planner's precondition reasoning (why steps were expanded the way they were).
+    reasoning = (plan.get("reasoning") or "").strip()
+    if reasoning:
+        print("  [PARSE] Planner reasoning:")
+        for line in reasoning.splitlines():
+            print(f"         {line}")
+
+    # Resolve any credential placeholders that slipped through into type steps.
     scenario = plan.get("credential_scenario", "valid")
     for step in plan.get("steps") or []:
         if step.get("action") == "type" and step.get("value"):
@@ -85,10 +88,10 @@ def _tier3_plan(tc: dict, app_map: dict | None, credentials: dict) -> tuple[list
         steps_raw=tc["steps_raw"],
         expected_results_raw=tc["expected_results_raw"],
         app_map_summary=app_map_store.prompt_summary(app_map),
-        valid_email=valid.get("email",       "tester@kiosk.local"),
-        valid_password=valid.get("password", "Password123"),
-        invalid_email=invalid.get("email",       "baduser@example.com"),
-        invalid_password=invalid.get("password", "WrongPass!"),
+        valid_email=valid.get("email",       ""),
+        valid_password=valid.get("password", ""),
+        invalid_email=invalid.get("email",       ""),
+        invalid_password=invalid.get("password", ""),
     )
 
     llm = get_llm()

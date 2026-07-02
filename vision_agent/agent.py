@@ -31,10 +31,17 @@ def _route_after_validation(state: VisionAgentState) -> str:
     idx = state.get("current_step_idx", 0)
     steps = state.get("planned_steps") or []
 
+    # Absolute safety cap on total executed steps (across all re-plans).  A hard stop
+    # against runaway loops regardless of retry accounting.
+    if len(state.get("step_results") or []) >= 30:
+        print("  [GUARD] Reached 30 total steps — finalizing to prevent an execution loop")
+        return "finalize"
+
     if not last.get("success"):
+        # retry_count is a GLOBAL re-plan budget (see _advance_step) — bounded, never reset.
         if (state.get("retry_count") or 0) < settings.max_retries:
             return "handle_retry"
-        return "finalize"  # exhausted retries
+        return "finalize"  # exhausted re-plan budget
 
     if idx + 1 < len(steps):
         return "advance_step"
@@ -42,11 +49,14 @@ def _route_after_validation(state: VisionAgentState) -> str:
 
 
 def _advance_step(state: VisionAgentState) -> dict:
-    """Move to the next planned step and reset the per-step retry counter."""
-    return {
-        "current_step_idx": (state.get("current_step_idx") or 0) + 1,
-        "retry_count": 0,
-    }
+    """Move to the next planned step.
+
+    retry_count is deliberately NOT reset here.  handle_retry re-plans on every failure
+    (it clears planned_steps), so retry_count serves as a GLOBAL re-plan budget.  Resetting
+    it on advance would let a re-plan whose early steps happen to succeed (e.g. re-typing a
+    login) reset the budget and loop forever — the "continuous login" bug.
+    """
+    return {"current_step_idx": (state.get("current_step_idx") or 0) + 1}
 
 
 def _route_after_advance(state: VisionAgentState) -> str:

@@ -17,9 +17,16 @@ from typing import Optional
 
 _CACHE_DIR = Path(__file__).parent.parent / "test_plans"
 
+# Bump this whenever the planner model or PLAN_FROM_MAP prompt changes materially.
+# It is part of the cache key, so bumping it invalidates every previously-cached plan
+# and forces a fresh Tier-2 re-plan.  "v6" retires plans generated before the walkthrough wrote
+# back execution-CONFIRMED dependencies (observed=True) — data not reflected in the app_map
+# version hash, so a version bump is needed to pick it up.
+_PLANNER_VERSION = "v8-item-selection"
+
 
 def _key(test_id: str, steps_raw: str, app_map_version: str) -> str:
-    raw = f"{test_id}|{steps_raw.strip()}|{app_map_version}"
+    raw = f"{_PLANNER_VERSION}|{test_id}|{steps_raw.strip()}|{app_map_version}"
     return hashlib.md5(raw.encode()).hexdigest()[:10]
 
 

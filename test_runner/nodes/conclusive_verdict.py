@@ -194,11 +194,15 @@ def conclusive_verdict(state: TestRunnerState) -> dict:
                 "suggested_action": "file defect",
             }
 
-    # Upgrade outcome when Claude determines intent was achieved despite a step failure
+    # The conclusive verdict is authoritative — reconcile the reported outcome with it in BOTH
+    # directions so the suite's pass/fail count can never contradict the verdict.
     final_verdict = cv.get("verdict", "FAIL")
-    if final_verdict == "PASS" and last.get("outcome") == "failed":
+    if final_verdict == "PASS" and last.get("outcome") != "passed":
         print(f"  [VERDICT] Upgrading outcome: step-level FAIL → conclusive PASS (intent achieved)")
         last = {**last, "outcome": "passed"}
+    elif final_verdict == "FAIL" and last.get("outcome") != "failed":
+        print(f"  [VERDICT] Downgrading outcome: step-level PASS → conclusive FAIL (objective not met)")
+        last = {**last, "outcome": "failed"}
     elif final_verdict == "AMBIGUOUS":
         print(f"  [VERDICT] AMBIGUOUS — broadcasting human_review_required")
         if run_id:

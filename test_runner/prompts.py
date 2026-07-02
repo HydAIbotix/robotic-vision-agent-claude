@@ -1,78 +1,134 @@
 PLAN_FROM_MAP = """\
-You are planning the execution of an automated test case.
-The application under test has been explored — you have the complete screen and element
-inventory below, including exact pixel coordinates for every interactive element.
-You do NOT need a screenshot: the inventory IS the visual description of the app.
+You are an expert QA automation planner. You convert a raw, human-written test case into a
+precise, executable UI action sequence. The app under test has been FULLY explored: below is
+every screen, every interactive element (with its type, label, description, and exact pixel
+coordinates), and the navigation transitions between screens. Treat this inventory as complete,
+authoritative ground truth — you do NOT need a screenshot.
 
-Test Case: {test_id}
-Summary:   {summary}
+Test Case:   {test_id}
+Summary:     {summary}
+Description: {description}
+
+Preconditions (natural-language, high-level — may be vague or assume context):
+{preconditions}
 
 Raw test steps:
 {steps_raw}
 
-Raw expected results:
+Expected results (natural-language — what the test must ultimately confirm):
 {expected_results_raw}
 
-Credentials:
+Credentials (use only if the test involves signing in):
   valid:   email={valid_email}, password={valid_password}
   invalid: email={invalid_email}, password={invalid_password}
 
-App element inventory (ALL screens, elements, and pixel coordinates):
+App inventory — screens, each element [type · label · coords · description], and transitions:
 {element_inventory}
 
-═══ UNKNOWN SCREENS / ELEMENTS — READ THIS FIRST ════════════════════
-Check the inventory BEFORE planning any step.
+━━━ HOW TO THINK — THIS IS THE ENTIRE JOB ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+A raw test step is HUMAN SHORTHAND, not an executable instruction. One raw step frequently
+expands into several UI actions. Your value is expanding each raw step into the exact sequence
+a real user would perform, using ONLY elements present in the inventory.
 
-If a step requires a screen or element that is NOT in the inventory:
-  ✗  Do NOT invent an element_id.
-  ✗  Do NOT output px:0, py:0 with a guessed element_id.
-  ✗  Do NOT output an empty element_id ("").
-  ✓  Output this sentinel and STOP — do not add any more steps after it:
-       {{"action": "vision_required", "description": "<what the test still needs to do from here>"}}
+The decisive skill is PRECONDITION REASONING. Most controls only do something after some state
+has been established by OTHER elements — usually on the same screen. Reason from each element's
+TYPE, LABEL and DESCRIPTION about what state it reads or writes:
+  • A stepper / counter (e.g. type "stepper", label "+" / "−") WRITES a quantity that a later
+    "add" / "confirm" / "book" button READS. If such a counter exists for the item being acted
+    on, its value may start at zero, making the consuming button a silent no-op — so operate the
+    stepper first to set a valid value, THEN tap the consuming button.
+  • Text inputs WRITE values that a "submit" / "search" / "sign in" button READS — fill them first.
+  • Selection tiles, radios, toggles, date/time pickers WRITE a choice a later action depends on —
+    make the selection first.
+  • A "proceed" / "checkout" / "continue" / "pay" button typically depends on state built earlier
+    (possibly on a previous screen, e.g. a non-empty cart). Ensure earlier steps created it.
+  • The transitions tell you real behaviour: if an element's transition loops back to the SAME
+    screen, tapping it did NOT navigate — it only changed state, so something else advances the flow.
+Never assume a control works in isolation just because it exists in the inventory. For EVERY
+action you plan, ask: "what must already be true for this to actually do something, and which
+earlier element establishes that?" — then include those establishing steps. This reasoning is
+general: it applies to commerce, forms, booking, settings, or any domain.
 
-The runtime switches to live Claude Vision for everything after the sentinel.
-A tap step with element_id "" or px:0/py:0 is WRONG — use vision_required instead.
+AUTHORITATIVE PREREQUISITES: a screen in the inventory may list "Observed prerequisites (MUST
+honor …)" for a specific element. These were discovered by ACTUALLY exploring the app, so they
+are ground truth — when present, include their prerequisite steps exactly, ahead of the element
+they gate, and do not second-guess them. Absence of an entry does not prove independence; still
+reason as above.
 
-═══ PREREQUISITE ANALYSIS ═══════════════════════════════════════════
-Raw test steps are high-level summaries that skip implicit prerequisites.
-Ask: "Would this step succeed if a robot ran it right now?"
+MINIMAL STATE — DO NOT OVER-SATISFY A PRECONDITION. Do the LEAST needed to make a step work,
+and nothing the test did not ask for:
+  • A quantity stepper only needs to reach the MINIMUM that enables the goal (usually 1, so the
+    item can be added). Do NOT tap "+" more than once, and do NOT add further quantity changes on
+    later screens (e.g. the cart) unless the test EXPLICITLY specifies a quantity. Extra taps
+    change totals and can trip value-based prompts/limits.
+  • "proceed" / "checkout" / "pay" needs the cart to CONTAIN an item — that is satisfied by the
+    earlier add-to-cart, NOT by incrementing quantity again. Never insert an increment before a
+    proceed/checkout/pay step.
+  • Only fill/select what the step requires; don't toggle unrelated controls.
 
-1. If a step navigates to a screen requiring prior state (items in cart before checkout,
-   form filled before submit), INSERT missing prerequisite steps from the inventory.
-2. Disabled elements must be preceded by steps that satisfy their precondition.
-3. Form submissions: all required fields must be filled before tapping submit.
-4. Produce the COMPLETE executable sequence — do not blindly translate word-for-word.
+CHOOSING AN ITEM WHEN THE TEST DOESN'T NAME ONE. If the test just needs "an item in the cart"
+(no specific product named), pick a product you can ACTUALLY add successfully:
+  • It MUST have its own quantity increment/stepper element in the inventory. Adding a product
+    whose quantity starts at 0 and has NO increment control is a no-op (the cart stays empty and
+    checkout fails). If a product only exposes an Add-to-Cart with no matching increment, DO NOT
+    choose it — pick a product that has both.
+  • PREFER a product whose Add-to-Cart carries an "Observed prerequisite" (a walkthrough-validated
+    recipe) — that path is proven to work end to end.
+  • Ignore any dependency that says a global Cart/Checkout button "requires" one specific product's
+    Add-to-Cart — checkout only needs SOME item; choose the item by the rules above.
 
-═══ YOUR TASKS ══════════════════════════════════════════════════════
-1. Determine credential_scenario: "valid" or "invalid".
-2. For EVERY step: verify the screen_id AND element_id exist verbatim in the inventory.
-   If either is missing → emit vision_required and stop.
-3. Apply prerequisite analysis to produce the COMPLETE executable sequence.
-4. For tap steps: copy screen_id, element_id, px, py EXACTLY from the inventory.
-5. For type steps: substitute actual credential values.
-6. For verify steps: include expected_screen (the screen_id from the inventory).
+━━━ USING PRECONDITIONS & EXPECTED RESULTS (optional reference, never required) ━━━
+Preconditions and Expected Results are OPTIONAL high-level human notes. They are frequently
+BLANK, terse, or vague ("user is logged in", "cart has an item"). They are a convenience hint
+ONLY — your plan must be correct with or without them.
 
-Return ONLY valid JSON — no markdown fences:
+  • CRITICAL: A missing or empty Preconditions field does NOT mean "no setup is needed." Whether
+    or not preconditions are written, you MUST independently guarantee that every step can actually
+    succeed — deriving each step's real prerequisites yourself from the raw steps, the app_map, the
+    transitions, and the observed prerequisites (per HOW TO THINK above). Never skip a required setup
+    step just because the test case did not spell it out. Preconditions being present only saves you
+    from inferring intent; it never replaces this analysis.
+  • When preconditions ARE given, treat them as reference: translate each into concrete setup steps
+    (e.g. "logged in" → the login sequence; "cart has an item" → the add-item recipe, honoring
+    observed prerequisites) and place them at the START — unless a raw step already establishes it.
+  • Expected Results (when given) describe what success looks like: translate them into concrete
+    verify steps (expected_screen, plus expected_text when a specific value is named) at the right
+    points. If Expected Results are blank, still add sensible verify checkpoints inferred from the
+    steps and the destination screens.
+
+In all cases the ACTUAL low-level preconditions and checks come from the app_map, its transitions,
+and the observed prerequisites — the natural-language notes only point you in the right direction.
+
+━━━ UNKNOWN SCREENS / ELEMENTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+If a step needs a screen or element NOT in the inventory, do NOT invent or guess ids/coords and
+do NOT emit an empty element_id. Emit {{"action":"vision_required","description":"<remaining goal>"}}
+and STOP adding steps — the runtime finishes with live vision.
+
+━━━ OUTPUT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Return ONLY valid JSON (no markdown fences) with these keys IN THIS ORDER:
 {{
-  "credential_scenario": "valid",
+  "credential_scenario": "valid" | "invalid",
+  "reasoning": "MANDATORY. Written BEFORE steps. For each raw test step: state its intent, the
+     precondition(s) it needs, which inventory element(s) establish them, and the resulting
+     expansion into concrete actions. Then a FINAL SELF-CHECK: walk your step list top to bottom,
+     and for every tap on a state-consuming control (add/submit/confirm/proceed/pay/search)
+     confirm an EARLIER step set the state it consumes; if any is missing, add it before finalizing.",
   "steps": [
-    {{"action": "verify", "expected_screen": "login",    "description": "login screen is visible"}},
-    {{"action": "tap",    "screen_id": "login", "element_id": "email_input",    "px": 700, "py": 412}},
-    {{"action": "type",   "value": "{valid_email}"}},
-    {{"action": "tap",    "screen_id": "login", "element_id": "password_input", "px": 700, "py": 498}},
-    {{"action": "type",   "value": "{valid_password}"}},
-    {{"action": "tap",    "screen_id": "login", "element_id": "sign_in_button", "px": 700, "py": 560}},
-    {{"action": "verify", "expected_screen": "products", "description": "products page is displayed"}},
-    {{"action": "vision_required", "description": "complete payment and verify order success"}}
+    {{"action":"verify","expected_screen":"<screen_id>","description":"..."}},
+    {{"action":"tap","screen_id":"<screen_id>","element_id":"<id from inventory>","px":<int>,"py":<int>}},
+    {{"action":"type","value":"<text to type; use the credential values above when signing in>"}},
+    {{"action":"vision_required","description":"..."}}
   ]
 }}
 
-Additional rules:
-- ONLY use element_id and screen_id values that appear verbatim in the inventory.
-- Every verify step MUST have expected_screen (the screen_id where verification occurs).
-- Add expected_text only when the test explicitly checks a specific value (order total,
-  error message text, transaction ID, etc.).
-- For invalid-credential tests: credential_scenario="invalid", use the invalid values.
+Hard rules:
+- tap steps: copy screen_id, element_id, px, py EXACTLY from the inventory (verbatim ids only).
+- verify steps: MUST include expected_screen (a screen_id from the inventory). Add expected_text
+  only when the test explicitly checks a specific value (order total, error text, transaction id).
+- type steps: substitute the ACTUAL value; never leave a placeholder token.
+- invalid-credential tests: credential_scenario="invalid" and use the invalid values.
+- The "reasoning" field is required and must justify every non-obvious step; a plan whose steps
+  contradict or skip something in "reasoning" is wrong — fix the steps, not the reasoning.
 """
 
 PARSE_TEST_CASE = """\

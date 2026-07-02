@@ -26,6 +26,16 @@ Return ONLY valid JSON:
       ],
       "credential_scenario": "valid"
     }}
+  ],
+  "element_dependencies": [
+    {{
+      "element_id": "<an action element whose effect needs prior state>",
+      "requires": ["<element_id on this screen that establishes that state>"],
+      "reason": "<one line: what state it consumes and why the prerequisite is needed>",
+      "prerequisite_steps": [
+        {{"action_type": "tap", "element_id": "<the state-setter>", "value": null}}
+      ]
+    }}
   ]
 }}
 
@@ -59,6 +69,33 @@ and generate ONE multi-step action:
 Do NOT generate a bare single-tap for a known gated element — it will stay on the current
 screen and record a misleading dead-end.  Always include gated-navigation actions even if
 the per-screen limit would otherwise be reached.
+
+═══ ELEMENT STATE DEPENDENCIES (capture as ground truth) ══════════════════════════
+Separately from navigation, record which elements CANNOT work in isolation because their
+effect depends on state produced by OTHER elements on THIS screen.  This becomes stored
+ground truth the test planner relies on, so it never has to re-infer preconditions.
+
+For each ACTION element (add / add-to-cart / submit / confirm / apply / book) whose effect
+CONSUMES state set by a control acting on the SAME item/entity on this screen, add an entry to
+"element_dependencies":
+  • requires: the element_id(s) that establish the needed state — a quantity stepper ("+"),
+    a text input, a selection tile, a checkbox / toggle, a date picker, etc.
+  • prerequisite_steps: the minimal ordered steps to satisfy it BEFORE the consuming element
+    is tapped (e.g. tap the "+" stepper once so quantity goes 0 → 1, then the add button works).
+Reason from element type/label/description: a "stepper" writes a count an "Add"/"Confirm"
+button reads; an input writes a value a "Submit" reads; a tile writes a selection.
+
+STRICT SCOPE — avoid misleading macro dependencies:
+  • Only pair elements that operate on the SAME item/entity (a product's own +/− stepper → that
+    SAME product's Add-to-Cart; a form's fields → that form's Submit). Match by shared name/label.
+  • Do NOT record broad multi-step FLOW dependencies — e.g. a global "Cart / Checkout" or
+    "Proceed" button "requiring" some specific product's Add-to-Cart. Those span a whole sub-flow
+    and are the PLANNER's job, not a ground-truth element dependency. Recording them misleads the
+    planner into a specific, possibly-incomplete path.
+  • If the required control itself has an unmet prerequisite (e.g. the add-to-cart you'd point to
+    needs its own increment), the pairing is too coarse — skip it.
+Only record a dependency when the effect genuinely needs prior state.  Plain navigation links
+and self-contained buttons have NO dependency — omit them.  Return [] if none apply.
 
 ═══ GENERAL RULES ════════════════════════════════════════════════════════════════
 - ONLY use elements listed above on THIS screen.  Do not plan cross-screen flows.

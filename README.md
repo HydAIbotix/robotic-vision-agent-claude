@@ -101,11 +101,12 @@ Switching to AWS requires only these two env-var changes — no code changes.
 # Vision
 VISION_BACKEND=anthropic          # or: bedrock
 ANTHROPIC_API_KEY=sk-ant-...
-ANTHROPIC_MODEL=claude-sonnet-4-6
+ANTHROPIC_MODEL=claude-opus-4-8            # analysis, planning, Tier-3
+ANTHROPIC_EXPLORER_MODEL=claude-opus-4-8   # app-exploration reasoning
 
 # AWS Bedrock (only needed when VISION_BACKEND=bedrock)
 BEDROCK_REGION=us-east-1
-BEDROCK_MODEL_ID=anthropic.claude-sonnet-4-5-20251001-v2:0
+BEDROCK_MODEL_ID=anthropic.claude-opus-4-8
 
 # Storage
 STORAGE_BACKEND=local             # or: s3

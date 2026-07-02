@@ -318,6 +318,18 @@ def _run_tier3(state: TestRunnerState, tc: dict) -> dict:
     app_map             = state.get("app_map")
     start_screen        = (app_map or {}).get("entry_screen", "login")
 
+    # Credentials strictly from test configuration (never hard-coded) — appended so a
+    # re-plan during recovery uses the real values instead of inventing an email.
+    _creds = state.get("credentials") or {}
+    _sc    = _creds.get(credential_scenario) or _creds.get("valid") or {}
+    if _sc.get("email") or _sc.get("password"):
+        _cred_hint = (
+            f"\n\nCredentials (from test configuration) — use these EXACT values for any "
+            f"login; never invent or guess:\n  email: {_sc.get('email','')}\n  password: {_sc.get('password','')}"
+        )
+    else:
+        _cred_hint = "\n\nNo login credentials are configured — do NOT attempt to log in."
+
     if settings.robot_backend == "playwright":
         robot.reset_to_entry()
         save_path  = str(Path(settings.screenshots_dir) / f"start_{tc['test_id']}_{int(time.time())}.png")
@@ -331,7 +343,7 @@ def _run_tier3(state: TestRunnerState, tc: dict) -> dict:
 
     agent = create_agent()
     initial: VisionAgentState = {
-        "task_description":  tc["summary"],
+        "task_description":  tc["summary"] + _cred_hint,
         "image_path":        start_image,
         "screen_analysis":   None,
         "planned_steps":     planned_steps,
@@ -358,12 +370,13 @@ def _run_tier3_continue(
     """
     Resume execution from wherever the browser is NOW using Claude vision.
 
-    Called when Tier 1/2 stalls mid-test because a screen is not in the app_map
-    (detected by a 0,0 tap).  Does NOT call reset_to_entry — takes a fresh
-    screenshot of the current screen and runs only the remaining steps.
+    Called for ANY Tier 1/2 failure (coverage gap, vision sentinel, or a failed
+    verify/tap).  Deliberately does NOT call reset_to_entry — resetting would drop the
+    browser back on the login screen and throw away the authenticated session.  Instead
+    it takes a fresh screenshot of the CURRENT screen and continues toward the objective.
 
-    The agent receives full context: what steps already passed, what remains,
-    and an explicit instruction not to navigate back to login.
+    The agent receives: the objective, what already ran, an instruction not to navigate
+    back to login, and the configured credentials (used only if a login is unavoidable).
 
     Returns a result dict with step_results = completed_steps + Tier-3 steps,
     so the final audit trail covers the entire test.
@@ -374,6 +387,23 @@ def _run_tier3_continue(
     structured_plan   = state.get("structured_plan") or {}
     plan_steps_all    = structured_plan.get("steps") or []
     n_remaining       = max(0, len(plan_steps_all) - start_step_idx)
+
+    # Credentials come from the test configuration (intake payload / global config) via
+    # state — never hard-coded here.  They are handed to the agent so that IF a login is
+    # genuinely unavoidable it uses the real configured values instead of inventing one.
+    _creds    = state.get("credentials") or {}
+    _scenario = state.get("credential_scenario", "valid")
+    _sc       = _creds.get(_scenario) or _creds.get("valid") or {}
+    _c_email  = _sc.get("email", "")
+    _c_pw     = _sc.get("password", "")
+    if _c_email or _c_pw:
+        cred_hint = (
+            f"\n\nCredentials (from test configuration) — use these EXACT values, and only "
+            f"if a login screen is unavoidable; never invent, guess, or use an example:\n"
+            f"  email: {_c_email}\n  password: {_c_pw}"
+        )
+    else:
+        cred_hint = "\n\nNo login credentials are configured — do NOT attempt to log in."
 
     # Capture current screen — no reset
     save_path = str(
@@ -402,33 +432,83 @@ def _run_tier3_continue(
         f"IMPORTANT: identify buttons and elements from what you ACTUALLY SEE on "
         f"screen — do not assume button labels that might not exist. "
         f"Do NOT navigate back to login. Do NOT restart from the beginning. "
-        f"Continue from the current screen."
+        f"Continue from the current screen.\n\n"
+        f"CHECK PRECONDITIONS before acting: a previous step may have failed because a "
+        f"precondition was not met. If you intend to proceed to checkout/payment but the "
+        f"cart shows 0 items, you must FIRST add an item — if the product has a quantity "
+        f"'+'/increment control, tap it to set quantity to at least 1, then tap Add to Cart, "
+        f"and only then proceed. If a form's required fields are empty, fill them first. "
+        f"Never re-tap a button that just failed without first changing the state that "
+        f"caused it to fail."
     )
+    task_description += cred_hint
 
-    # Pass planned_steps=[] so the plan_steps node runs and generates fresh steps
-    # from the REAL screenshot.  Pre-populating from the structured plan would
-    # inject hallucinated element names (wrong format + wrong labels) that cause
-    # "Unknown action type" failures in execute.py.
+    # ── Objective screen: the last verify target in the plan (e.g. "order_result") ──
+    # Used to know when the multi-screen flow is actually complete.
+    goal_screen = ""
+    for st in reversed(plan_steps_all):
+        if st.get("action") == "verify" and st.get("expected_screen"):
+            goal_screen = st["expected_screen"]
+            break
+
+    def _dom() -> str:
+        try:
+            return robot.get_dom_screen_id() or ""
+        except Exception:
+            return ""
+
+    # ── Advance across screens until the objective is reached ──────────────────
+    # One VisionAgent invocation plans+executes a single screen-cluster (it stops when it
+    # needs an element it cannot yet see).  A purchase spans several screens
+    # (cart → payment → tap-card → result), so we loop: run the agent, and if it made
+    # progress (the DOM screen changed) but the objective screen is not yet reached, run it
+    # again from the new screen.  Bounded so a stuck flow cannot loop forever.
+    #
+    # Pass planned_steps=[] each time so plan_steps generates fresh, correctly-formatted
+    # steps from the REAL screen (pre-populating from the structured plan would inject
+    # hallucinated element names).
     agent = create_agent()
-    initial: VisionAgentState = {
-        "task_description": task_description,
-        "image_path":       current_image,
-        "screen_analysis":  None,
-        "planned_steps":    [],     # empty → plan_steps generates from real screenshot
-        "current_step_idx": 0,
-        "step_results":     [],
-        "retry_count":      0,
-        "screen_history":   [],
-        "decision_tree":    {},
-        "outcome":          "running",
-        "summary":          "",
-        "error_message":    None,
-    }
-    t3_result = agent.invoke(initial)
+    all_t3_steps: list[dict] = []
+    t3_result: dict = {}
+    MAX_ITERS = 5
+    for _it in range(MAX_ITERS):
+        before_dom = _dom()
+        if goal_screen and before_dom == goal_screen:
+            print(f"  [TIER-3] Objective screen '{goal_screen}' reached — flow complete")
+            break
 
-    # Merge Tier 1/2 completed steps with Tier 3 steps for a full audit trail
-    t3_steps  = t3_result.get("step_results") or []
-    all_steps = list(completed_steps) + t3_steps
+        cap = str(Path(settings.screenshots_dir) / f"tier3_resume_{tc['test_id']}_{_it}_{int(time.time())}.png")
+        screen_img = robot.capture_screen(cap)["image_path"]
+        print(f"  [TIER-3] step-through {_it + 1}/{MAX_ITERS} — on '{before_dom or '?'}', planning from current screen")
+
+        initial: VisionAgentState = {
+            "task_description": task_description,
+            "image_path":       screen_img,
+            "screen_analysis":  None,
+            "planned_steps":    [],
+            "current_step_idx": 0,
+            "step_results":     [],
+            "retry_count":      0,
+            "screen_history":   [],
+            "decision_tree":    {},
+            "outcome":          "running",
+            "summary":          "",
+            "error_message":    None,
+        }
+        t3_result = agent.invoke(initial)
+        all_t3_steps.extend(t3_result.get("step_results") or [])
+
+        after_dom = _dom()
+        if goal_screen and after_dom == goal_screen:
+            print(f"  [TIER-3] step-through {_it + 1}: reached objective '{goal_screen}'")
+            break
+        if after_dom == before_dom:
+            print(f"  [TIER-3] step-through {_it + 1}: no screen change (still '{after_dom or '?'}') — stopping")
+            break
+        print(f"  [TIER-3] step-through {_it + 1}: advanced '{before_dom or '?'}' -> '{after_dom or '?'}' — continuing")
+
+    # Merge Tier 1/2 completed steps with all Tier-3 steps for a full audit trail
+    all_steps = list(completed_steps) + all_t3_steps
     return {**t3_result, "step_results": all_steps}
 
 
@@ -476,29 +556,26 @@ def run_vision_step(state: TestRunnerState) -> dict:
         )
         passed = sum(1 for r in step_results if r["success"])
 
-        # On failure: route to the right Tier-3 mode based on failure reason.
+        # On failure: hand off to Tier-3, ALWAYS resuming from the current screen.
         if outcome in ("failed", "vision_required"):
             last_sr = step_results[-1] if step_results else {}
 
+            # Never reset to the entry/login screen mid-test.  A reset discards the
+            # already-authenticated session and drops the browser back on login, forcing
+            # the VisionAgent to re-authenticate — which caused the "logged out, then looped
+            # on login" failure.  Whatever went wrong, the intelligent recovery is to look at
+            # the screen we are ACTUALLY on and continue toward the objective from there.
+            failed_idx = len(step_results) - 1
             if last_sr.get("method") in ("no_coordinates", "vision_required"):
-                # app_map coverage gap or vision sentinel — browser is already on the
-                # correct screen; resume from here without resetting to entry.
-                failed_idx  = len(step_results) - 1   # 0-indexed plan position
-                completed   = step_results[:-1]        # drop the sentinel artifact
-                t3_mode     = "resume"
-                print(
-                    f"\n  [RUN] app_map incomplete at step {failed_idx + 1} "
-                    f"— resuming Tier-3 from current screen (no reset)"
-                )
-                t3_result = _run_tier3_continue(state, tc, completed, failed_idx)
+                completed = step_results[:-1]   # sentinel artifact — not a real executed step
             else:
-                # Genuine failure (wrong screen, bad state) — restart from entry.
-                t3_mode = "restart"
-                print(
-                    f"\n  [RUN] Tier-1/2 failed at step {len(step_results)} "
-                    f"— restarting with Tier-3 VisionAgent"
-                )
-                t3_result = _run_tier3(state, tc)
+                completed = step_results         # keep the failed verify/tap in the audit trail
+            t3_mode = "resume"
+            print(
+                f"\n  [RUN] Tier-1/2 stopped at step {failed_idx + 1} "
+                f"(method={last_sr.get('method', '?')}) — resuming Tier-3 from current screen (no reset)"
+            )
+            t3_result = _run_tier3_continue(state, tc, completed, failed_idx)
 
             t3_steps   = t3_result.get("step_results") or []
             t3_outcome = t3_result.get("outcome", "failed")

@@ -4,11 +4,10 @@ last robot action achieved its expected outcome. Updates the step result and
 records the transition in the decision tree.
 """
 import base64
-import json
 from langchain_core.messages import HumanMessage
 from vision_agent.state import VisionAgentState
 from vision_agent.prompts import VALIDATE_STEP
-from vision_agent.llm import get_fast_llm
+from vision_agent.llm import get_llm, invoke_json
 from vision_agent.storage import get_storage
 
 
@@ -29,7 +28,9 @@ def validate_step(state: VisionAgentState) -> dict:
         screen_before=screen_before,
     )
 
-    llm = get_fast_llm()   # Haiku — binary yes/no, ~0.8 s vs Sonnet's ~2.5 s
+    llm = get_llm()   # Opus — Tier-3 validation must reason correctly about screen state
+                      # (e.g. "checkout didn't navigate because the cart is empty"), not just
+                      # answer a shallow yes/no.  Tier-3 is a fallback path, so latency is fine.
     msg = HumanMessage(content=[
         {
             "type": "image",
@@ -42,11 +43,14 @@ def validate_step(state: VisionAgentState) -> dict:
         },
         {"type": "text", "text": prompt},
     ])
-    response = llm.invoke([msg])
-    raw = response.content.strip()
-    if "```" in raw:
-        raw = raw.split("```")[1].lstrip("json").strip()
-    v = json.loads(raw)
+    # Resilient parse — an unparseable response is treated as a failed (retryable) step
+    # rather than crashing the run.
+    v = invoke_json(llm, [msg], default={
+        "success": False,
+        "new_screen_id": "unknown",
+        "observation": "validation response could not be parsed",
+        "recovery_hint": None,
+    }, label="validate")
 
     success: bool = v.get("success", False)
     new_screen: str = v.get("new_screen_id", "unknown")

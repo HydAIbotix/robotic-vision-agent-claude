@@ -186,10 +186,13 @@ def tap(x: int, y: int) -> dict:
     # 800ms handles slow checkout/cart navigations (add-to-cart toast can take ~600ms
     # to clear before the cart button tap registers on the correct target).
     try:
-        page.wait_for_load_state("domcontentloaded", timeout=1200)
+        page.wait_for_load_state("domcontentloaded", timeout=1500)
     except Exception:
         pass  # timeout fires on non-navigating clicks — that is expected and fine
-    page.wait_for_timeout(800)  # settle for React re-renders + toast dismiss
+    # Settle for React re-renders, toasts, AND apps that inject artificial navigation/action
+    # delays (kiosk test rigs use ~900ms).  A shorter wait captures the screen BEFORE a delayed
+    # popup/route renders, causing the agent to miss it and re-tap the same control.
+    page.wait_for_timeout(1400)
 
     return {"success": True, "x": x, "y": y}
 

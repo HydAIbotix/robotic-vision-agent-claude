@@ -7,7 +7,7 @@ import json
 from langchain_core.messages import HumanMessage
 from vision_agent import robot
 from vision_agent.storage import get_storage
-from vision_agent.llm import get_explorer_llm
+from vision_agent.llm import get_explorer_llm, invoke_json
 from vision_agent.screen_cache import compute_hash, lookup_screen
 from app_explorer.state import ExplorerState
 from app_explorer.prompts import IDENTIFY_RESULT_SCREEN
@@ -135,12 +135,16 @@ def identify_result(state: ExplorerState) -> dict:
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
         {"type": "text", "text": prompt},
     ])
-    raw = llm.invoke([msg]).content.strip()
-    if "```" in raw:
-        raw = raw.split("```")[1].lstrip("json").strip()
-    v = json.loads(raw)
+    # Resilient parse — on an unparseable response fall back to the DOM screen id
+    # (if any), otherwise assume we stayed on the source screen (conservative).
+    v = invoke_json(llm, [msg], default={
+        "screen_id":       dom_id or action["screen_id"],
+        "is_new_screen":   bool(dom_id),
+        "description":     "",
+        "transition_type": "navigation_success",
+    }, label="identify_result")
 
-    result_screen_id = v["screen_id"]
+    result_screen_id = v.get("screen_id") or (dom_id or action["screen_id"])
     is_new           = v.get("is_new_screen", False)
     description      = v.get("description", "")
     transition_type  = v.get("transition_type", "navigation_success")

@@ -8,13 +8,18 @@ class Settings(BaseSettings):
     # Vision backend: swap to "bedrock" to use AWS — zero other code changes
     vision_backend: Literal["anthropic", "bedrock"] = "anthropic"
     anthropic_api_key: str = ""
-    anthropic_model: str = "claude-sonnet-4-6"
-    # Opus for exploration — reasons better about conditional navigation and gated flows
+    # Opus 4.8 everywhere reasoning matters — screen analysis, test-plan generation, and the
+    # Tier-3 VisionAgent (analyze/plan/validate).  Sonnet previously mis-planned prerequisite
+    # steps (e.g. incrementing product quantity before "Add to Cart"); Opus reasons about
+    # those preconditions reliably.  Tier-1/2 execution uses 0 LLM calls, so the steady-state
+    # cost is unchanged — Opus is only paid on exploration, planning, and Tier-3 fallback.
+    anthropic_model: str = "claude-opus-4-8"
+    # Kept as a distinct setting so exploration can be tuned independently; also Opus.
     anthropic_explorer_model: str = "claude-opus-4-8"
 
     # AWS Bedrock (active only when vision_backend="bedrock")
     bedrock_region: str = "us-east-1"
-    bedrock_model_id: str = "anthropic.claude-sonnet-4-5-20251001-v2:0"
+    bedrock_model_id: str = "anthropic.claude-opus-4-8"
 
     # Storage: swap to "s3" for AWS — zero other code changes
     storage_backend: Literal["local", "s3"] = "local"
@@ -37,8 +42,9 @@ class Settings(BaseSettings):
     # Vision confidence: elements below this score get a correction follow-up call
     coordinate_confidence_threshold: float = 0.85
 
-    # Fast model used for validation (Haiku — binary yes/no, no element detection needed)
-    anthropic_fast_model: str = "claude-haiku-4-5-20251001"
+    # Short-response model tier (validation, conclusive verdict). Opus 4.8 for consistency —
+    # every Claude call in the system uses the same model; this tier just caps output tokens lower.
+    anthropic_fast_model: str = "claude-opus-4-8"
 
     # App Explorer coordinate cache — skip analyze_screen LLM call for known static screens
     app_map_path: str = "app_map.json"

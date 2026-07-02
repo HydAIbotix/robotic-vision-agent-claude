@@ -19,7 +19,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 from langchain_core.messages import HumanMessage
 from vision_agent.nodes.analyze import analyze_screen as _analyze
-from vision_agent.llm import get_llm, get_explorer_llm
+from vision_agent.llm import get_llm, get_explorer_llm, invoke_json
 from vision_agent.screen_cache import compute_hash
 from vision_agent.storage import get_storage
 from vision_agent.config import settings
@@ -151,11 +151,8 @@ def _collect_scrolled_elements(base_elements: list, image_path: str, screen_id: 
     })
 
     # ── One LLM call for all scroll screenshots ───────────────────────────────
-    llm = get_explorer_llm()
-    raw = llm.invoke([HumanMessage(content=content)]).content.strip()
-    if "```" in raw:
-        raw = raw.split("```")[1].lstrip("json").strip()
-    result = json.loads(raw)
+    result = invoke_json(get_explorer_llm(), [HumanMessage(content=content)],
+                         default={"screenshots": []}, label="scroll")
 
     # ── Adjust y-coordinates by scroll offset, convert normalized → pixels ────
     all_elements = list(base_elements)
@@ -347,10 +344,7 @@ def _map_keyboard(elements: list, app_map: dict) -> dict:
         {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
         {"type": "text", "text": MAP_KEYBOARD},
     ])
-    raw = llm.invoke([msg]).content.strip()
-    if "```" in raw:
-        raw = raw.split("```")[1].lstrip("json").strip()
-    kb_data = json.loads(raw)
+    kb_data = invoke_json(llm, [msg], default={"keys": {}}, label="keyboard")
 
     key_count = len(kb_data.get("keys", {}))
     print(f"  [KEYBOARD] Mapped {key_count} keys")
@@ -470,11 +464,21 @@ def explore_screen(state: ExplorerState) -> dict:
         invalid_password=invalid.get("password", "WrongPass!"),
     )
 
-    llm = get_explorer_llm()
-    raw = llm.invoke([HumanMessage(content=prompt)]).content.strip()
-    if "```" in raw:
-        raw = raw.split("```")[1].lstrip("json").strip()
-    data = json.loads(raw)
+    data = invoke_json(get_explorer_llm(), [HumanMessage(content=prompt)],
+                       default={"explorable_actions": []}, label="suggest_actions")
+
+    # ── 5b. Persist element dependencies as ground truth on the screen ────────
+    # These record which action elements (add / submit / confirm / proceed) consume state
+    # set by other elements on this screen, plus the recipe to satisfy the precondition.
+    # The test planner reads these instead of re-inferring prerequisites every run.
+    deps = [d for d in (data.get("element_dependencies") or []) if d.get("element_id") and d.get("requires")]
+    if deps:
+        app_map["screens"][screen_id] = {
+            **app_map["screens"].get(screen_id, {}),
+            "dependencies": deps,
+        }
+        print(f"  [EXPLORE] '{screen_id}': recorded {len(deps)} element dependency(ies) — "
+              f"{', '.join(d['element_id'] for d in deps)}")
 
     # ── 6. Queue actions not yet explored ─────────────────────────────────────
     explored = set(state.get("explored_action_keys") or [])

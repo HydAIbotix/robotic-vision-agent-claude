@@ -15,7 +15,7 @@ Pipeline (nodes run in priority order; stops at first definitive answer):
 
   Node 2B — Region OCR at known coords    (real robot)
     pytesseract on a 320×60 px crop around each element's center.
-    Zero LLM.  Falls back to full-image OCR, then to Claude Haiku when
+    Zero LLM.  Falls back to full-image OCR, then to Claude Opus when
     pytesseract is not installed or extracts too little text.
 
   Node 3 — Claude Vision Fallback         (all backends, last resort)
@@ -279,7 +279,7 @@ def _check_text(
 
     playwright  → DOM text query (zero LLM)
     demo        → always True
-    real robot  → region OCR via pytesseract (zero LLM), then Claude Haiku fallback
+    real robot  → region OCR via pytesseract (zero LLM), then Claude Opus fallback
 
     Returns True / False / None  (None = inconclusive → triggers Node 3).
     """
@@ -297,7 +297,7 @@ def _check_text(
         return True
 
     else:
-        # Real robot: region OCR first (zero LLM), then Claude Haiku if needed
+        # Real robot: region OCR first (zero LLM), then Claude Opus if needed
         ocr = _region_ocr_text_check(image_path, expected_text, app_map or {}, expected_screen)
         if ocr is not None:
             return ocr
@@ -318,7 +318,7 @@ def _region_ocr_text_check(
 
     Returns True / False / None.
     None means pytesseract is not installed or extracted too little text —
-    the caller falls back to Claude Haiku.
+    the caller falls back to Claude Opus.
     """
     try:
         from PIL import Image
@@ -376,7 +376,7 @@ def _region_ocr_text_check(
 # ── Node 3: Claude Vision Fallback ────────────────────────────────────────────
 
 def _claude_vision_text_check(image_path: str, expected_text: str, description: str) -> bool | None:
-    """Ask Claude Haiku whether expected_text is visible in the screenshot."""
+    """Ask Claude Opus whether expected_text is visible in the screenshot."""
     import base64, json
     from langchain_core.messages import HumanMessage
     from vision_agent.llm import get_fast_llm
@@ -409,7 +409,7 @@ def _claude_vision_text_check(image_path: str, expected_text: str, description: 
 
 
 def _claude_vision_validate(image_path: str, description: str, screen_before: str) -> dict:
-    """Node 3 fallback — full VALIDATE_STEP call via Claude Haiku."""
+    """Node 3 fallback — full VALIDATE_STEP call via Claude Opus."""
     import base64, json
     from langchain_core.messages import HumanMessage
     from vision_agent.llm import get_fast_llm
