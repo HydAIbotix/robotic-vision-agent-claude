@@ -64,7 +64,19 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
     scenario = plan.get("credential_scenario", "valid")
     device_map  = _load_device_map()
     current_dev: str | None = None
-    last_screenshot: str = ""  # updated after every tap; used by subsequent verify steps
+    last_screenshot: str = ""  # updated after every step; used by subsequent verify steps
+
+    def _cap(tag: str, idx: int) -> str:
+        """Capture the current screen into the run's screenshot folder. Returns the
+        path, or '' on failure.  Works on every backend (playwright, real, demo)."""
+        try:
+            Path(settings.screenshots_dir).mkdir(parents=True, exist_ok=True)
+            p = str(Path(settings.screenshots_dir) / f"step{idx:02d}_{tag}_{test_id}_{int(time.time()*1000)}.png")
+            robot.capture_screen(p)
+            return p
+        except Exception as exc:
+            print(f"         [screenshot capture failed: {exc}]")
+            return ""
 
     for i, step in enumerate(plan.get("steps") or [], 1):
         # ── device routing — move robot before first step on each new device ──
@@ -82,8 +94,16 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
 
         # ── verify ────────────────────────────────────────────────────────────
         if action == "verify":
+            # playwright only: ensure a current screenshot exists even for a leading
+            # verify step (no preceding tap) so the UI has evidence and a text-mismatch
+            # message can read the actual on-screen value via Claude.
+            if settings.robot_backend == "playwright" and not last_screenshot:
+                last_screenshot = _cap("verify", i)
             expected      = step.get("expected_screen", "")
-            expected_text = step.get("expected_text")   # optional content check
+            # Accept both field names: PLAN_FROM_MAP emits "expected_text", the UI planner
+            # (_TC_PLAN_PROMPT) emits "expected_value".  Reading only one silently skipped the
+            # content check (e.g. an order total), letting wrong-amount tests pass.
+            expected_text = step.get("expected_text") or step.get("expected_value")
             desc          = step.get("description", "")
             if not expected and not expected_text:
                 # Nothing to verify — skip with a warning.
@@ -165,6 +185,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             if not success:
                 print(f"             {observation}")
 
+            _vshot = last_screenshot if settings.robot_backend == "playwright" else ""
             sr = {
                 "step": f"verify: {desc}",
                 "success": success,
@@ -173,6 +194,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 "expected_text": expected_text,
                 "method": method,
                 "observation": observation,
+                "screenshot_after": _vshot,
             }
             step_results.append(sr)
             if run_id: broadcaster.emit(run_id, {
@@ -207,21 +229,37 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 return step_results, "failed"
 
             print(f"    {i:>2}. tap   {eid!r} @ ({px},{py})  [{sid}]")
-            robot.tap(px, py)
+            tap_result = robot.tap(px, py)
             time.sleep(0.5)
-            # Capture screenshot after tap so verify steps have a fresh image
-            if settings.robot_backend != "playwright":
-                ts = int(time.time() * 1000)
-                snap_path = str(Path(settings.screenshots_dir) / f"tap_{test_id}_{ts}.png")
-                Path(settings.screenshots_dir).mkdir(parents=True, exist_ok=True)
-                robot.capture_screen(snap_path)
-                last_screenshot = snap_path
-                # Navigation prediction from app_map transitions
-                sc_data  = (app_map or {}).get("screens", {}).get(sid, {})
-                predicted = (sc_data.get("transitions") or {}).get(eid)
-                if predicted:
-                    print(f"         → nav prediction: '{predicted}' [app_map transitions]")
-            sr = {"step": f"tap: {eid} @ ({px},{py})", "success": True, "method": "app_map", "screen_id": sid, "element_id": eid}
+            # Fresh post-tap image for the next verify step.
+            #   playwright → cheap browser screenshot; also saved as step evidence (UI).
+            #   real robot → the /screen/click completion already returns the camera frame
+            #                (tap_result["image_path"]); reuse it — no extra /capture cycle.
+            #                Not surfaced as UI step evidence for real-robot runs.
+            #   demo       → verify always passes; no image needed.
+            after_shot = ""
+            if settings.robot_backend == "playwright":
+                after_shot = _cap("after", i)
+                if after_shot:
+                    last_screenshot = after_shot
+            else:
+                tap_img = (tap_result or {}).get("image_path", "")
+                if not tap_img and settings.robot_backend != "demo":
+                    # Real backend returned no frame — fall back to an explicit capture.
+                    ts = int(time.time() * 1000)
+                    snap_path = str(Path(settings.screenshots_dir) / f"tap_{test_id}_{ts}.png")
+                    Path(settings.screenshots_dir).mkdir(parents=True, exist_ok=True)
+                    robot.capture_screen(snap_path)
+                    tap_img = snap_path
+                if tap_img:
+                    last_screenshot = tap_img
+            # Navigation prediction from app_map transitions
+            sc_data  = (app_map or {}).get("screens", {}).get(sid, {})
+            predicted = (sc_data.get("transitions") or {}).get(eid)
+            if predicted:
+                print(f"         → nav prediction: '{predicted}' [app_map transitions]")
+            sr = {"step": f"tap: {eid} @ ({px},{py})", "success": True, "method": "app_map",
+                  "screen_id": sid, "element_id": eid, "screenshot_after": after_shot}
             step_results.append(sr)
             if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
             continue
@@ -232,7 +270,13 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             print(f"    {i:>2}. type  {value!r}")
             robot.type_text(value, clear_first=True)
             time.sleep(0.3)
-            sr = {"step": f"type: {value[:30]}", "success": True, "method": "app_map"}
+            after_shot = ""
+            if settings.robot_backend == "playwright":
+                after_shot = _cap("after", i)
+                if after_shot:
+                    last_screenshot = after_shot
+            sr = {"step": f"type: {value[:30]}", "success": True, "method": "app_map",
+                  "screenshot_after": after_shot}
             step_results.append(sr)
             if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
             continue

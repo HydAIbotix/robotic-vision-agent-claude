@@ -110,7 +110,7 @@ def parse_steps(state: TestRunnerState) -> dict:
     # ── Tier 1: cache lookup ──────────────────────────────────────────────────
     if app_map:
         map_version = app_map_store.version_hash(app_map)
-        cached = plan_cache.load(tc["test_id"], tc["steps_raw"], map_version)
+        cached = plan_cache.load(tc["test_id"], tc["steps_raw"], map_version, tc.get("expected_results_raw", ""))
         if cached and plan_cache.is_valid(cached, app_map):
             n = len(cached.get("steps") or [])
             print(f"\n  [PARSE] Tier-1 cache hit — {n} steps  (0 LLM calls)")
@@ -145,7 +145,7 @@ def parse_steps(state: TestRunnerState) -> dict:
             print(f"  [PARSE] Tier-2 plan: {n} steps")
             _print_plan(plan)
             # Cache for future runs
-            plan_cache.save(plan, tc["test_id"], tc["steps_raw"], map_version)
+            plan_cache.save(plan, tc["test_id"], tc["steps_raw"], map_version, tc.get("expected_results_raw", ""))
             return {
                 "structured_plan":   plan,
                 "planned_steps":     [],

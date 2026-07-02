@@ -25,8 +25,10 @@ _CACHE_DIR = Path(__file__).parent.parent / "test_plans"
 _PLANNER_VERSION = "v9-dep-sanity"
 
 
-def _key(test_id: str, steps_raw: str, app_map_version: str) -> str:
-    raw = f"{_PLANNER_VERSION}|{test_id}|{steps_raw.strip()}|{app_map_version}"
+def _key(test_id: str, steps_raw: str, app_map_version: str, expected_results_raw: str = "") -> str:
+    # expected_results_raw is part of the key so editing a test case's expected value (e.g. the
+    # final amount to verify) invalidates the cached plan even when the steps text is unchanged.
+    raw = f"{_PLANNER_VERSION}|{test_id}|{steps_raw.strip()}|{expected_results_raw.strip()}|{app_map_version}"
     return hashlib.md5(raw.encode()).hexdigest()[:10]
 
 
@@ -35,9 +37,9 @@ def _cache_path(test_id: str, cache_key: str) -> Path:
     return _CACHE_DIR / f"{test_id}_{cache_key}.json"
 
 
-def load(test_id: str, steps_raw: str, app_map_version: str) -> Optional[dict]:
+def load(test_id: str, steps_raw: str, app_map_version: str, expected_results_raw: str = "") -> Optional[dict]:
     """Return a cached plan dict, or None if the cache is empty / stale."""
-    key  = _key(test_id, steps_raw, app_map_version)
+    key  = _key(test_id, steps_raw, app_map_version, expected_results_raw)
     path = _cache_path(test_id, key)
     if not path.exists():
         return None
@@ -51,9 +53,9 @@ def load(test_id: str, steps_raw: str, app_map_version: str) -> Optional[dict]:
         return None
 
 
-def save(plan: dict, test_id: str, steps_raw: str, app_map_version: str) -> None:
+def save(plan: dict, test_id: str, steps_raw: str, app_map_version: str, expected_results_raw: str = "") -> None:
     """Persist a plan with its cache key embedded for future validation."""
-    key  = _key(test_id, steps_raw, app_map_version)
+    key  = _key(test_id, steps_raw, app_map_version, expected_results_raw)
     plan = {**plan, "cache_key": key}
     _cache_path(test_id, key).write_text(
         json.dumps(plan, indent=2), encoding="utf-8"

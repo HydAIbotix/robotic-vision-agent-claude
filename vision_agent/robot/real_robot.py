@@ -215,22 +215,47 @@ def capture_screen(save_path: str) -> dict:
 
 
 def tap(x: int, y: int) -> dict:
-    """Physically tap kiosk touchscreen at viewport pixel (x, y)."""
+    """Physically tap kiosk touchscreen at viewport pixel (x, y).
+
+    The /screen/click completion returns the post-tap camera frame (image_b64). We
+    decode and save it, then surface it as image_path so callers can reuse it for
+    verification without a separate /capture round-trip (saves an arm cycle).
+    """
     u, v   = _scale(x, y)
     cmd_id = _new_cmd_id()
     print(f"    [ROBOT] tap viewport({x},{y}) → camera({u},{v})")
-    _post("/screen/click", {
+    post_resp = _post("/screen/click", {
         "kiosk_id":         _kiosk(),
         "points":           [{"u": u, "v": v}],
         "delay_between_ms": 0,
         "cmd_id":           cmd_id,
     })
-    _poll("/arm/state", cmd_id, settings.arm_move_timeout_s, abort_ep="/arm/abort")
+    state = _poll("/arm/state", cmd_id, settings.arm_move_timeout_s, abort_ep="/arm/abort")
     # After the arm confirms tap complete, the kiosk still needs time to process the touch
     # event and complete any navigation (e.g. login API call + React re-render takes 300-700ms).
     # 0.2s was too short and caused the next camera capture to land mid-transition.
     time.sleep(0.8)
-    return {"success": True, "x": x, "y": y, "u": u, "v": v}
+
+    result = {"success": True, "x": x, "y": y, "u": u, "v": v}
+    # The camera frame may arrive in the click ack or in the completion state — check both.
+    click_result = state.get("click_result") or post_resp.get("click_result") or {}
+    b64 = click_result.get("image_b64")
+    if b64:
+        try:
+            fmt = (click_result.get("format") or "jpeg").lower()
+            ext = "jpg" if fmt in ("jpg", "jpeg") else fmt
+            save_path = str(Path(settings.screenshots_dir) / f"click_{cmd_id}.{ext}")
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(save_path).write_bytes(base64.b64decode(b64))
+            result["image_path"] = save_path
+            w, h = click_result.get("width"), click_result.get("height")
+            if w and h:
+                _calibration["scale_x"] = w / settings.viewport_width
+                _calibration["scale_y"] = h / settings.viewport_height
+                result["width"], result["height"] = w, h
+        except Exception as exc:
+            print(f"    [ROBOT] click image decode failed: {exc}")
+    return result
 
 
 def _image_similarity(path1: str, path2: str) -> float:
@@ -479,4 +504,90 @@ def get_status() -> dict:
         "arm_state":        arm.get("state", "unknown"),
         "base_pose":        base,
         "event_count":      len(_events),
+    }
+
+
+def health_check(do_capture: bool = True) -> dict:
+    """Pre-run readiness probe for the management UI.
+
+    Checks the three things that must be healthy before a real-robot test run, each via the
+    Robot REST API:
+      • robot  — GET /arm/state   : the arm server is reachable and responsive (not error)
+      • kiosk  — GET /base/state  : the mobile base is idle/positioned at a kiosk
+      • camera — POST /capture    : a rectified screen frame is returned (kiosk localized).
+                 This also runs calibration, measuring the real camera resolution so the first
+                 tap uses measured dimensions instead of the config fallback.
+
+    Every probe is isolated in try/except so an unreachable robot yields structured errors
+    rather than throwing.  Returns the robot URL and per-component {status, detail, …}.
+    """
+    url = _base_url()
+
+    def comp(status: str, detail: str, **extra) -> dict:
+        return {"status": status, "detail": detail, **extra}
+
+    components: dict = {}
+
+    # 1 ─ Robot (arm) reachable & responsive
+    try:
+        arm = _get("/arm/state")
+        st  = arm.get("state", "unknown")
+        ok  = st in ("idle", "holding_card")
+        components["robot"] = comp(
+            "ok" if ok else "error",
+            f"Arm responsive (state: {st})" if ok else f"Arm reports state '{st}'",
+            arm_state=st, robot_id=arm.get("robot_id", settings.robot_id),
+        )
+    except Exception as e:
+        components["robot"] = comp("error", f"Robot unreachable at {url} — {e}")
+
+    # 2 ─ Kiosk: base positioned / idle
+    try:
+        base = _get("/base/state")
+        bst  = base.get("state", "unknown")
+        try:
+            pose = _get("/base/pose")
+        except Exception:
+            pose = {}
+        ok = bst == "idle"
+        components["kiosk"] = comp(
+            "ok" if ok else "error",
+            f"Base idle at kiosk '{_current_kiosk_id or settings.default_kiosk_id}'"
+            if ok else f"Base is '{bst}', not ready",
+            base_state=bst, base_pose=pose,
+        )
+    except Exception as e:
+        components["kiosk"] = comp("error", f"Base state unavailable — {e}")
+
+    # 3 ─ Camera capture (also calibrates)
+    if do_capture:
+        try:
+            cap  = capture_screen("./screenshots/health_capture.png")
+            w, h = cap.get("width"), cap.get("height")
+            if w and h:
+                components["camera"] = comp(
+                    "ok",
+                    f"Captured screen {w}×{h}; kiosk localized & calibrated",
+                    width=w, height=h,
+                    scale_x=round(_calibration.get("scale_x", 0.0), 4),
+                    scale_y=round(_calibration.get("scale_y", 0.0), 4),
+                    calibrated=bool(_calibration),
+                )
+            else:
+                components["camera"] = comp("error", "Capture returned no image dimensions")
+        except Exception as e:
+            components["camera"] = comp("error", f"Screen capture failed — {e}")
+    else:
+        components["camera"] = comp("unknown", "Not checked (capture skipped)")
+
+    healthy = all(c.get("status") == "ok" for c in components.values())
+    return {
+        "backend":    settings.robot_backend,
+        "robot_url":  url,
+        "robot_id":   settings.robot_id,
+        "kiosk_id":   _current_kiosk_id or settings.default_kiosk_id,
+        "simulated":  False,
+        "healthy":    healthy,
+        "components": components,
+        "checked_at": time.time(),
     }

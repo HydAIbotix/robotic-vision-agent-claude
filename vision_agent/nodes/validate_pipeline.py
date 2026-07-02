@@ -144,17 +144,17 @@ def run_validate_pipeline(
             app_map, expected_screen,
         )
         if text_match is False:
+            observed = _claude_extract_value(image_path, expected_text, step_description)
+            obs = f"Value mismatch: expected '{expected_text}' on '{actual_screen or expected_screen}'"
+            obs += f", but the screen shows '{observed}'" if observed else ", but it is not present"
             return {
                 "success":       False,
                 "screen_match":  screen_match,
                 "text_match":    False,
                 "method":        "text_validation",
                 "actual_screen": actual_screen,
-                "observation":   (
-                    f"Text not found: '{expected_text}' "
-                    f"not visible on '{actual_screen or expected_screen}'"
-                ),
-                "note": "",
+                "observation":   obs,
+                "note":          "",
             }
 
     # ── Node 3: Claude Vision Fallback ────────────────────────────────────────
@@ -406,6 +406,42 @@ def _claude_vision_text_check(image_path: str, expected_text: str, description: 
     except Exception as e:
         print(f"  [VALIDATE] Claude text check error: {e}")
         return None
+
+
+def _claude_extract_value(image_path: str, expected_text: str, description: str) -> str:
+    """On a text mismatch, ask Claude what the ACTUAL corresponding value on screen is.
+
+    Returns the observed value (e.g. the real order total "$756.67") so the failure message can
+    say "expected '$856.67' but the screen shows '$756.67'" instead of a bare "not found".
+    Best-effort — returns "" if it cannot be determined.
+    """
+    import base64, json
+    from langchain_core.messages import HumanMessage
+    from vision_agent.llm import get_fast_llm
+    from vision_agent.storage import get_storage
+    try:
+        b64 = base64.standard_b64encode(get_storage().load(image_path)).decode()
+        prompt = (
+            f"A test expected to see the value '{expected_text}' on this screen.\n"
+            f"Context: {description}\n\n"
+            f"Look at the screenshot and report the ACTUAL corresponding value shown (the total "
+            f"amount, count, id, or status that '{expected_text}' was meant to match). If the "
+            f"expected value is genuinely absent, report whatever IS shown in its place.\n"
+            f'Return ONLY valid JSON: {{ "observed": "<actual value on screen, or empty>" }}'
+        )
+        llm = get_fast_llm()
+        msg = HumanMessage(content=[
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64},
+             "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": prompt},
+        ])
+        raw = llm.invoke([msg]).content.strip()
+        if "```" in raw:
+            raw = raw.split("```")[1].lstrip("json").strip()
+        return str(json.loads(raw).get("observed", "")).strip()
+    except Exception as e:
+        print(f"  [VALIDATE] Claude value extract error: {e}")
+        return ""
 
 
 def _claude_vision_validate(image_path: str, description: str, screen_before: str) -> dict:

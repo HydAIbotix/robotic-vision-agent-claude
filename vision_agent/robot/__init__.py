@@ -1,57 +1,56 @@
 """
-Robot backend dispatcher.  Reads ROBOT_BACKEND from .env and re-exports the
-matching implementation's functions so all agent code uses:
+Robot backend dispatcher — DYNAMIC.
+
+Usage is unchanged for callers:
 
     from vision_agent import robot
     robot.tap(x, y)
     robot.capture_screen(save_path)
     robot.type_text(text)
 
-No agent file needs to know which backend is active.
+The active backend is resolved from settings.robot_backend AT CALL TIME (via PEP 562 module
+__getattr__), NOT bound once at import.  This means switching the backend at runtime — e.g. from
+the management UI's Robot Connection selector, or per-run in _execute_run — takes effect on the
+very next call, with no process restart and no stale binding to a previous backend/URL.
+
+Resolution order for an attribute:
+  1. the primary module for the active backend (playwright_stubs / real_robot / stubs)
+  2. stubs.py            — shared fallback (ARIA/text helpers, move_to_position, …)
+  3. a harmless no-op    — for optional lifecycle hooks a backend doesn't implement
 """
-from vision_agent.config import settings as _s
+import importlib
+from vision_agent.config import settings
 
-if _s.robot_backend == "playwright":
-    from vision_agent.robot.playwright_stubs import (   # noqa: F401
-        capture_screen, tap, type_text, swipe,
-        set_demo_screens, set_keyboard_map, reset_to_entry, stop,
-        scroll_page, get_page_scroll_info, get_dom_screen_id, get_dom_element_centers,
-        navigate_to_screen, update_explorer_progress,
-        verify_current_screen,
-        get_aria_snapshot, text_is_present, query_element_text, get_element_bounding_box,
-    )
-    from vision_agent.robot.stubs import move_to_position  # noqa: F401  (playwright has no base movement)
+_PRIMARY = {
+    "playwright": "vision_agent.robot.playwright_stubs",
+    "real":       "vision_agent.robot.real_robot",
+    "demo":       "vision_agent.robot.stubs",
+}
+_STUBS = "vision_agent.robot.stubs"
 
-elif _s.robot_backend == "real":
-    from vision_agent.robot.real_robot import (         # noqa: F401
-        capture_screen, tap, type_text, swipe,
-        set_demo_screens, set_keyboard_map, reset_to_entry,
-        scroll_page, get_page_scroll_info, get_dom_screen_id, get_dom_element_centers,
-        navigate_to_screen, update_explorer_progress,
-        verify_current_screen,
-        # Real-robot-only extras (imported directly in scripts that need them)
-        setup, navigate_to_kiosk, calibrate,
-        card_pick, card_tap, card_replace,
-        get_events, get_status, get_base_pose, get_arm_state,
-    )
-    from vision_agent.robot.stubs import (              # noqa: F401
-        get_aria_snapshot, text_is_present, query_element_text, get_element_bounding_box,
-    )
-    # move_to_position must be implemented in real_robot.py when hardware arrives
-    try:
-        from vision_agent.robot.real_robot import move_to_position  # noqa: F401
-    except ImportError:
-        from vision_agent.robot.stubs import move_to_position        # noqa: F401
-    def stop() -> None: pass                            # noqa: E704
+# Lifecycle hooks that not every backend implements — resolve to a no-op rather than error.
+_OPTIONAL_NOOPS = frozenset({"stop", "reset_to_entry", "update_explorer_progress"})
 
-else:  # "demo" (default)
-    from vision_agent.robot.stubs import (              # noqa: F401
-        capture_screen, tap, type_text, swipe,
-        set_demo_screens, set_keyboard_map, move_to_position,
-        scroll_page, get_page_scroll_info, get_dom_screen_id, get_dom_element_centers,
-        navigate_to_screen, update_explorer_progress,
-        verify_current_screen,
-        get_aria_snapshot, text_is_present, query_element_text, get_element_bounding_box,
-    )
-    def reset_to_entry() -> None: pass                  # noqa: E704
-    def stop() -> None: pass                            # noqa: E704
+
+def active_backend() -> str:
+    """The currently-selected backend name ('playwright' | 'real' | 'demo')."""
+    return settings.robot_backend if settings.robot_backend in _PRIMARY else "demo"
+
+
+def _resolve(attr: str):
+    primary = importlib.import_module(_PRIMARY[active_backend()])
+    if hasattr(primary, attr):
+        return getattr(primary, attr)
+    stubs = importlib.import_module(_STUBS)
+    if hasattr(stubs, attr):
+        return getattr(stubs, attr)
+    if attr in _OPTIONAL_NOOPS:
+        def _noop(*_a, **_k):
+            return None
+        return _noop
+    raise AttributeError(f"robot backend '{active_backend()}' has no attribute '{attr}'")
+
+
+def __getattr__(attr: str):
+    # PEP 562: invoked for any name not found as a real module global — i.e. every robot.<fn>.
+    return _resolve(attr)

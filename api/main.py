@@ -111,9 +111,35 @@ def list_runs(limit: int = 50, db: Session = Depends(get_db)):
     return [_run_summary(r) for r in runs]
 
 
+def _base_screens_dir() -> Path:
+    return Path(settings.app_map_path).parent / "screenshots"
+
+
+def _run_screens_dir(run_id: str) -> Path:
+    return _base_screens_dir() / run_id
+
+
+def _next_run_number() -> int:
+    """Monotonic run counter persisted in results/.run_seq.  Reset deletes it → restarts at 1."""
+    p = Path(settings.results_dir) / ".run_seq"
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        n = int(p.read_text().strip()) if p.exists() else 0
+    except Exception:
+        n = 0
+    n += 1
+    try:
+        p.write_text(str(n))
+    except Exception:
+        pass
+    return n
+
+
 @app.post("/api/runs", status_code=202)
 def start_run(req: RunRequest, db: Session = Depends(get_db)):
-    run_id = f"run-{uuid.uuid4().hex[:10]}"
+    # Memorable, ordered run id: run-<N>-<HHMMSS>-<DDMM>  (N increments per run, resets on reset)
+    now = datetime.now()
+    run_id = f"run-{_next_run_number()}-{now.strftime('%H%M%S-%d%m')}"
     run = models.TestRun(
         run_id     = run_id,
         kiosk_id   = req.kiosk_id,
@@ -269,12 +295,85 @@ def get_config(db: Session = Depends(get_db)):
     return {
         "robot_backend":    settings.robot_backend,
         "robot_ip":         settings.robot_ip,
+        "robot_port":       settings.robot_port,
         "robot_id":         settings.robot_id,
         "exploration_mode": _runtime_exploration_mode,
         "viewport":         {"width": settings.viewport_width, "height": settings.viewport_height},
         "camera":           {"width": settings.robot_camera_width, "height": settings.robot_camera_height},
         "kiosks":           [_kiosk_summary(k) for k in kiosks],
         "devices":          [_device_summary(d) for d in devices],
+    }
+
+
+# ── Robot connection config (backend / ip / port) — settable from the UI ──────────
+
+def _persist_env(updates: dict[str, str]) -> None:
+    """Update/insert KEY=VALUE lines in .env, preserving every other line (incl. the API key).
+
+    Line-oriented: replaces a key's line if present, appends it otherwise.  Never rewrites or
+    reorders unrelated lines, so secrets in .env are untouched.
+    """
+    env_path = Path(".env")
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    remaining = dict(updates)
+    out: list[str] = []
+    for line in lines:
+        key = line.split("=", 1)[0].strip() if "=" in line and not line.lstrip().startswith("#") else ""
+        if key in remaining:
+            out.append(f"{key}={remaining.pop(key)}")
+        else:
+            out.append(line)
+    for key, val in remaining.items():
+        out.append(f"{key}={val}")
+    env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+class RobotConnRequest(BaseModel):
+    robot_backend: str            # "demo" | "playwright" | "real"
+    robot_ip:      Optional[str] = None
+    robot_port:    Optional[int] = None
+
+
+@app.patch("/api/config/robot")
+def set_robot_conn(req: RobotConnRequest):
+    """Set the robot backend and (for 'real') its IP/port.
+
+    IP/port take effect immediately (real_robot reads settings live on each call, so the Robot
+    Setup health checks use the new values right away).  Switching the *backend* also needs an
+    API restart to take effect for test RUNS, because the robot dispatcher binds the backend's
+    functions at import time — so we report restart_required when the backend changed.
+    """
+    backend = req.robot_backend.strip().lower()
+    if backend not in ("demo", "playwright", "real"):
+        raise HTTPException(400, f"Invalid robot_backend '{req.robot_backend}'")
+
+    backend_changed = backend != settings.robot_backend
+    env_updates: dict[str, str] = {"ROBOT_BACKEND": backend}
+    settings.robot_backend = backend
+
+    if backend == "real":
+        if req.robot_ip is not None and req.robot_ip.strip():
+            settings.robot_ip = req.robot_ip.strip()
+            env_updates["ROBOT_IP"] = settings.robot_ip
+        if req.robot_port is not None:
+            settings.robot_port = int(req.robot_port)
+            env_updates["ROBOT_PORT"] = str(settings.robot_port)
+
+    try:
+        _persist_env(env_updates)
+        persisted = True
+    except Exception as e:
+        print(f"  [CONFIG] could not persist .env: {e}")
+        persisted = False
+
+    return {
+        "status":           "ok",
+        "robot_backend":    settings.robot_backend,
+        "robot_ip":         settings.robot_ip,
+        "robot_port":       settings.robot_port,
+        "robot_url":        f"http://{settings.robot_ip}:{settings.robot_port}/api/v1",
+        "persisted":        persisted,
+        "restart_required": backend_changed,
     }
 
 
@@ -349,6 +448,40 @@ def robot_status():
         return {"mode": "real", "robots": [get_status()]}
     except Exception as e:
         return {"mode": "real", "robots": [], "error": str(e)}
+
+
+@app.get("/api/robot/health")
+def robot_health(capture: bool = True):
+    """Robot / Kiosk / Camera readiness for the Robot Setup page.
+
+    Real backend → probes the physical robot's REST API (and calibrates via the camera check).
+    Playwright / demo → reports a simulated-healthy status so the page is still meaningful.
+    """
+    robot_url = f"http://{settings.robot_ip}:{settings.robot_port}/api/v1"
+    if settings.robot_backend != "real":
+        return {
+            "backend":   settings.robot_backend,
+            "robot_url": robot_url,
+            "robot_id":  settings.robot_id,
+            "kiosk_id":  settings.default_kiosk_id,
+            "simulated": True,
+            "healthy":   True,
+            "components": {
+                "robot":  {"status": "ok", "detail": f"Simulated — '{settings.robot_backend}' backend, no physical robot"},
+                "kiosk":  {"status": "ok", "detail": f"Kiosk served in-browser at {settings.kiosk_url}"},
+                "camera": {"status": "ok", "detail": "Screenshots captured from the browser (Playwright)"},
+            },
+            "checked_at": datetime.utcnow().timestamp(),
+        }
+    try:
+        from vision_agent.robot.real_robot import health_check
+        return health_check(do_capture=capture)
+    except Exception as e:
+        return {
+            "backend": "real", "robot_url": robot_url, "robot_id": settings.robot_id,
+            "simulated": False, "healthy": False, "error": str(e),
+            "components": {"robot": {"status": "error", "detail": str(e)}},
+        }
 
 
 # ── TC Plan (Claude-powered, cached) ─────────────────────────────────────────
@@ -497,7 +630,7 @@ def get_tc_plan(req: TcPlanRequest, db: Session = Depends(get_db)):
     # Return cached plan unless force=True.
     # Uses the same plan_cache module as the test runner so UI and runner share one file.
     if not req.force:
-        cached = _plan_cache.load(req.test_id, req.steps_raw or "", map_version)
+        cached = _plan_cache.load(req.test_id, req.steps_raw or "", map_version, req.expected_results_raw or "")
         if cached and _plan_cache.is_valid(cached, app_map):
             return cached
 
@@ -549,7 +682,7 @@ def get_tc_plan(req: TcPlanRequest, db: Session = Depends(get_db)):
     # Stamp and save using the shared plan_cache (same file the test runner reads)
     plan["generated_at"] = datetime.utcnow().isoformat() + "Z"
     _plan_cache.invalidate_all_for(req.test_id)  # remove any stale hash-based files
-    _plan_cache.save(plan, req.test_id, req.steps_raw or "", map_version)
+    _plan_cache.save(plan, req.test_id, req.steps_raw or "", map_version, req.expected_results_raw or "")
     return plan
 
 
@@ -706,7 +839,33 @@ def reset_all(db: Session = Depends(get_db)):
     p = Path(settings.app_map_path)
     if p.exists():
         p.unlink()
+    # Clear per-run screenshot folders + reset the run counter so numbering restarts at 1.
+    import shutil
+    base = _base_screens_dir()
+    if base.exists():
+        for child in base.iterdir():
+            if child.is_dir() and child.name != "annotated":
+                shutil.rmtree(child, ignore_errors=True)
+    (Path(settings.results_dir) / ".run_seq").unlink(missing_ok=True)
     return {"status": "ok", "message": "All data cleared. Kiosk configuration preserved."}
+
+
+@app.get("/api/runs/{run_id}/screenshots")
+def list_run_screenshots(run_id: str):
+    """Filenames of the step screenshots captured during a run (in screenshots/<run_id>/)."""
+    d = _run_screens_dir(run_id)
+    if not d.exists():
+        return []
+    return sorted([f.name for f in d.iterdir() if f.suffix.lower() in {".png", ".jpg", ".jpeg"}])
+
+
+@app.get("/api/runs/{run_id}/screenshots/{filename}")
+def get_run_screenshot(run_id: str, filename: str):
+    from fastapi.responses import FileResponse
+    path = _run_screens_dir(run_id) / filename
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, "Not found")
+    return FileResponse(str(path))
 
 
 @app.delete("/api/app-map", status_code=204)
@@ -823,7 +982,18 @@ def _execute_run(run_id: str, req: RunRequest):
     if not run:
         return
 
+    _prev_screens_dir = settings.screenshots_dir
     try:
+        # Route this run's step screenshots into a per-run folder: screenshots/<run_id>/
+        _run_dir = _run_screens_dir(run_id)
+        _run_dir.mkdir(parents=True, exist_ok=True)
+        settings.screenshots_dir = str(_run_dir)
+
+        # SINGLE SOURCE OF TRUTH for the execution backend is the Configuration page's Robot
+        # Connection setting (settings.robot_backend).  Record it on the run so the history
+        # reflects the backend that actually ran.  (This is the EXECUTION backend only — it is
+        # independent of the App Exploration mode, claude vs playwright_aria.)
+        run.mode       = settings.robot_backend
         run.status     = "running"
         run.started_at = datetime.utcnow()
         db.commit()
@@ -875,6 +1045,16 @@ def _execute_run(run_id: str, req: RunRequest):
             _app_map = app_map_store.load(settings.app_map_path)
             if "keyboard_map" in _app_map:
                 robot.set_keyboard_map(_app_map["keyboard_map"])
+
+        # Real robot: calibrate once up front so the very first tap uses the camera's MEASURED
+        # resolution (scale factors) instead of the config fallback.  Non-fatal on failure.
+        if settings.robot_backend == "real":
+            try:
+                from vision_agent.robot import real_robot as _rr
+                _rr.calibrate()
+                _broadcast(run_id, {"event": "log", "run_id": run_id, "message": "Robot calibrated before run"})
+            except Exception as _e:
+                print(f"  [RUN] calibration skipped ({_e}) — using configured camera dimensions")
 
         from test_runner import broadcaster as _broadcaster
         _broadcaster.register(run_id, lambda data: _broadcast(run_id, data))
@@ -960,6 +1140,9 @@ def _execute_run(run_id: str, req: RunRequest):
         run.completed_at = datetime.utcnow()
         db.commit()
         _broadcast(run_id, {"event": "run_error", "run_id": run_id, "error": str(e)})
+    finally:
+        # Restore the base screenshots dir so later exploration/other work isn't misdirected.
+        settings.screenshots_dir = _prev_screens_dir
 
 
 def _run_defect_agent(run_id: str, kiosk_id: str, failed_results: list):
