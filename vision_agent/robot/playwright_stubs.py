@@ -600,6 +600,23 @@ def query_element_text(selector: str) -> str:
         return ""
 
 
+def text_at_point(x: int, y: int) -> str:
+    """Return the visible text of the top-most DOM element at viewport point (x, y).
+
+    Fallback anchor for value validation when an app_map element has no test id —
+    reads the element the user would see under that coordinate.  "" on miss/error.
+    """
+    page = _ensure_page()
+    try:
+        return (page.evaluate(
+            "([x, y]) => { const el = document.elementFromPoint(x, y);"
+            " return el ? (el.innerText || el.textContent || '').trim() : ''; }",
+            [x, y],
+        ) or "")
+    except Exception:
+        return ""
+
+
 def get_element_bounding_box(selector: str) -> dict | None:
     """Return pixel bounding box for the first element matching selector.
 

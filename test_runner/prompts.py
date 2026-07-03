@@ -120,7 +120,7 @@ Return ONLY valid JSON (no markdown fences) with these keys IN THIS ORDER:
      and for every tap on a state-consuming control (add/submit/confirm/proceed/pay/search)
      confirm an EARLIER step set the state it consumes; if any is missing, add it before finalizing.",
   "steps": [
-    {{"action":"verify","expected_screen":"<screen_id>","description":"..."}},
+    {{"action":"verify","expected_screen":"<screen_id>","description":"...","expected_text":"<value, only when checking one>","value_element_id":"<inventory id that shows the value>"}},
     {{"action":"tap","screen_id":"<screen_id>","element_id":"<id from inventory>","px":<int>,"py":<int>}},
     {{"action":"type","value":"<text to type; use the credential values above when signing in>"}},
     {{"action":"vision_required","description":"..."}}
@@ -129,8 +129,12 @@ Return ONLY valid JSON (no markdown fences) with these keys IN THIS ORDER:
 
 Hard rules:
 - tap steps: copy screen_id, element_id, px, py EXACTLY from the inventory (verbatim ids only).
-- verify steps: MUST include expected_screen (a screen_id from the inventory). Add expected_text
-  only when the test explicitly checks a specific value (order total, error text, transaction id).
+- verify steps: MUST include expected_screen (a screen_id from the inventory). When the test
+  explicitly checks a specific value (order total, error text, transaction id), add expected_text
+  with the exact expected string AND value_element_id set to the inventory id of the element on
+  expected_screen that DISPLAYS that value (match by the field the step names — e.g. an order
+  total → the element whose label/note identifies it as the total). Set value_element_id only
+  when such an element exists in the inventory; otherwise omit it (validation falls back to vision).
 - type steps: substitute the ACTUAL value; never leave a placeholder token.
 - invalid-credential tests: credential_scenario="invalid" and use the invalid values.
 - The "reasoning" field is required and must justify every non-obvious step; a plan whose steps

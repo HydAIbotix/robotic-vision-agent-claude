@@ -467,8 +467,8 @@ def robot_health(capture: bool = True):
             "simulated": True,
             "healthy":   True,
             "components": {
-                "robot":  {"status": "ok", "detail": f"Simulated — '{settings.robot_backend}' backend, no physical robot"},
-                "kiosk":  {"status": "ok", "detail": f"Kiosk served in-browser at {settings.kiosk_url}"},
+                "robot":  {"status": "ok", "detail": f"Simulated — no physical robot arm ('{settings.robot_backend}' backend)"},
+                "base":   {"status": "ok", "detail": f"Simulated — no physical AGV base ('{settings.robot_backend}' backend)"},
                 "camera": {"status": "ok", "detail": "Screenshots captured from the browser (Playwright)"},
             },
             "checked_at": datetime.utcnow().timestamp(),
@@ -482,6 +482,61 @@ def robot_health(capture: bool = True):
             "simulated": False, "healthy": False, "error": str(e),
             "components": {"robot": {"status": "error", "detail": str(e)}},
         }
+
+
+# ── Robot API Tester (Robot Setup page) ──────────────────────────────────────
+# Whitelist of the physical-robot endpoints the tester may call (relative to /api/v1).
+_ROBOT_TEST_PATHS = {
+    "/setup", "/base/goto", "/base/state", "/base/pose", "/base/abort",
+    "/capture", "/arm/command", "/arm/state", "/arm/abort",
+    "/screen/click", "/card/pick", "/card/tap", "/card/replace",
+}
+
+
+class RobotTestCall(BaseModel):
+    method: str                       # "GET" | "POST"
+    path:   str                       # e.g. "/arm/state" (relative to /api/v1)
+    body:   Optional[dict] = None
+    timeout: Optional[float] = None
+
+
+@app.post("/api/robot/test-call")
+def robot_test_call(req: RobotTestCall):
+    """Proxy a single Robot API call for the Robot Setup 'API Tester'.
+
+    Forwards to the configured robot at http://{robot_ip}:{robot_port}/api/v1{path}
+    and returns the HTTP status + parsed response body.  Runs server-side so the
+    browser never needs the robot's address (and CORS is a non-issue).
+    """
+    import requests as _rq
+    import time as _t
+    method = (req.method or "GET").upper()
+    path   = req.path if req.path.startswith("/") else "/" + req.path
+    if path not in _ROBOT_TEST_PATHS:
+        raise HTTPException(400, f"Unknown robot endpoint: {path!r}")
+    if method not in ("GET", "POST"):
+        raise HTTPException(400, f"Unsupported method: {method!r}")
+
+    url     = f"http://{settings.robot_ip}:{settings.robot_port}/api/v1{path}"
+    timeout = req.timeout or (30.0 if path == "/capture" else 12.0)
+    t0 = _t.time()
+    try:
+        if method == "GET":
+            resp = _rq.get(url, timeout=timeout)
+        else:
+            resp = _rq.post(url, json=(req.body or {}), timeout=timeout)
+    except Exception as e:
+        return {"ok": False, "url": url, "method": method,
+                "error": f"{type(e).__name__}: {e}",
+                "elapsed_ms": round((_t.time() - t0) * 1000, 1)}
+    elapsed = round((_t.time() - t0) * 1000, 1)
+    try:
+        body = resp.json()
+    except Exception:
+        body = {"_raw_text": resp.text[:5000]}
+    return {"ok": resp.ok, "url": url, "method": method,
+            "status_code": resp.status_code, "elapsed_ms": elapsed,
+            "response_body": body}
 
 
 # ── TC Plan (Claude-powered, cached) ─────────────────────────────────────────
@@ -554,6 +609,16 @@ YOUR TASKS:
    - EXCLUDE: amount / balance (card balance is managed by the system automatically).
    - EXCLUDE: anything generated at runtime (card numbers created by the reader, transaction IDs, etc.).
 8. Set credential_scenario: "valid" or "invalid" based on whether the test uses correct credentials.
+9. VALUE CHECKS — when a verify step asserts a SPECIFIC on-screen value (amount, count,
+   order/confirmation id, status text), it MUST include "expected_value" (the exact string,
+   e.g. "$856.67") AND "value_element_id" — the id of the element on "expected_screen" that
+   DISPLAYS that value, chosen from that screen's app-map elements by matching the field the step
+   refers to (e.g. an order total → the element whose label/note identifies it as the total).
+   Only set "value_element_id" when such an element exists for that screen; otherwise omit it
+   (validation falls back to vision). Example:
+   {{"action": "verify", "channel": "validation", "expected_screen": "order_result",
+     "description": "Order result shows total of $856.67", "expected_value": "$856.67",
+     "value_element_id": "order_total"}}
 
 Return ONLY valid JSON — no markdown fences, no extra text:
 {{
@@ -826,28 +891,53 @@ def get_explore_status(explore_id: str):
 
 @app.post("/api/reset", status_code=200)
 def reset_all(db: Session = Depends(get_db)):
-    """Delete all runs, results, test cases, app maps, robot events — keep kiosk config."""
+    """Clear test-execution artifacts only.
+
+    Deletes: test run details (runs, robot events, defects), screenshots taken during
+    test execution, results JSON, and generated test plans.
+    Preserves: app exploration output (app map + explore/walkthrough/annotated
+    screenshots), imported test cases, kiosk/global configuration, and robot setup.
+    (App Explorer has its own separate "clear" action.)
+    """
     from sqlalchemy import text
-    # Use raw SQL for reliable deletes (ORM bulk-delete skips cascade logic)
+    # Test run details + results (raw SQL for reliable deletes; children before parents).
+    # Intentionally NOT touched: test_cases, app_maps, kiosk_configs, device_configs.
     db.execute(text("DELETE FROM test_results"))
+    db.execute(text("DELETE FROM defects"))
     db.execute(text("DELETE FROM test_runs"))
-    db.execute(text("DELETE FROM test_cases"))
-    db.execute(text("DELETE FROM app_maps"))
     db.execute(text("DELETE FROM robot_events"))
     db.commit()
-    # Remove the app_map.json file
-    p = Path(settings.app_map_path)
-    if p.exists():
-        p.unlink()
-    # Clear per-run screenshot folders + reset the run counter so numbering restarts at 1.
+
     import shutil
+    # Execution screenshots only — leave exploration output untouched.  The app map
+    # references screenshots/explore_*.png and walkthrough_*.png, and annotated_*.png are
+    # the labelled exploration frames, so those (and the annotated/ folder) are preserved.
+    _EXEC_PREFIXES = ("after_", "tap_", "verify_", "tier3_", "click_")
     base = _base_screens_dir()
     if base.exists():
         for child in base.iterdir():
-            if child.is_dir() and child.name != "annotated":
-                shutil.rmtree(child, ignore_errors=True)
-    (Path(settings.results_dir) / ".run_seq").unlink(missing_ok=True)
-    return {"status": "ok", "message": "All data cleared. Kiosk configuration preserved."}
+            if child.is_dir():
+                if child.name.startswith("run-") or child.name == "results":
+                    shutil.rmtree(child, ignore_errors=True)
+            elif child.name.startswith(_EXEC_PREFIXES):
+                child.unlink(missing_ok=True)
+
+    # Results JSON (suite_*.json) + run counter → numbering restarts at 1.
+    results_dir = Path(settings.results_dir)
+    if results_dir.exists():
+        for f in results_dir.glob("*.json"):
+            f.unlink(missing_ok=True)
+    (results_dir / ".run_seq").unlink(missing_ok=True)
+
+    # Generated test plans (test_plans/<test_id>_<hash>.json).
+    plans_dir = Path(__file__).resolve().parent.parent / "test_plans"
+    if plans_dir.exists():
+        for f in plans_dir.glob("*.json"):
+            f.unlink(missing_ok=True)
+
+    return {"status": "ok",
+            "message": ("Cleared test runs, execution screenshots, results, and generated plans. "
+                        "App exploration, test cases, and configuration preserved.")}
 
 
 @app.get("/api/runs/{run_id}/screenshots")

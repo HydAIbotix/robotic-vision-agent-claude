@@ -46,6 +46,7 @@ def run_validate_pipeline(
     app_map: dict,
     backend: str = "",
     save_path: str = "",
+    value_element_id: str = "",
 ) -> dict:
     """
     Run the validation pipeline and return a structured result dict.
@@ -139,23 +140,45 @@ def run_validate_pipeline(
     text_match: bool | None = None
 
     if expected_text:
-        text_match = _check_text(
-            expected_text, backend, image_path, step_description,
-            app_map, expected_screen,
-        )
-        if text_match is False:
-            observed = _claude_extract_value(image_path, expected_text, step_description)
-            obs = f"Value mismatch: expected '{expected_text}' on '{actual_screen or expected_screen}'"
-            obs += f", but the screen shows '{observed}'" if observed else ", but it is not present"
-            return {
-                "success":       False,
-                "screen_match":  screen_match,
-                "text_match":    False,
-                "method":        "text_validation",
-                "actual_screen": actual_screen,
-                "observation":   obs,
-                "note":          "",
-            }
+        # ── Anchored read (preferred) ─────────────────────────────────────────
+        # When the step names the specific element that holds the value, read THAT
+        # element's live text — deterministic, field-exact, zero LLM.  Resolves the
+        # "which of several amounts?" ambiguity and fixes both the verdict (no longer
+        # passes on the wrong field) and the mismatch message.
+        anchored = _anchored_read(value_element_id, expected_screen, app_map, backend, image_path)
+        if anchored is not None:
+            if _value_matches(expected_text, anchored):
+                text_match = True
+            else:
+                return {
+                    "success":       False,
+                    "screen_match":  screen_match,
+                    "text_match":    False,
+                    "method":        "text_validation_anchored",
+                    "actual_screen": actual_screen,
+                    "observation":   (f"Value mismatch on '{value_element_id}': expected "
+                                      f"'{expected_text}', but the field shows '{anchored}'"),
+                    "note":          "",
+                }
+        else:
+            # ── Unanchored fallback: existing local-first path (DOM/OCR → Claude) ──
+            text_match = _check_text(
+                expected_text, backend, image_path, step_description,
+                app_map, expected_screen,
+            )
+            if text_match is False:
+                observed = _claude_extract_value(image_path, expected_text, step_description)
+                obs = f"Value mismatch: expected '{expected_text}' on '{actual_screen or expected_screen}'"
+                obs += f", but the screen shows '{observed}'" if observed else ", but it is not present"
+                return {
+                    "success":       False,
+                    "screen_match":  screen_match,
+                    "text_match":    False,
+                    "method":        "text_validation",
+                    "actual_screen": actual_screen,
+                    "observation":   obs,
+                    "note":          "",
+                }
 
     # ── Node 3: Claude Vision Fallback ────────────────────────────────────────
     # Only invoked when: no expected_screen check was done, phash was inconclusive,
@@ -265,6 +288,90 @@ def _match_by_phash(image_path: str, app_map: dict, expected_screen: str) -> dic
 
 
 # ── Node 2 helpers ────────────────────────────────────────────────────────────
+
+# ── Anchored value read (element-specific, deterministic, zero-LLM) ───────────
+
+def _find_element(app_map: dict, screen_id: str, element_id: str) -> dict | None:
+    """Return the app_map element dict for element_id on screen_id, or None."""
+    if not element_id or not screen_id:
+        return None
+    screen = (app_map.get("screens") or {}).get(screen_id) or {}
+    for el in screen.get("elements") or []:
+        if el.get("id") == element_id:
+            return el
+    return None
+
+
+def _value_matches(expected: str, observed: str) -> bool:
+    """Loose equality for on-screen values: ignore whitespace/commas/case and allow the
+    expected token to be contained in a longer field text (e.g. 'Total: $856.67')."""
+    def norm(s: str) -> str:
+        return re.sub(r"[\s,]", "", s or "").lower()
+    e, o = norm(expected), norm(observed)
+    if not e or not o:
+        return False
+    return e in o or o in e
+
+
+def _ocr_element_text(image_path: str, el: dict) -> str | None:
+    """OCR the element's bbox (small padding) from the camera frame. Returns the text,
+    or None when pytesseract is unavailable or the image can't be read."""
+    try:
+        from PIL import Image
+        import pytesseract
+    except ImportError:
+        return None
+    from pathlib import Path
+    if not image_path or not Path(image_path).exists():
+        return None
+    try:
+        img = Image.open(image_path)
+    except Exception:
+        return None
+    bbox = el.get("bbox")
+    if bbox and len(bbox) == 4:
+        x1, y1, x2, y2 = bbox
+        crop = img.crop((max(0, int(x1) - 8), max(0, int(y1) - 6),
+                         min(img.width, int(x2) + 8), min(img.height, int(y2) + 6)))
+    else:
+        cx, cy = el.get("center") or [0, 0]
+        crop = img.crop((max(0, int(cx) - 160), max(0, int(cy) - 30),
+                         min(img.width, int(cx) + 160), min(img.height, int(cy) + 30)))
+    try:
+        txt = pytesseract.image_to_string(crop, config="--psm 7").strip()
+        return txt or None
+    except Exception:
+        return None
+
+
+def _anchored_read(value_element_id: str, expected_screen: str, app_map: dict,
+                   backend: str, image_path: str) -> str | None:
+    """Read the live text of the specific app_map element the step asserts a value for.
+
+    Returns the observed string, or None when there is no usable anchor (unknown
+    element, no test id / center for playwright, OCR unavailable) — in which case the
+    caller falls back to the generic local-first text check.
+    """
+    el = _find_element(app_map, expected_screen, value_element_id)
+    if not el:
+        return None
+    if backend == "playwright":
+        testid = el.get("testid")
+        if testid:
+            txt = robot.query_element_text(f'[data-testid="{testid}"]')
+            if txt and txt.strip():
+                return txt.strip()
+        center = el.get("center")
+        if center and len(center) == 2:
+            txt = robot.text_at_point(int(center[0]), int(center[1]))
+            if txt and txt.strip():
+                return txt.strip()
+        return None
+    if backend == "demo":
+        return None   # demo has no live screen — use the existing always-true path
+    # real robot — OCR the element's region from the camera frame
+    return _ocr_element_text(image_path, el)
+
 
 def _check_text(
     expected_text: str,

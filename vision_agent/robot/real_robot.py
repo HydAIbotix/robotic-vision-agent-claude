@@ -513,7 +513,7 @@ def health_check(do_capture: bool = True) -> dict:
     Checks the three things that must be healthy before a real-robot test run, each via the
     Robot REST API:
       • robot  — GET /arm/state   : the arm server is reachable and responsive (not error)
-      • kiosk  — GET /base/state  : the mobile base is idle/positioned at a kiosk
+      • base   — GET /base/state  : the AGV base is idle/positioned at a kiosk
       • camera — POST /capture    : a rectified screen frame is returned (kiosk localized).
                  This also runs calibration, measuring the real camera resolution so the first
                  tap uses measured dimensions instead of the config fallback.
@@ -541,7 +541,7 @@ def health_check(do_capture: bool = True) -> dict:
     except Exception as e:
         components["robot"] = comp("error", f"Robot unreachable at {url} — {e}")
 
-    # 2 ─ Kiosk: base positioned / idle
+    # 2 ─ AGV base positioned / idle
     try:
         base = _get("/base/state")
         bst  = base.get("state", "unknown")
@@ -550,14 +550,14 @@ def health_check(do_capture: bool = True) -> dict:
         except Exception:
             pose = {}
         ok = bst == "idle"
-        components["kiosk"] = comp(
+        components["base"] = comp(
             "ok" if ok else "error",
-            f"Base idle at kiosk '{_current_kiosk_id or settings.default_kiosk_id}'"
-            if ok else f"Base is '{bst}', not ready",
+            f"AGV base idle at kiosk '{_current_kiosk_id or settings.default_kiosk_id}'"
+            if ok else f"AGV base is '{bst}', not ready",
             base_state=bst, base_pose=pose,
         )
     except Exception as e:
-        components["kiosk"] = comp("error", f"Base state unavailable — {e}")
+        components["base"] = comp("error", f"AGV base state unavailable — {e}")
 
     # 3 ─ Camera capture (also calibrates)
     if do_capture:

@@ -104,6 +104,9 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             # (_TC_PLAN_PROMPT) emits "expected_value".  Reading only one silently skipped the
             # content check (e.g. an order total), letting wrong-amount tests pass.
             expected_text = step.get("expected_text") or step.get("expected_value")
+            # Optional anchor: the specific app_map element that holds the asserted value.
+            # When present, validation reads THAT element's live text (field-exact, no LLM).
+            value_element_id = step.get("value_element_id", "")
             desc          = step.get("description", "")
             if not expected and not expected_text:
                 # Nothing to verify — skip with a warning.
@@ -132,6 +135,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 app_map=app_map or {},
                 backend=settings.robot_backend,
                 save_path=verify_save,
+                value_element_id=value_element_id,
             )
 
             _retry = 0
@@ -152,6 +156,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                     app_map=app_map or {},
                     backend=settings.robot_backend,
                     save_path=verify_save,
+                    value_element_id=value_element_id,
                 )
 
             success = vr["success"]
