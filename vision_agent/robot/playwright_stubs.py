@@ -555,16 +555,71 @@ def update_explorer_progress(explored: int, total: int, current_action: str = ""
 
 
 def get_aria_snapshot() -> dict:
-    """Return the full ARIA accessibility tree of the current page.
+    """Return the ARIA accessibility tree of the current page as a nested dict:
+    {role, name, value, checked, expanded, disabled, children:[...]}.
 
-    Replaces Claude vision for element discovery in playwright mode.
-    Zero LLM calls — the browser parses and returns the tree directly.
-    Returns {} on error (caller should fall back to Claude vision).
+    Playwright removed page.accessibility.snapshot() (gone by 1.60), so we read the
+    same Chromium-computed accessibility tree over CDP (Accessibility.getFullAXTree)
+    and rebuild it in that shape.  Ignored (layout-only) nodes are flattened away —
+    equivalent to the old interesting_only=True.  Zero LLM calls.
+    Returns {} on error (caller falls back to Claude vision).
     """
     page = _ensure_page()
+
+    def _tri(v):
+        if v in (True, "true"):   return True
+        if v in (False, "false"): return False
+        return None   # 'mixed' / absent
+
     try:
-        snapshot = page.accessibility.snapshot(interesting_only=True)
-        return snapshot or {}
+        cdp = page.context.new_cdp_session(page)
+        try:
+            resp = cdp.send("Accessibility.getFullAXTree")
+        finally:
+            try:
+                cdp.detach()
+            except Exception:
+                pass
+
+        nodes = resp.get("nodes") or []
+        if not nodes:
+            return {}
+        by_id = {n["nodeId"]: n for n in nodes}
+
+        def _prop(n: dict, key: str):
+            for pr in n.get("properties") or []:
+                if pr.get("name") == key:
+                    return (pr.get("value") or {}).get("value")
+            return None
+
+        def _build(node_id: str, depth: int = 0, is_root: bool = False) -> list:
+            n = by_id.get(node_id)
+            if not n or depth > 60:
+                return []
+            children: list = []
+            for cid in n.get("childIds") or []:
+                children.extend(_build(cid, depth + 1))
+            role = (n.get("role") or {}).get("value", "") or ""
+            name = ((n.get("name") or {}).get("value", "") or "").strip()
+            # Flatten layout-only (ignored) and unnamed wrapper nodes — promote their
+            # children.  Keeps the tree shallow and focused on named/interactive nodes,
+            # mirroring the old interesting_only=True.  The consumer already requires a
+            # name to consider a node, so nothing usable is dropped.
+            if not is_root and (n.get("ignored") or not name):
+                return children
+            val = (n.get("value") or {}).get("value")
+            return [{
+                "role":     role,
+                "name":     name,
+                "value":    "" if val is None else str(val),
+                "checked":  _tri(_prop(n, "checked")),
+                "expanded": _tri(_prop(n, "expanded")),
+                "disabled": _tri(_prop(n, "disabled")) is True,
+                "children": children,
+            }]
+
+        roots = _build(nodes[0]["nodeId"], is_root=True)
+        return roots[0] if roots else {}
     except Exception as e:
         print(f"  [PLAYWRIGHT] get_aria_snapshot error: {e}")
         return {}

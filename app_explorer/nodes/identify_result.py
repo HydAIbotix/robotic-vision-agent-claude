@@ -9,6 +9,7 @@ from vision_agent import robot
 from vision_agent.storage import get_storage
 from vision_agent.llm import get_explorer_llm, invoke_json
 from vision_agent.screen_cache import compute_hash, lookup_screen
+from vision_agent.config import settings
 from app_explorer.state import ExplorerState
 from app_explorer.prompts import IDENTIFY_RESULT_SCREEN
 
@@ -57,6 +58,13 @@ def identify_result(state: ExplorerState) -> dict:
     image_bytes = get_storage().load(state["current_image_path"])
     app_map     = state["app_map"]
 
+    # ARIA mode identifies NEW screens from the DOM id (0 vision calls); Claude-vision mode
+    # keeps its original vision-based identification.  Gate the new-screen DOM path on this so
+    # the Claude-vision explorer is byte-for-byte unchanged.  (The known-screen DOM fast path
+    # below is pre-existing and shared by both modes.)
+    _mode     = state.get("exploration_mode") or settings.exploration_mode
+    aria_mode = (_mode == "playwright_aria" and settings.robot_backend == "playwright")
+
     # ── Primary: DOM-based screen detection (SPA state navigation) ───────────
     # SPA apps share the same URL across views — perceptual hashes collide between
     # screens that have a similar layout.  get_dom_screen_id() reads a stable
@@ -89,9 +97,36 @@ def identify_result(state: ExplorerState) -> dict:
                 "last_result_screen_id": result_screen_id,
                 "approach_paths":        approach_paths,
             }
-        # dom_id not yet mapped → new screen.
-        # Skip perceptual-hash lookup (it will collide with layout-sharing siblings)
-        # and fall straight through to Claude vision with dom_id as the suggested id.
+        # dom_id present but not yet mapped → genuinely NEW screen.
+        #
+        # ARIA mode only: identify it purely from the DOM id and skip the Claude vision call
+        # (the explore node fills in description + elements next) — this is what makes
+        # playwright ARIA exploration 0 vision calls.  In Claude-vision mode we deliberately
+        # fall through to the vision identification below, leaving that path unchanged.
+        if aria_mode:
+            result_screen_id = dom_id
+            print(f"\n  [RESULT]  {action['screen_id']}::{action['action_key']}  ->  '{result_screen_id}'  (DOM-new: {dom_id}, 0 LLM calls)")
+            new_map = _record_transition(app_map, action, result_screen_id)
+            if result_screen_id != action["screen_id"]:
+                new_map = _record_element_transition(new_map, action, result_screen_id)
+            if result_screen_id not in new_map["screens"]:
+                new_map["screens"][result_screen_id] = {
+                    "screen_id":   result_screen_id,
+                    "description": dom_id.replace("_", " ").title(),  # placeholder; explore node overwrites
+                    "elements":    [],
+                    "transitions": {},
+                }
+            approach_paths = dict(state.get("approach_paths") or {})
+            if result_screen_id not in approach_paths:
+                approach_paths[result_screen_id] = approach_paths.get(action["screen_id"], []) + [action]
+            return {
+                "app_map":               new_map,
+                "current_screen_id":     result_screen_id,
+                "last_result_is_new":    True,
+                "last_result_screen_id": result_screen_id,
+                "approach_paths":        approach_paths,
+            }
+        # Claude-vision mode: fall through to the Claude vision identification below (unchanged).
 
     else:
         # ── Secondary: perceptual-hash lookup (no DOM signal available) ───────

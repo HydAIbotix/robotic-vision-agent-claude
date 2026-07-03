@@ -26,6 +26,7 @@ results/
 *.log
 *.db
 test_plans/
+app_map.json
 
 # ── Test artefacts ────────────────────────────────────────────────────────────
 .pytest_cache/
