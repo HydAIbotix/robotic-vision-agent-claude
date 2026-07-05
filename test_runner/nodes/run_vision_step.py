@@ -35,15 +35,24 @@ def _resolve_credentials(value: str, credential_scenario: str, credentials: dict
 
 
 def _load_device_map() -> dict[str, dict]:
-    """Load device positions from DB keyed by alias (e.g. 'TVM'). Returns {} on error."""
+    """Load devices from DB keyed by alias (e.g. 'TVM').  Each entry carries the robot
+    position plus the linked Kiosk-ID and that kiosk's URL (so a playwright run can switch
+    the browser to the right app when the robot moves between devices).  Returns {} on error."""
     try:
         from api.database import SessionLocal
         from api import models as _models
         db = SessionLocal()
         try:
-            devices = db.query(_models.DeviceConfig).all()
-            return {d.alias: {"pos_x": d.pos_x, "pos_y": d.pos_y, "pos_theta": d.pos_theta}
-                    for d in devices}
+            kiosks = {k.kiosk_id: k for k in db.query(_models.KioskConfig).all()}
+            out: dict[str, dict] = {}
+            for d in db.query(_models.DeviceConfig).all():
+                kc = kiosks.get(d.kiosk_id) if d.kiosk_id else None
+                out[d.alias] = {
+                    "pos_x": d.pos_x, "pos_y": d.pos_y, "pos_theta": d.pos_theta,
+                    "kiosk_id": d.kiosk_id or "",
+                    "url": (kc.url if kc else "") or "",
+                }
+            return out
         finally:
             db.close()
     except Exception:
@@ -87,6 +96,19 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 print(f"    [ROBOT] Moving to device '{step_dev}' @ ({dev_cfg['pos_x']}, {dev_cfg['pos_y']}, {dev_cfg['pos_theta']}°)")
                 robot.move_to_position(dev_cfg["pos_x"], dev_cfg["pos_y"], dev_cfg["pos_theta"])
                 time.sleep(0.8)  # allow robot/camera to settle
+                # Playwright: switch the browser to this device's app URL so the correct app's
+                # screens are shown.  (A physical robot just faces the device's own screen, so
+                # this is a no-op there.)  URL blank → single-app run, nothing to switch.
+                dev_url = dev_cfg.get("url") or ""
+                if settings.robot_backend == "playwright" and dev_url:
+                    svc = (getattr(settings, "card_service_url", "") or "").strip()
+                    if svc:
+                        dev_url += ("&" if "?" in dev_url else "?") + f"cardServiceUrl={svc}"
+                    try:
+                        robot.navigate_to_url(dev_url)
+                        time.sleep(0.5)
+                    except Exception as _e:
+                        print(f"    [PLAYWRIGHT] navigate to device url failed: {_e}")
             else:
                 print(f"    [ROBOT] Device '{step_dev}' not in device map — skipping move")
             current_dev = step_dev

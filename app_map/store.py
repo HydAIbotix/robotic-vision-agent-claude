@@ -48,6 +48,51 @@ def load(path: str) -> AppMap:
     return json.loads(Path(path).read_text())
 
 
+def merge_explored_app(existing: Optional[dict], new_map: dict, app_id: str,
+                       app_label: str = "") -> dict:
+    """Merge a freshly-explored app's screens into the combined multi-app map.
+
+    Each screen is tagged with its ``app_id`` and screens belonging to OTHER apps are
+    preserved, so exploring a second kiosk app never wipes the first.  Re-exploring the
+    same ``app_id`` replaces only that app's screens.  A top-level ``apps`` registry
+    records each explored app (label, entry screen, screen count).
+
+    When ``app_id`` is blank (legacy single-app), the new map replaces the old one —
+    identical to the previous behaviour, so nothing changes for single-app users.
+    """
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+    new_screens = dict(new_map.get("screens") or {})
+
+    if not app_id:
+        return {**new_map, "explored_at": stamp}
+
+    base    = dict(existing or {})
+    screens = dict(base.get("screens") or {})
+    apps    = dict(base.get("apps") or {})
+
+    # Keep other apps' screens; drop this app's previous screens (fresh re-exploration).
+    screens = {sid: sc for sid, sc in screens.items() if (sc.get("app_id") or "") != app_id}
+    for sid, sc in new_screens.items():
+        if sid in screens:
+            print(f"  [APP MAP] ⚠ screen id '{sid}' already exists in another app — overwriting")
+        screens[sid] = {**sc, "app_id": app_id}
+
+    apps[app_id] = {
+        "app_id":       app_id,
+        "label":        app_label or new_map.get("app_name") or app_id,
+        "entry_screen": new_map.get("entry_screen", ""),
+        "explored_at":  stamp,
+        "screen_count": len(new_screens),
+    }
+    return {
+        "app_name":     base.get("app_name") or "Multi-App Environment",
+        "explored_at":  stamp,
+        "entry_screen": base.get("entry_screen") or new_map.get("entry_screen", ""),
+        "screens":      screens,
+        "apps":         apps,
+    }
+
+
 def prompt_summary(app_map: Optional[AppMap]) -> str:
     """Compact text representation for including in LLM prompts."""
     if not app_map:

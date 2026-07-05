@@ -23,6 +23,18 @@ _progress_injected: bool = False  # True once the HUD overlay div has been creat
 _dom_to_screen_id: dict | None = None  # reverse lookup: dom_id → app_map screen_id
 
 
+def _kiosk_url() -> str:
+    """The kiosk URL to open, with the shared card service appended when configured so the
+    kiosk apps share balances across machines. No-op (bare kiosk_url) when unset."""
+    from vision_agent.config import settings
+    url = settings.kiosk_url
+    svc = (getattr(settings, "card_service_url", "") or "").strip()
+    if svc:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}cardServiceUrl={svc}"
+    return url
+
+
 def _load_dom_to_screen_cache() -> dict:
     """Build and cache a reverse lookup: normalized dom_id → app_map screen_id.
 
@@ -92,9 +104,9 @@ def _ensure_page():
         has_touch=False,           # prevent touch-mode input focus from triggering OS keyboard
         device_scale_factor=1.0,   # screenshot pixels == viewport pixels, so coords are exact
     )
-    _page.goto(settings.kiosk_url)
+    _page.goto(_kiosk_url())
     _page.wait_for_load_state("networkidle")
-    print(f"\n  [PLAYWRIGHT] Browser opened  →  {settings.kiosk_url}")
+    print(f"\n  [PLAYWRIGHT] Browser opened  →  {_kiosk_url()}")
     atexit.register(stop)
     return _page
 
@@ -303,12 +315,28 @@ def reset_to_entry() -> None:
     """
     global _progress_injected
     if _page is not None:
-        from vision_agent.config import settings
         _page.evaluate("() => { localStorage.clear(); sessionStorage.clear(); }")
-        _page.goto(settings.kiosk_url)
+        _page.goto(_kiosk_url())
         _page.wait_for_load_state("networkidle")
         _progress_injected = False  # page reload wiped the HUD div — re-inject on next update
-        print(f"  [PLAYWRIGHT] Reset to {settings.kiosk_url}")
+        print(f"  [PLAYWRIGHT] Reset to {_kiosk_url()}")
+
+
+def navigate_to_url(url: str) -> dict:
+    """Navigate the browser to a specific URL — used to switch between kiosk apps when the
+    robot moves between devices on a multi-device run.  Unlike reset_to_entry it does NOT
+    clear storage, so the shared card cache / login session survive the switch."""
+    global _progress_injected
+    page = _ensure_page()
+    try:
+        page.goto(url)
+        page.wait_for_load_state("networkidle")
+        _progress_injected = False
+        print(f"  [PLAYWRIGHT] Navigated to {url}")
+        return {"success": True, "url": url}
+    except Exception as e:
+        print(f"  [PLAYWRIGHT] navigate_to_url error: {e}")
+        return {"success": False, "error": str(e)}
 
 
 def scroll_page(x: int, y: int, delta_y: int) -> dict:

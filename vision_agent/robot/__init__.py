@@ -29,7 +29,7 @@ _PRIMARY = {
 _STUBS = "vision_agent.robot.stubs"
 
 # Lifecycle hooks that not every backend implements — resolve to a no-op rather than error.
-_OPTIONAL_NOOPS = frozenset({"stop", "reset_to_entry", "update_explorer_progress"})
+_OPTIONAL_NOOPS = frozenset({"stop", "reset_to_entry", "update_explorer_progress", "navigate_to_url"})
 
 
 def active_backend() -> str:

@@ -421,11 +421,24 @@ def _commerce_walkthrough(app_map: dict) -> dict:
 result["app_map"] = _commerce_walkthrough(result["app_map"])
 
 # ── Write app_map.json ─────────────────────────────────────────────────────────
+# Multi-app: when EXPLORE_APP_ID is set, MERGE this app's screens (tagged by app id)
+# into the existing map instead of overwriting — so exploring a second kiosk app does
+# not wipe the first.  Blank app id → legacy single-app overwrite (unchanged).
+import os as _os
+from app_map import store as _store
+_app_id = _os.environ.get("EXPLORE_APP_ID", "").strip()
+_existing = None
+if _app_id and Path(OUTPUT_PATH).exists():
+    try:
+        _existing = json.loads(Path(OUTPUT_PATH).read_text(encoding="utf-8"))
+    except Exception:
+        _existing = None
+result["app_map"] = _store.merge_explored_app(_existing, result["app_map"], _app_id, app_label=_app_id)
 Path(OUTPUT_PATH).write_text(
     json.dumps(result["app_map"], indent=2, default=str),
     encoding="utf-8",
 )
-print(f"\n  App map written to: {OUTPUT_PATH}")
+print(f"\n  App map written to: {OUTPUT_PATH}" + (f"  (merged as app '{_app_id}')" if _app_id else ""))
 print(f"  Run log written to: {_log_path}")
 
 # ── Final summary ──────────────────────────────────────────────────────────────

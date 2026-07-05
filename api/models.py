@@ -107,6 +107,7 @@ class DeviceConfig(Base):
     __tablename__ = "device_configs"
     id          = Column(Integer, primary_key=True)
     alias       = Column(String(50), unique=True, nullable=False)  # e.g. "TVM"
+    kiosk_id    = Column(String(50))                               # linked Kiosk-ID (e.g. "KIOSK-ID-1")
     description = Column(String(200))                               # e.g. "Ticket Vending Machine"
     pos_x       = Column(Float, default=0.0)   # metres from robot home
     pos_y       = Column(Float, default=0.0)

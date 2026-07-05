@@ -284,7 +284,7 @@ def upload_test_cases(
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 def _device_summary(d: models.DeviceConfig) -> dict:
-    return {"alias": d.alias, "description": d.description or "",
+    return {"alias": d.alias, "kiosk_id": d.kiosk_id or "", "description": d.description or "",
             "pos_x": d.pos_x, "pos_y": d.pos_y, "pos_theta": d.pos_theta}
 
 
@@ -298,11 +298,29 @@ def get_config(db: Session = Depends(get_db)):
         "robot_port":       settings.robot_port,
         "robot_id":         settings.robot_id,
         "exploration_mode": _runtime_exploration_mode,
+        "card_service_url": settings.card_service_url,
         "viewport":         {"width": settings.viewport_width, "height": settings.viewport_height},
         "camera":           {"width": settings.robot_camera_width, "height": settings.robot_camera_height},
         "kiosks":           [_kiosk_summary(k) for k in kiosks],
         "devices":          [_device_summary(d) for d in devices],
     }
+
+
+class CardServiceRequest(BaseModel):
+    card_service_url: str = ""
+
+
+@app.patch("/api/config/card-service")
+def set_card_service(req: CardServiceRequest):
+    """Set the shared card service URL (blank = kiosk apps use per-browser localStorage).
+
+    Applied live (playwright appends ?cardServiceUrl=… to the kiosk URL on the next
+    navigation) and persisted to .env so it survives restarts.
+    """
+    url = (req.card_service_url or "").strip().rstrip("/")
+    settings.card_service_url = url
+    _persist_env({"CARD_SERVICE_URL": url})
+    return {"status": "ok", "card_service_url": url}
 
 
 # ── Robot connection config (backend / ip / port) — settable from the UI ──────────
@@ -379,6 +397,7 @@ def set_robot_conn(req: RobotConnRequest):
 
 class DeviceConfigRequest(BaseModel):
     alias:       str
+    kiosk_id:    str = ""
     description: str = ""
     pos_x:       float = 0.0
     pos_y:       float = 0.0
@@ -872,7 +891,7 @@ def start_explore(req: ExploreRequest):
     _explore_jobs[explore_id] = {"status": "running", "message": "Exploration in progress…"}
     t = threading.Thread(
         target=_run_explorer,
-        args=(explore_id, req.kiosk_url),
+        args=(explore_id, req.kiosk_url, req.kiosk_id),
         daemon=True,
     )
     t.start()
@@ -1028,10 +1047,12 @@ def get_app_map():
         "exists":       True,
         "explored_at":  explored_at,
         "entry_screen": m.get("entry_screen"),
+        "apps":         m.get("apps") or {},   # {app_id: {label, entry_screen, screen_count, …}}
         "screens":      {
             sid: {
                 "description": sc.get("description", ""),
                 "dom_id":      sc.get("dom_id", ""),
+                "app_id":      sc.get("app_id", ""),
                 "element_count": len(sc.get("elements") or []),
                 "elements":    [
                     {
@@ -1259,7 +1280,7 @@ def _run_defect_agent(run_id: str, kiosk_id: str, failed_results: list):
         _broadcaster.unregister(run_id)
 
 
-def _run_explorer(explore_id: str, kiosk_url: str):
+def _run_explorer(explore_id: str, kiosk_url: str, kiosk_id: str = ""):
     """Background thread: run the app explorer and record success/failure."""
     import os
     import subprocess
@@ -1267,6 +1288,10 @@ def _run_explorer(explore_id: str, kiosk_url: str):
         env = os.environ.copy()
         # Pass the runtime override so the subprocess picks it up via pydantic-settings
         env["EXPLORATION_MODE"] = _runtime_exploration_mode
+        if kiosk_url:
+            env["KIOSK_URL"] = kiosk_url          # explore the requested app's URL
+        if kiosk_id:
+            env["EXPLORE_APP_ID"] = kiosk_id      # tag + merge this app's screens (multi-app)
         result = subprocess.run(
             [sys.executable, "run_explorer.py"],
             stderr=subprocess.PIPE,

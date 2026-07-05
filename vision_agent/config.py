@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     # real        : physical robot arm hardware API
     robot_backend: str = "demo"
     kiosk_url: str = "http://localhost:5173"
+    # Optional shared card service URL. When set, it is appended to the kiosk URL
+    # (?cardServiceUrl=…) so the kiosk apps share smart-card balances/transactions
+    # across machines. Blank → apps use per-browser localStorage (single-machine default).
+    card_service_url: str = ""
 
     # Agent behaviour
     max_retries: int = 3
