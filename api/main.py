@@ -1010,6 +1010,28 @@ def delete_app_map():
         p.unlink()
 
 
+@app.delete("/api/app-map/{app_id}", status_code=204)
+def delete_app_map_app(app_id: str):
+    """Clear ONLY one app's screens from the combined map (per-app re-explore).
+
+    Other apps' screens are preserved. If this was the only app, the file is removed.
+    """
+    from app_map import store as app_map_store
+    p = Path(settings.app_map_path)
+    if not p.exists():
+        return
+    try:
+        existing = app_map_store.load(str(p))
+    except Exception:
+        p.unlink()
+        return
+    updated = app_map_store.remove_app(existing, app_id)
+    if updated is None:
+        p.unlink()
+    else:
+        p.write_text(json.dumps(updated, indent=2, default=str), encoding="utf-8")
+
+
 @app.get("/api/screenshots/annotated")
 def list_annotated_screenshots():
     """List annotated screenshots grouped by screen_id."""

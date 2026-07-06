@@ -200,6 +200,7 @@ def _dom_correct_elements(elements: list) -> list:
         return elements
 
     corrected = []
+    used: set[int] = set()   # DOM element indices already claimed (each maps to one Claude element)
     for el in elements:
         label = (el.get("label") or "").lower().strip()
         if not label:
@@ -208,13 +209,22 @@ def _dom_correct_elements(elements: list) -> list:
 
         cx, cy = el["center"][0], el["center"][1]
 
+        # Is Claude's estimate even on-screen? Vision occasionally returns coordinates on the
+        # wrong scale (e.g. 0-1000 instead of 0-1), landing far off-canvas. When the estimate is
+        # off-screen its distance to the real element is meaningless — so we must NOT reject a
+        # text match on distance. We snap by TEXT and use distance only to disambiguate multiple
+        # same-text matches when the estimate is plausible; otherwise we fall back to DOM order.
+        plausible = (0 <= cx <= _VIEWPORT_W * 1.1) and (0 <= cy <= _VIEWPORT_H * 1.1)
+
         # Find DOM elements whose text overlaps with the Claude label.
         # Ratio guard: when checking "label in dom_text", the label must cover
         # at least 70% of the DOM text to prevent short labels like "password"
         # from matching "Forgot password?" (ratio 8/16 = 0.50 → rejected).
         # Full strings ("Categories" / "Sign In") hit ratio 1.0 and pass.
         matches = []
-        for dom_el in dom_els:
+        for idx, dom_el in enumerate(dom_els):
+            if idx in used:
+                continue   # one DOM element maps to at most one Claude element
             dom_text = dom_el["text"].lower().strip()
             if not dom_text or len(dom_text) < 2:
                 continue
@@ -225,34 +235,43 @@ def _dom_correct_elements(elements: list) -> list:
                 continue
 
             dist = math.hypot(dom_el["cx"] - cx, dom_el["cy"] - cy)
-            if dist < 350:   # ignore distant matches — likely wrong element
-                # Weight: prefer type-matching elements (e.g. input→input, button→button)
-                el_type = el.get("type", "")
-                dom_tag = dom_el.get("tag", "")
-                type_match = (
-                    (el_type == "input"  and dom_tag == "input")  or
-                    (el_type == "button" and dom_tag == "button") or
-                    (el_type == "link"   and dom_tag in ("a", "button"))
-                )
-                matches.append((0 if type_match else 1, dist, dom_el))
+            # Prefer type-matching elements (input→input, button→button, link→a/button).
+            el_type = el.get("type", "")
+            dom_tag = dom_el.get("tag", "")
+            type_match = (
+                (el_type == "input"  and dom_tag == "input")  or
+                (el_type == "button" and dom_tag == "button") or
+                (el_type == "link"   and dom_tag in ("a", "button"))
+            )
+            matches.append((0 if type_match else 1, dist, idx, dom_el))
 
         if matches:
-            matches.sort(key=lambda x: (x[0], x[1]))   # type-match first, then distance
-            _, best_dist, best = matches[0]
+            # Rank type-match first. Among equal type-rank, prefer the closest to Claude's
+            # estimate when that estimate is on-screen; otherwise use DOM order (idx) so repeated
+            # labels/placeholders (e.g. two "e.g. 1234" inputs) map to distinct elements in order.
+            matches.sort(key=(lambda m: (m[0], m[1])) if plausible else (lambda m: (m[0], m[2])))
+            _, best_dist, best_idx, best = matches[0]
+            used.add(best_idx)
             el = dict(el)
-            # Always store the matched DOM testid (stable across runs, great for determinism)
+            # Store the matched DOM testid (stable across runs, great for determinism).
             if best.get("testid"):
                 el["testid"] = best["testid"]
-            if best_dist > 30:  # only correct coordinates when meaningfully off
-                print(
-                    f"  [DOM-FIX] '{el['id']}': ({cx},{cy}) → ({best['cx']},{best['cy']})"
-                    f"  Δ={best_dist:.0f}px  label='{label[:20]}' dom='{best['text'][:20]}'"
-                )
+            # The DOM centre is exact ground truth — snap to it. This fixes vision coordinates
+            # that were mis-scaled or misplaced, regardless of how far off Claude's estimate was.
+            if [best["cx"], best["cy"]] != [cx, cy]:
+                if not plausible or best_dist > 30:
+                    print(
+                        f"  [DOM-FIX] '{el['id']}': ({cx},{cy}) -> ({best['cx']},{best['cy']})"
+                        f"  d={best_dist:.0f}px  label='{label[:20]}' dom='{best['text'][:20]}'"
+                    )
                 new_cx, new_cy = best["cx"], best["cy"]
                 el["center"] = [new_cx, new_cy]
                 if el.get("bbox") and len(el["bbox"]) == 4:
                     bw = abs(el["bbox"][2] - el["bbox"][0])
                     bh = abs(el["bbox"][3] - el["bbox"][1])
+                    # A mis-scaled bbox is also garbage — rebuild a sane one around the centre.
+                    if not plausible:
+                        bw, bh = (min(bw, 220) or 120), (min(bh, 90) or 44)
                     el["bbox"] = [new_cx - bw // 2, new_cy - bh // 2,
                                   new_cx + bw // 2, new_cy + bh // 2]
 

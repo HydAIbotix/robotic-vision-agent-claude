@@ -93,6 +93,28 @@ def merge_explored_app(existing: Optional[dict], new_map: dict, app_id: str,
     }
 
 
+def remove_app(existing: Optional[dict], app_id: str) -> Optional[dict]:
+    """Remove one app's screens + its registry entry from the combined multi-app map.
+
+    Returns the updated map, or None when nothing remains (caller should delete the file).
+    A blank app_id, or an app that owns every screen, clears everything → returns None.
+    """
+    if not existing or not app_id:
+        return None
+    base    = dict(existing)
+    screens = {sid: sc for sid, sc in (base.get("screens") or {}).items()
+               if (sc.get("app_id") or "") != app_id}
+    apps    = {aid: a for aid, a in (base.get("apps") or {}).items() if aid != app_id}
+    if not screens:
+        return None
+    return {
+        **base,
+        "screens":     screens,
+        "apps":        apps,
+        "explored_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+
 def prompt_summary(app_map: Optional[AppMap]) -> str:
     """Compact text representation for including in LLM prompts."""
     if not app_map:

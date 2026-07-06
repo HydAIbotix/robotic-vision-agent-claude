@@ -420,6 +420,16 @@ def _commerce_walkthrough(app_map: dict) -> dict:
 
 result["app_map"] = _commerce_walkthrough(result["app_map"])
 
+# ── Correct the entry screen ───────────────────────────────────────────────────
+# The seed entry_screen ("signin") is a placeholder for login-first apps. When the app's real
+# entry screen is something else (e.g. a card station with no login), the placeholder is wrong
+# and confusing. Generically: if the seeded entry isn't an actual explored screen, use the FIRST
+# screen explored (dict insertion order = exploration order) — the true entry — for any app.
+_explored_screens = result["app_map"].get("screens") or {}
+if _explored_screens and result["app_map"].get("entry_screen") not in _explored_screens:
+    result["app_map"]["entry_screen"] = next(iter(_explored_screens))
+    print(f"  [APP MAP] entry_screen corrected to first explored screen: '{result['app_map']['entry_screen']}'")
+
 # ── Write app_map.json ─────────────────────────────────────────────────────────
 # Multi-app: when EXPLORE_APP_ID is set, MERGE this app's screens (tagged by app id)
 # into the existing map instead of overwriting — so exploring a second kiosk app does
