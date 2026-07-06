@@ -296,6 +296,10 @@ def get_config(db: Session = Depends(get_db)):
         "robot_backend":    settings.robot_backend,
         "robot_ip":         settings.robot_ip,
         "robot_port":       settings.robot_port,
+        "agv_url":          settings.agv_url,
+        "arm_url":          settings.arm_url,
+        "agv_base":         settings.agv_api_base(),
+        "arm_base":         settings.arm_api_base(),
         "robot_id":         settings.robot_id,
         "exploration_mode": _runtime_exploration_mode,
         "card_service_url": settings.card_service_url,
@@ -350,6 +354,8 @@ class RobotConnRequest(BaseModel):
     robot_backend: str            # "demo" | "playwright" | "real"
     robot_ip:      Optional[str] = None
     robot_port:    Optional[int] = None
+    agv_url:       Optional[str] = None   # mobile base (AGV) controller URL
+    arm_url:       Optional[str] = None   # arm/camera/card controller URL
 
 
 @app.patch("/api/config/robot")
@@ -376,6 +382,13 @@ def set_robot_conn(req: RobotConnRequest):
         if req.robot_port is not None:
             settings.robot_port = int(req.robot_port)
             env_updates["ROBOT_PORT"] = str(settings.robot_port)
+        # AGV base and arm may be on separate IPs — persist each (blank clears → falls back).
+        if req.agv_url is not None:
+            settings.agv_url = req.agv_url.strip().rstrip("/")
+            env_updates["AGV_URL"] = settings.agv_url
+        if req.arm_url is not None:
+            settings.arm_url = req.arm_url.strip().rstrip("/")
+            env_updates["ARM_URL"] = settings.arm_url
 
     try:
         _persist_env(env_updates)
@@ -389,7 +402,11 @@ def set_robot_conn(req: RobotConnRequest):
         "robot_backend":    settings.robot_backend,
         "robot_ip":         settings.robot_ip,
         "robot_port":       settings.robot_port,
-        "robot_url":        f"http://{settings.robot_ip}:{settings.robot_port}/api/v1",
+        "agv_url":          settings.agv_url,
+        "arm_url":          settings.arm_url,
+        "agv_base":         settings.agv_api_base(),
+        "arm_base":         settings.arm_api_base(),
+        "robot_url":        settings.arm_api_base(),
         "persisted":        persisted,
         "restart_required": backend_changed,
     }
@@ -476,11 +493,14 @@ def robot_health(capture: bool = True):
     Real backend → probes the physical robot's REST API (and calibrates via the camera check).
     Playwright / demo → reports a simulated-healthy status so the page is still meaningful.
     """
-    robot_url = f"http://{settings.robot_ip}:{settings.robot_port}/api/v1"
+    arm_url = settings.arm_api_base()
+    agv_url = settings.agv_api_base()
     if settings.robot_backend != "real":
         return {
             "backend":   settings.robot_backend,
-            "robot_url": robot_url,
+            "arm_url":   arm_url,
+            "agv_url":   agv_url,
+            "robot_url": arm_url,  # back-compat alias
             "robot_id":  settings.robot_id,
             "kiosk_id":  settings.default_kiosk_id,
             "simulated": True,
@@ -497,7 +517,8 @@ def robot_health(capture: bool = True):
         return health_check(do_capture=capture)
     except Exception as e:
         return {
-            "backend": "real", "robot_url": robot_url, "robot_id": settings.robot_id,
+            "backend": "real", "arm_url": arm_url, "agv_url": agv_url, "robot_url": arm_url,
+            "robot_id": settings.robot_id,
             "simulated": False, "healthy": False, "error": str(e),
             "components": {"robot": {"status": "error", "detail": str(e)}},
         }
@@ -517,15 +538,16 @@ class RobotTestCall(BaseModel):
     path:   str                       # e.g. "/arm/state" (relative to /api/v1)
     body:   Optional[dict] = None
     timeout: Optional[float] = None
+    target: Optional[str] = None      # "agv" | "arm" — which controller to hit (auto by path if unset)
 
 
 @app.post("/api/robot/test-call")
 def robot_test_call(req: RobotTestCall):
     """Proxy a single Robot API call for the Robot Setup 'API Tester'.
 
-    Forwards to the configured robot at http://{robot_ip}:{robot_port}/api/v1{path}
-    and returns the HTTP status + parsed response body.  Runs server-side so the
-    browser never needs the robot's address (and CORS is a non-issue).
+    Routes to the AGV controller for /base/* (or when target='agv'), otherwise to the arm
+    controller — each of which may be on a different IP. Returns the HTTP status + parsed
+    response body. Runs server-side so the browser never needs the robot's address.
     """
     import requests as _rq
     import time as _t
@@ -536,7 +558,11 @@ def robot_test_call(req: RobotTestCall):
     if method not in ("GET", "POST"):
         raise HTTPException(400, f"Unsupported method: {method!r}")
 
-    url     = f"http://{settings.robot_ip}:{settings.robot_port}/api/v1{path}"
+    # Which controller: explicit target wins; else /base/* → AGV, everything else → arm.
+    target = (req.target or "").strip().lower()
+    use_agv = target == "agv" or (target != "arm" and path.startswith("/base"))
+    base    = settings.agv_api_base() if use_agv else settings.arm_api_base()
+    url     = f"{base}{path}"
     timeout = req.timeout or (30.0 if path == "/capture" else 12.0)
     t0 = _t.time()
     try:

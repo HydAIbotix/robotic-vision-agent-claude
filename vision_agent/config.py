@@ -61,11 +61,27 @@ class Settings(BaseSettings):
     exploration_mode: str = "claude"
 
     # ── Hardware robot settings (active when robot_backend="real") ─────────────
-    # Connection
+    # Connection. The AGV base and the arm may run on separate controllers/IPs, so each has its
+    # own base URL. Enter e.g. http://192.168.1.101:8000. When a URL is blank that side falls back
+    # to robot_ip:robot_port (single-controller setups keep working). "/api/v1" is auto-appended.
     robot_ip: str = "192.168.1.100"
     robot_port: int = 8000
+    agv_url: str = ""   # mobile base (AGV) controller — serves /base/*
+    arm_url: str = ""   # arm + camera + card controller — serves /capture, /arm/*, /screen/*, /card/*
     robot_id: str = "R-01"
     default_kiosk_id: str = "K-01"
+
+    def _api_base(self, url: str) -> str:
+        base = (url or f"http://{self.robot_ip}:{self.robot_port}").strip().rstrip("/")
+        return base if base.endswith("/api/v1") else f"{base}/api/v1"
+
+    def arm_api_base(self) -> str:
+        """Base URL (…/api/v1) for arm, camera, screen and card endpoints."""
+        return self._api_base(self.arm_url)
+
+    def agv_api_base(self) -> str:
+        """Base URL (…/api/v1) for the mobile-base (AGV) /base/* endpoints."""
+        return self._api_base(self.agv_url or self.arm_url)
 
     # Coordinate spaces
     # viewport_* = what app_map learned in Playwright mode (pixels)

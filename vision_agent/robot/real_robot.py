@@ -42,8 +42,20 @@ _MAX_EVENTS = 500
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
-def _base_url() -> str:
-    return f"http://{settings.robot_ip}:{settings.robot_port}/api/v1"
+def _arm_base_url() -> str:
+    """Base URL for arm, camera, screen and card endpoints."""
+    return settings.arm_api_base()
+
+
+def _agv_base_url() -> str:
+    """Base URL for the mobile-base (AGV) /base/* endpoints."""
+    return settings.agv_api_base()
+
+
+def _base_for(endpoint: str) -> str:
+    """Pick the controller URL for an endpoint: /base/* → AGV, everything else → arm."""
+    ep = "/" + endpoint.lstrip("/")
+    return _agv_base_url() if ep.startswith("/base") else _arm_base_url()
 
 
 def _new_cmd_id() -> str:
@@ -67,8 +79,8 @@ def _record(event_type: str, endpoint: str, cmd_id: str,
         _events.pop(0)
 
 
-def _post(endpoint: str, body: dict, timeout: float = 10.0) -> dict:
-    url = f"{_base_url()}/{endpoint.lstrip('/')}"
+def _post_to(base: str, endpoint: str, body: dict, timeout: float = 10.0) -> dict:
+    url = f"{base}/{endpoint.lstrip('/')}"
     t0  = time.time()
     resp = requests.post(url, json=body, timeout=timeout)
     t1  = time.time()
@@ -77,8 +89,12 @@ def _post(endpoint: str, body: dict, timeout: float = 10.0) -> dict:
     return resp.json()
 
 
+def _post(endpoint: str, body: dict, timeout: float = 10.0) -> dict:
+    return _post_to(_base_for(endpoint), endpoint, body, timeout)
+
+
 def _get(endpoint: str, timeout: float = 5.0) -> dict:
-    url = f"{_base_url()}/{endpoint.lstrip('/')}"
+    url = f"{_base_for(endpoint)}/{endpoint.lstrip('/')}"
     t0  = time.time()
     resp = requests.get(url, timeout=timeout)
     t1  = time.time()
@@ -404,13 +420,20 @@ def setup(kiosk_definitions: list[dict], arm_poses: dict, nav_map: dict) -> dict
     Call once per robot session before any navigate_to_kiosk().
     """
     cmd_id = _new_cmd_id()
-    print(f"  [ROBOT] setup — {len(kiosk_definitions)} kiosk(s)")
-    return _post("/setup", {
+    body = {
         "kiosks":    kiosk_definitions,
         "arm_poses": arm_poses,
         "nav_map":   nav_map,
         "cmd_id":    cmd_id,
-    })
+    }
+    # /setup is common to both controllers (nav_map for the AGV, arm_poses for the arm).
+    arm, agv = _arm_base_url(), _agv_base_url()
+    targets = [arm] if arm == agv else [arm, agv]
+    print(f"  [ROBOT] setup — {len(kiosk_definitions)} kiosk(s) → {len(targets)} controller(s)")
+    result: dict = {}
+    for base in targets:
+        result = _post_to(base, "/setup", body)
+    return result
 
 
 def navigate_to_kiosk(kiosk_id: str, timeout_s: Optional[float] = None) -> dict:
@@ -521,7 +544,8 @@ def health_check(do_capture: bool = True) -> dict:
     Every probe is isolated in try/except so an unreachable robot yields structured errors
     rather than throwing.  Returns the robot URL and per-component {status, detail, …}.
     """
-    url = _base_url()
+    arm_url = _arm_base_url()
+    agv_url = _agv_base_url()
 
     def comp(status: str, detail: str, **extra) -> dict:
         return {"status": status, "detail": detail, **extra}
@@ -539,7 +563,7 @@ def health_check(do_capture: bool = True) -> dict:
             arm_state=st, robot_id=arm.get("robot_id", settings.robot_id),
         )
     except Exception as e:
-        components["robot"] = comp("error", f"Robot unreachable at {url} — {e}")
+        components["robot"] = comp("error", f"Arm unreachable at {arm_url} — {e}")
 
     # 2 ─ AGV base positioned / idle
     try:
@@ -557,7 +581,7 @@ def health_check(do_capture: bool = True) -> dict:
             base_state=bst, base_pose=pose,
         )
     except Exception as e:
-        components["base"] = comp("error", f"AGV base state unavailable — {e}")
+        components["base"] = comp("error", f"AGV base unreachable at {agv_url} — {e}")
 
     # 3 ─ Camera capture (also calibrates)
     if do_capture:
@@ -583,7 +607,9 @@ def health_check(do_capture: bool = True) -> dict:
     healthy = all(c.get("status") == "ok" for c in components.values())
     return {
         "backend":    settings.robot_backend,
-        "robot_url":  url,
+        "arm_url":    arm_url,
+        "agv_url":    agv_url,
+        "robot_url":  arm_url,  # back-compat alias
         "robot_id":   settings.robot_id,
         "kiosk_id":   _current_kiosk_id or settings.default_kiosk_id,
         "simulated":  False,
