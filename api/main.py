@@ -936,21 +936,22 @@ def get_explore_status(explore_id: str):
 
 @app.post("/api/reset", status_code=200)
 def reset_all(db: Session = Depends(get_db)):
-    """Clear test-execution artifacts only.
+    """Clear test-execution artifacts AND the uploaded test cases.
 
     Deletes: test run details (runs, robot events, defects), screenshots taken during
-    test execution, results JSON, and generated test plans.
+    test execution, results JSON, generated test plans, and the imported/uploaded test cases.
     Preserves: app exploration output (app map + explore/walkthrough/annotated
-    screenshots), imported test cases, kiosk/global configuration, and robot setup.
+    screenshots), kiosk/global configuration, and robot setup.
     (App Explorer has its own separate "clear" action.)
     """
     from sqlalchemy import text
     # Test run details + results (raw SQL for reliable deletes; children before parents).
-    # Intentionally NOT touched: test_cases, app_maps, kiosk_configs, device_configs.
+    # Intentionally NOT touched: app_maps, kiosk_configs, device_configs.
     db.execute(text("DELETE FROM test_results"))
     db.execute(text("DELETE FROM defects"))
     db.execute(text("DELETE FROM test_runs"))
     db.execute(text("DELETE FROM robot_events"))
+    db.execute(text("DELETE FROM test_cases"))   # uploaded/imported test cases
     db.commit()
 
     import shutil
@@ -981,8 +982,8 @@ def reset_all(db: Session = Depends(get_db)):
             f.unlink(missing_ok=True)
 
     return {"status": "ok",
-            "message": ("Cleared test runs, execution screenshots, results, and generated plans. "
-                        "App exploration, test cases, and configuration preserved.")}
+            "message": ("Cleared test runs, execution screenshots, results, generated plans, and "
+                        "uploaded test cases. App exploration and configuration preserved.")}
 
 
 @app.get("/api/runs/{run_id}/screenshots")
@@ -1003,33 +1004,112 @@ def get_run_screenshot(run_id: str, filename: str):
     return FileResponse(str(path))
 
 
+# Raw exploration screenshots live at the top of the screenshots dir with these prefixes
+# (execution screenshots live in per-run subfolders and are never touched here).
+_EXPLORE_SHOT_PREFIXES = ("explore_", "aria_", "scroll_", "walkthrough_")
+
+
+def _delete_exploration_shots(screen_ids: Optional[set[str]] = None) -> int:
+    """Delete exploration screenshots — annotated + raw diagnostic captures.
+
+    screen_ids=None → delete ALL exploration shots (global clear / clean slate).
+    screen_ids given → delete only those screens' annotated shots, plus raw shots whose
+                       filename references one of those screen ids (per-app clear).
+    Execution screenshots (screenshots/<run_id>/…) are never affected.
+    """
+    base = _base_screens_dir()
+    removed = 0
+
+    # Annotated: screenshots/annotated/<screen_id>_<ts>.png
+    ann_dir = base / "annotated"
+    if ann_dir.exists():
+        for f in ann_dir.glob("*.png"):
+            sid = f.stem.rsplit("_", 1)[0] if f.stem.rsplit("_", 1)[-1].isdigit() else f.stem
+            if screen_ids is None or sid in screen_ids:
+                try: f.unlink(); removed += 1
+                except OSError: pass
+
+    # Raw diagnostic captures at the top level
+    for f in base.glob("*.png"):
+        if not f.name.startswith(_EXPLORE_SHOT_PREFIXES) and f.name != "explore_entry.png":
+            continue
+        if screen_ids is None or any(sid in f.name for sid in screen_ids):
+            try: f.unlink(); removed += 1
+            except OSError: pass
+    return removed
+
+
+def _gc_orphan_shots() -> int:
+    """Delete exploration screenshots whose screen is no longer in the map (orphans left by
+    earlier map-clears that didn't remove files). Keeps shots for screens still in the map."""
+    from app_map import store as app_map_store
+    p = Path(settings.app_map_path)
+    if not p.exists():
+        return _delete_exploration_shots(None)
+    try:
+        live = set(((app_map_store.load(str(p)) or {}).get("screens") or {}).keys())
+    except Exception:
+        return 0
+    base = _base_screens_dir()
+    removed = 0
+    ann = base / "annotated"
+    if ann.exists():
+        for f in ann.glob("*.png"):
+            sid = f.stem.rsplit("_", 1)[0] if f.stem.rsplit("_", 1)[-1].isdigit() else f.stem
+            if sid not in live:
+                try: f.unlink(); removed += 1
+                except OSError: pass
+    for f in base.glob("*.png"):
+        if not f.name.startswith(_EXPLORE_SHOT_PREFIXES) and f.name != "explore_entry.png":
+            continue
+        if not any(sid in f.name for sid in live):
+            try: f.unlink(); removed += 1
+            except OSError: pass
+    return removed
+
+
 @app.delete("/api/app-map", status_code=204)
 def delete_app_map():
+    """Clear the ENTIRE app map + all exploration screenshots (clean slate)."""
     p = Path(settings.app_map_path)
     if p.exists():
         p.unlink()
+    n = _delete_exploration_shots(None)
+    print(f"  [APP MAP] Cleared all apps + {n} exploration screenshots")
 
 
 @app.delete("/api/app-map/{app_id}", status_code=204)
 def delete_app_map_app(app_id: str):
-    """Clear ONLY one app's screens from the combined map (per-app re-explore).
+    """Clear ONLY one app's screens + its screenshots (per-app re-explore).
 
-    Other apps' screens are preserved. If this was the only app, the file is removed.
+    Other apps' screens and screenshots are preserved. If this was the only app, everything is wiped.
     """
     from app_map import store as app_map_store
     p = Path(settings.app_map_path)
     if not p.exists():
+        _delete_exploration_shots(None)
         return
     try:
         existing = app_map_store.load(str(p))
     except Exception:
         p.unlink()
+        _delete_exploration_shots(None)
         return
+
+    # Screens (and thus screenshots) that belong to this app, captured before removal.
+    app_screen_ids = {
+        sid for sid, sc in (existing.get("screens") or {}).items()
+        if (sc.get("app_id") or "") == app_id
+    }
     updated = app_map_store.remove_app(existing, app_id)
     if updated is None:
         p.unlink()
+        n = _delete_exploration_shots(None)          # last app → clean slate
     else:
         p.write_text(json.dumps(updated, indent=2, default=str), encoding="utf-8")
+        n = _delete_exploration_shots(app_screen_ids)  # this app's shots
+        n += _gc_orphan_shots()                         # + any leftover orphans
+    print(f"  [APP MAP] Cleared app '{app_id}' + {n} screenshots")
 
 
 @app.get("/api/screenshots/annotated")
@@ -1333,6 +1413,13 @@ def _run_explorer(explore_id: str, kiosk_url: str, kiosk_id: str = ""):
     import os
     import subprocess
     try:
+        # Clean orphaned screenshots from previously-cleared apps so counts stay honest.
+        try:
+            gc = _gc_orphan_shots()
+            if gc:
+                print(f"  [APP MAP] GC removed {gc} orphaned exploration screenshots before explore")
+        except Exception:
+            pass
         env = os.environ.copy()
         # Pass the runtime override so the subprocess picks it up via pydantic-settings
         env["EXPLORATION_MODE"] = _runtime_exploration_mode

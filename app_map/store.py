@@ -87,7 +87,9 @@ def merge_explored_app(existing: Optional[dict], new_map: dict, app_id: str,
     return {
         "app_name":     base.get("app_name") or "Multi-App Environment",
         "explored_at":  stamp,
-        "entry_screen": base.get("entry_screen") or new_map.get("entry_screen", ""),
+        # Prefer the just-explored app's entry over a stale seeded one; per-app entries live
+        # in apps[app_id]. (The top-level value is only a sensible default for the UI.)
+        "entry_screen": new_map.get("entry_screen") or base.get("entry_screen", ""),
         "screens":      screens,
         "apps":         apps,
     }

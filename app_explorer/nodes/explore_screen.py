@@ -82,8 +82,9 @@ def _analyze_fresh(image_path: str) -> dict:
 
 # ── Win 3: batch all scroll screenshots into one LLM call ────────────────────
 
-def _norm_to_px(vals: list, img_w: int, img_h: int) -> list[int]:
-    return [int(v * (img_w if i % 2 == 0 else img_h)) for i, v in enumerate(vals)]
+# Scale-tolerant coordinate conversion (handles normalized 0-1 AND raw-pixel values that
+# vision models sometimes mix in one response). Single source of truth in analyze.py.
+from vision_agent.nodes.analyze import _norm_to_px  # noqa: E402
 
 
 def _collect_scrolled_elements(base_elements: list, image_path: str, screen_id: str) -> list:

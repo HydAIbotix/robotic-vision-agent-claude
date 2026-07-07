@@ -60,8 +60,35 @@ def _parse_json(raw: str) -> dict:
 
 
 def _norm_to_px(vals: list[float], img_w: int, img_h: int) -> list[int]:
-    """Convert normalized 0.0–1.0 values to pixel coordinates."""
-    return [int(v * (img_w if i % 2 == 0 else img_h)) for i, v in enumerate(vals)]
+    """Convert model coordinates to pixels, tolerant of MIXED scales.
+
+    Vision models are asked for normalized 0.0–1.0 coordinates but, in practice, return raw
+    pixels (0–img) for some elements and normalized values for others *within the same
+    response*. Blindly multiplying a pixel value by the image dimension blows it up ~1000×
+    and pushes the element off-canvas. So detect the scale per value:
+
+      v <= 1.5            → normalized fraction   → v * dim
+      1.5 < v <= dim*1.1  → already in pixels      → v  (clamped to the image)
+      v  > dim*1.1        → 0–1000 scale / junk    → (v / 1000) * dim
+
+    Normalized inputs (the common case) are unchanged; only out-of-range values are rescued.
+    Generic: no per-app or per-element logic.
+    """
+    out: list[int] = []
+    for i, v in enumerate(vals):
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            fv = 0.0
+        dim = img_w if i % 2 == 0 else img_h
+        if fv <= 1.5:
+            px = fv * dim
+        elif fv <= dim * 1.1:
+            px = fv
+        else:
+            px = (fv / 1000.0) * dim
+        out.append(int(max(0.0, min(px, float(dim)))))
+    return out
 
 
 def _log_screen(screen: dict) -> None:
