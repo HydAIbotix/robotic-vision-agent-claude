@@ -107,6 +107,17 @@ def parse_steps(state: TestRunnerState) -> dict:
     app_map     = state.get("app_map")
     credentials = state.get("credentials") or {}
 
+    # ── Scope the map to THIS test's kiosk (single-app view) ──────────────────
+    # A test belongs to exactly one kiosk; the planner must see ONLY that kiosk's screens or it
+    # plans against the wrong app (e.g. a VPS test given RPS's login screen).  Scope here — the one
+    # planning choke point — so it's correct for every run shape, including mixed multi-kiosk runs
+    # where state carries the full combined map.  No-op for a legacy single-app map or an
+    # already-scoped map.  tc["kiosk_id"] is the resolved join key (stamped by _execute_run).
+    if app_map:
+        app_id = tc.get("kiosk_id") or ""
+        if app_id:
+            app_map = app_map_store.scoped_to_app(app_map, app_id)
+
     # ── Tier 1: cache lookup ──────────────────────────────────────────────────
     if app_map:
         map_version = app_map_store.version_hash(app_map)

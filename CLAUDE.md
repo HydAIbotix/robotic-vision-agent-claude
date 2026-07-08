@@ -344,7 +344,35 @@ Legend: ✅ fixed · ⚠️ fixed but **not verified live / fragile** · 🔲 st
   and (b) captures identifiers the app displays into `captured_values`, reusable on later screens via
   `{{captured.NAME}}`. New `ExplorerState.captured_values` accumulates them in `explore_screen`;
   `execute_action._resolve` substitutes them (like credential placeholders). Discover during
-  exploration, not deferred to test-time. ⚠️ Needs a live exploration run to confirm end-to-end.
+  exploration, not deferred to test-time. ⚠️ Still not working live — the explorer did not reuse the
+  issued card number for check-balance/add-money. **De-prioritised** by the user: test execution is
+  expected to navigate those flows via on-screen elements. Left in place; revisit if test-time
+  navigation proves insufficient.
+
+### Test-plan generation scoped per kiosk (2026-07-08)
+
+- ✅ **Generated plan referenced the WRONG app's screens** (`TC-VPS-001`'s plan had `login` + email/
+  password steps, but VPS has no login — those are RPS's screens). Root cause: BOTH plan-generation
+  paths fed Claude the **whole combined app_map** (VPS + RPS) with no per-kiosk filter, and the
+  `_TC_PLAN_PROMPT` JSON example was itself a login flow (anchoring Claude to invent login steps).
+  Fix (not a patch — one choke point + defense-in-depth prompt):
+  - New `_scope_map_for_test(db, app_map, test_id, steps_raw)` resolves the test's kiosk (via the
+    alias-aware `_infer_kiosk_id`) and returns `store.scoped_to_app(...)` — the map filtered to that
+    ONE kiosk's screens. It warns loudly if a multi-app map can't be scoped (Device Map alias↔kiosk_id
+    mismatch), so silent wrong-app plans can't recur.
+  - `POST /tc-plan` (Test Intake) now scopes before building the cache key + element inventory, so
+    Claude only ever sees the target app. `_execute_run` STAMPS each test's resolved `kiosk_id`;
+    `parse_steps` scopes the map to `tc["kiosk_id"]` at the single planning choke point — correct for
+    every tier and even mixed multi-kiosk runs. Both paths now compute `version_hash` on the SAME
+    scoped map, so a UI-generated plan is correctly reused at execution (also fixed a latent
+    cache-key mismatch between UI and runner).
+  - `_TC_PLAN_PROMPT` hardened: "the app map is the COMPLETE and ONLY source of truth — never invent a
+    screen/element/flow not in it; if there's no login screen, add no login steps; emit
+    `vision_required` for genuinely-absent elements." The login-flavored example was replaced with a
+    neutral FORMAT-ONLY skeleton; email/password `required_config` is now conditional on the map
+    actually having a login screen. Verified with an in-memory DB: a VPS test scopes to VPS screens
+    only (no `login`), an RPS test to RPS screens only. Stale `TC-VPS-001` cached plan deleted.
+    **User: regenerate the plan** (Test Intake → force) so the frontend localStorage copy refreshes.
 
 ### Studio / infrastructure (sibling `kiosk-test-studio`)
 
@@ -361,10 +389,15 @@ Legend: ✅ fixed · ⚠️ fixed but **not verified live / fragile** · 🔲 st
 
 ### Lingering / open items
 
-- ⚠️ **Kiosk-URL lifecycle fix unverified live (2026-07-08)** — the wrong-kiosk-URL, remembered-URL,
-  and multi-app-preservation fixes above are unit-tested (merge/scope/alias logic) and typecheck-clean,
-  but need a live browser + Claude API run against the real kiosk apps to confirm end-to-end. Requires
-  the user re-steps noted in that section (re-explore per kiosk; align Device Map alias→kiosk_id).
+- ⚠️ **Kiosk-URL lifecycle + per-kiosk plan scoping unverified live (2026-07-08)** — the
+  wrong-kiosk-URL, remembered-URL, multi-app-preservation, and per-kiosk plan-scoping fixes are
+  unit-tested (merge/scope/alias/scoping logic verified with an in-memory DB) and import-clean, but
+  need a live browser + Claude API run against the real kiosk apps to confirm end-to-end. Requires the
+  user re-steps (re-explore per kiosk; align Device Map alias→kiosk_id; regenerate plans).
+- 🔲 **Explorer identifier reuse (captured_values) not working live, DE-PRIORITISED** — the explorer
+  still didn't reuse the issued card number for check-balance/add-money. Accepted for now: real
+  test execution is expected to navigate those flows from on-screen elements. Revisit only if
+  test-time navigation proves insufficient.
 - 🔲 **Mixed-scale coordinate fix unverified live** — clear existing app maps and re-explore with a
   real Claude API + browser to confirm end-to-end.
 - ⚠️ **Real-robot backend parity** — `real_robot.tap()` already carries the post-tap settle

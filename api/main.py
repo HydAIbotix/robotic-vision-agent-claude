@@ -279,6 +279,33 @@ def _infer_kiosk_id(test_id: str, steps_raw: str = "", db: Optional[Session] = N
     return "K-01"  # safe default
 
 
+def _scope_map_for_test(db: Optional[Session], app_map: Optional[dict],
+                        test_id: str, steps_raw: str = "") -> tuple[Optional[dict], str]:
+    """Scope a multi-app app_map down to the single kiosk a test belongs to.
+
+    A test case belongs to exactly ONE kiosk. Planning and execution must therefore see ONLY
+    that kiosk's screens — otherwise Claude plans against another app's screens (e.g. a VPS test
+    was planned with RPS's login screen because the whole combined map was fed to it). This is the
+    single choke point that guarantees kiosk isolation for BOTH plan generation (/tc-plan) and
+    execution (_execute_run): resolve the test's kiosk_id, then filter the map to that app_id.
+
+    Returns (scoped_map, kiosk_id). No-op (map unchanged) for a legacy single-app map or when the
+    kiosk can't be matched to a tagged app — but that mismatch is logged loudly when the map holds
+    more than one app, because it means a wrong-app plan could otherwise be produced.
+    """
+    from app_map import store as app_map_store
+    if not app_map:
+        return app_map, ""
+    kiosk_id = _infer_kiosk_id(test_id, steps_raw, db)
+    scoped   = app_map_store.scoped_to_app(app_map, kiosk_id)
+    apps     = app_map.get("apps") or {}
+    if len(apps) > 1 and len(scoped.get("screens") or {}) == len(app_map.get("screens") or {}):
+        print(f"  [PLAN] ⚠ test '{test_id}' resolved to kiosk '{kiosk_id}', which matches no app in "
+              f"the map (apps: {list(apps)}). Plan will see ALL apps' screens — check that the Device "
+              f"Map alias→kiosk_id matches the Kiosk ID used during exploration.")
+    return scoped, kiosk_id
+
+
 @app.post("/api/test-cases/upload")
 def upload_test_cases(
     file: UploadFile = File(...),
@@ -639,6 +666,16 @@ CHANNEL DEFINITIONS (follow these exactly):
 KIOSK APP MAP (screens and elements with exact pixel coordinates):
 {element_inventory}
 
+THE APP MAP ABOVE IS THE COMPLETE AND ONLY SOURCE OF TRUTH FOR THIS APP — READ IT FIRST:
+- Use ONLY screen_ids and element_ids that appear in it, verbatim. Never invent a screen, element,
+  id, or coordinate that is not listed.
+- Do NOT assume any flow the map does not show. If there is NO login / sign-in screen in the map,
+  this app has no login — do NOT add email / password / sign-in steps. If there is no cart screen,
+  there is no cart step. Plan strictly what the map supports for the raw steps below. Different apps
+  differ: some start at a login screen, others open directly onto a menu/home — always match THIS map.
+- If a raw step genuinely needs a screen or element that is ABSENT from the map, emit a single
+  {{"action": "vision_required", "description": "<remaining goal>"}} step and stop — never fabricate ids.
+
 TEST CASE TO PLAN:
 ID: {test_id}
 Summary: {summary}
@@ -679,9 +716,12 @@ YOUR TASKS:
 4. For every step: set "device" to the alias of the target device from the device map above
    (e.g. "TVM", "MPOS"). For web/db/validation steps not tied to a physical device, omit "device".
 5. For "robot" tap steps: look up the screen_id and element from the app map; use the exact px/py.
-6. For "robot" type steps: use credential placeholders {{valid_email}}, {{valid_password}} for login fields.
+6. For "robot" type steps: use credential placeholders {{valid_email}}, {{valid_password}} for login
+   fields — but ONLY when the app map actually contains a login/sign-in screen with such fields. If
+   the app has no login screen, there are no login steps and no credential placeholders.
 7. Identify required_config — data the tester MUST provide before the test:
-   - Include: email (login), password, card_number (ONLY if a specific pre-existing card is needed).
+   - Include email + password ONLY if the app map has a login/sign-in screen; otherwise omit them.
+   - Include card_number ONLY if a specific pre-existing card is needed by the steps.
    - EXCLUDE: amount / balance (card balance is managed by the system automatically).
    - EXCLUDE: anything generated at runtime (card numbers created by the reader, transaction IDs, etc.).
 8. Set credential_scenario: "valid" or "invalid" based on whether the test uses correct credentials.
@@ -696,51 +736,37 @@ YOUR TASKS:
      "description": "Order result shows total of $856.67", "expected_value": "$856.67",
      "value_element_id": "order_total"}}
 
-Return ONLY valid JSON — no markdown fences, no extra text:
+Return ONLY valid JSON — no markdown fences, no extra text.
+The skeleton below shows ONLY the FORMAT and field names. Do NOT copy its screen_ids, element_ids,
+channels, or steps — build every step from the ACTUAL app map and raw steps above. Placeholders in
+angle brackets (<...>) must be replaced with real values taken from the app map; required_config is
+[] unless the app genuinely needs pre-provided data (see task 7):
 {{
   "test_id": "{test_id}",
   "credential_scenario": "valid",
-  "required_config": [
-    {{"key": "email", "label": "Login Email", "type": "text"}},
-    {{"key": "password", "label": "Password", "type": "password"}}
-  ],
+  "required_config": [],
   "steps": [
     {{
       "action": "verify",
       "channel": "validation",
-      "description": "Login screen is visible",
-      "expected_screen": "login"
+      "description": "<the first screen this test should see is visible>",
+      "expected_screen": "<a screen_id copied verbatim from the app map>"
     }},
     {{
       "action": "tap",
       "channel": "robot",
-      "device": "TVM",
-      "description": "Tap email input field",
-      "screen_id": "login",
-      "element_id": "email_input",
-      "px": 700,
-      "py": 412
-    }},
-    {{
-      "action": "type",
-      "channel": "robot",
-      "description": "Type login email",
-      "value": "{{valid_email}}"
-    }},
-    {{
-      "action": "tap",
-      "channel": "robot",
-      "description": "Tap Sign In button",
-      "screen_id": "login",
-      "element_id": "sign_in_button",
-      "px": 700,
-      "py": 560
+      "device": "<device alias from the device map, or omit if none applies>",
+      "description": "<what this tap does>",
+      "screen_id": "<screen_id from the app map>",
+      "element_id": "<element_id that exists on that screen in the app map>",
+      "px": 0,
+      "py": 0
     }},
     {{
       "action": "verify",
       "channel": "validation",
-      "description": "Landed on products screen after login",
-      "expected_screen": "products"
+      "description": "<expected outcome of the steps>",
+      "expected_screen": "<screen_id from the app map>"
     }}
   ]
 }}
@@ -766,6 +792,10 @@ def get_tc_plan(req: TcPlanRequest, db: Session = Depends(get_db)):
     app_map = None
     if Path(settings.app_map_path).exists():
         app_map = app_map_store.load(settings.app_map_path)
+    # Scope to THIS test's kiosk so Claude only ever sees the target app's screens (a VPS test must
+    # never be planned against RPS's login screen).  Same choke point the runner uses — so the
+    # cache key (version_hash of the scoped map) matches between UI plan generation and execution.
+    app_map, _kiosk_id = _scope_map_for_test(db, app_map, req.test_id, req.steps_raw or "")
     map_version = app_map_store.version_hash(app_map)
 
     # Return cached plan unless force=True.
@@ -1337,16 +1367,18 @@ def _execute_run(run_id: str, req: RunRequest):
             )
 
         # Resolve which kiosk each selected test targets — the single join key used across the
-        # lifecycle.  Re-resolve via the alias-aware resolver (device map) so runs are correct
-        # even for suites uploaded before the kiosk/device map was configured.  An explicit
-        # run.kiosk_id from the caller wins.
+        # lifecycle — and STAMP it onto every test case.  parse_steps reads tc["kiosk_id"] to scope
+        # the app_map to the right app before planning, so this makes planning correct per test even
+        # in a mixed multi-kiosk run and even for suites uploaded before the device map existed.
+        for tc in test_cases:
+            tc["kiosk_id"] = _infer_kiosk_id(tc.get("test_id", ""), tc.get("steps_raw", ""), db)
+
+        # Run-level kiosk set (for the run label + which URL to open): explicit caller value wins,
+        # else the distinct set resolved above.
         if run.kiosk_id:
             kiosk_ids = [k.strip() for k in run.kiosk_id.split(",") if k.strip()]
         else:
-            kiosk_ids = list(dict.fromkeys(
-                _infer_kiosk_id(tc.get("test_id", ""), tc.get("steps_raw", ""), db)
-                for tc in test_cases
-            ))
+            kiosk_ids = list(dict.fromkeys(tc["kiosk_id"] for tc in test_cases if tc.get("kiosk_id")))
             run.kiosk_id = ",".join(kiosk_ids) if kiosk_ids else "K-01"
             db.commit()
 
