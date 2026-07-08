@@ -49,7 +49,7 @@ def load(path: str) -> AppMap:
 
 
 def merge_explored_app(existing: Optional[dict], new_map: dict, app_id: str,
-                       app_label: str = "") -> dict:
+                       app_label: str = "", app_url: str = "") -> dict:
     """Merge a freshly-explored app's screens into the combined multi-app map.
 
     Each screen is tagged with its ``app_id`` and screens belonging to OTHER apps are
@@ -81,6 +81,9 @@ def merge_explored_app(existing: Optional[dict], new_map: dict, app_id: str,
         "app_id":       app_id,
         "label":        app_label or new_map.get("app_name") or app_id,
         "entry_screen": new_map.get("entry_screen", ""),
+        # Remember the URL this app was explored from so the whole lifecycle can reuse it and the
+        # App Map view can show it (falls back to any previously-recorded url on re-explore).
+        "url":          app_url or (apps.get(app_id) or {}).get("url", ""),
         "explored_at":  stamp,
         "screen_count": len(new_screens),
     }
@@ -115,6 +118,34 @@ def remove_app(existing: Optional[dict], app_id: str) -> Optional[dict]:
         "apps":        apps,
         "explored_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
+
+
+def scoped_to_app(app_map: Optional[dict], app_id: str) -> Optional[dict]:
+    """Return a copy of the multi-app map containing ONLY the given app's screens.
+
+    Used at execution time so a single-kiosk test run plans against (and verifies against)
+    just that kiosk's screens — never the screens of another kiosk that happens to live in
+    the same combined app_map.json.  All top-level keys (keyboard_map, apps, etc.) are
+    preserved; only ``screens`` is filtered and ``entry_screen`` is set to the app's own entry.
+
+    No-op (returns the map unchanged) when:
+      - app_id is blank, or
+      - the map has no per-screen app_id tags (legacy single-app map), or
+      - no screen matches app_id (avoid returning an empty map that would break planning).
+    """
+    if not app_map or not app_id:
+        return app_map
+    screens = app_map.get("screens") or {}
+    tagged  = {sid: sc for sid, sc in screens.items() if (sc.get("app_id") or "") == app_id}
+    if not tagged:
+        return app_map
+    app_entry = ""
+    apps = app_map.get("apps") or {}
+    if app_id in apps:
+        app_entry = apps[app_id].get("entry_screen", "")
+    if app_entry not in tagged:
+        app_entry = next(iter(tagged))
+    return {**app_map, "screens": tagged, "entry_screen": app_entry}
 
 
 def prompt_summary(app_map: Optional[AppMap]) -> str:

@@ -125,6 +125,22 @@ initial: ExplorerState = {
     "complete":              False,
 }
 
+# ── Snapshot any EXISTING multi-app map BEFORE exploration runs ───────────────
+# finalize_map/store.save() overwrites app_map.json mid-run (inside explorer.invoke), so if we
+# read the "existing" map AFTER exploration it would already contain only THIS app's screens and
+# every previously-explored kiosk would be lost.  Capture it now, while it still holds the other
+# apps, and merge into this snapshot at the end.  (EXPLORE_APP_ID blank → legacy single-app.)
+import os as _os
+_app_id = _os.environ.get("EXPLORE_APP_ID", "").strip()
+_existing_map = None
+if _app_id and Path(OUTPUT_PATH).exists():
+    try:
+        _existing_map = json.loads(Path(OUTPUT_PATH).read_text(encoding="utf-8"))
+        _prev_n = len((_existing_map.get("screens") or {}))
+        print(f"  [APP MAP] Snapshotted existing map ({_prev_n} screens) — app '{_app_id}' will merge into it")
+    except Exception:
+        _existing_map = None
+
 result = explorer.invoke(initial)
 
 
@@ -432,18 +448,15 @@ if _explored_screens and result["app_map"].get("entry_screen") not in _explored_
 
 # ── Write app_map.json ─────────────────────────────────────────────────────────
 # Multi-app: when EXPLORE_APP_ID is set, MERGE this app's screens (tagged by app id)
-# into the existing map instead of overwriting — so exploring a second kiosk app does
-# not wipe the first.  Blank app id → legacy single-app overwrite (unchanged).
-import os as _os
+# into the PRE-EXPLORATION snapshot instead of overwriting — so exploring a second kiosk
+# app does not wipe the first.  We merge into `_existing_map` (captured BEFORE the graph
+# ran) rather than re-reading the file here, because finalize_map/store.save already
+# clobbered app_map.json with only THIS app's screens mid-run.  Blank app id → legacy
+# single-app overwrite (unchanged).
 from app_map import store as _store
-_app_id = _os.environ.get("EXPLORE_APP_ID", "").strip()
-_existing = None
-if _app_id and Path(OUTPUT_PATH).exists():
-    try:
-        _existing = json.loads(Path(OUTPUT_PATH).read_text(encoding="utf-8"))
-    except Exception:
-        _existing = None
-result["app_map"] = _store.merge_explored_app(_existing, result["app_map"], _app_id, app_label=_app_id)
+result["app_map"] = _store.merge_explored_app(
+    _existing_map, result["app_map"], _app_id, app_label=_app_id, app_url=settings.kiosk_url,
+)
 Path(OUTPUT_PATH).write_text(
     json.dumps(result["app_map"], indent=2, default=str),
     encoding="utf-8",

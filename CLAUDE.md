@@ -303,6 +303,35 @@ Legend: ✅ fixed · ⚠️ fixed but **not verified live / fragile** · 🔲 st
   auto-passing); failure message reports the actual on-screen value. Backend verified; **full browser
   re-verification was still pending** at the last checkpoint.
 
+### Kiosk URL lifecycle & multi-app map (2026-07-08)
+
+- ✅ **Test opened the WRONG kiosk's URL** (e.g. `TC-VPS-001` launched the kiosk-2/RPS app). Root
+  cause was threefold: (a) a single global `settings.kiosk_url` drove every run's browser; (b) three
+  un-joined `kiosk_id` namespaces (`KioskConfig`=`K-02`, `DeviceConfig`=`kiosk-1/2`, `TestCase`=`K-01`);
+  (c) planning fed the whole (last-explored) app_map to Claude regardless of `app_id`. Fix: `kiosk_id`
+  is now the single join key — `_infer_kiosk_id` resolves the test-id alias (`TC-VPS-001`→`VPS`) via
+  the Device Map, `_execute_run` looks up `KioskConfig.url` for the run's kiosk and sets
+  `settings.kiosk_url` (restored in `finally`), and single-kiosk runs scope the map via new
+  `store.scoped_to_app`. ⚠️ Needs a live browser + Claude run to confirm end-to-end. See the
+  `[[kiosk-id-join-key]]` invariant.
+- ✅ **Exploration URL now remembered per kiosk.** `start_explore` upserts `KioskConfig.url` for its
+  kiosk_id; `merge_explored_app` also stamps `apps[app_id].url` (shown in the App Explorer UI). The
+  whole lifecycle (planning/execution/results) reuses it — no re-entering the URL per run.
+- ✅ **Exploring a 2nd kiosk wiped the 1st app map.** `finalize_map`/`store.save` overwrote
+  `app_map.json` mid-run BEFORE `run_explorer.py` read the "existing" map to merge, so the merge saw
+  an already-clobbered file. Fix: `run_explorer.py` snapshots the existing map into `_existing_map`
+  BEFORE `explorer.invoke()` and merges into that snapshot. Per-app clear (`DELETE /app-map/{app_id}`)
+  is unchanged. **User must re-explore each kiosk once** so URLs persist and screens re-tag.
+- ✅ **Execution UI now separates the plan by kiosk.** `Execution.tsx` groups both the selected
+  test-case list and the execution-plan preview under a per-kiosk header (`groupByKiosk`), so the
+  operator sees at a glance which kiosk each test/plan runs on. App Explorer shows each app's
+  remembered URL and pre-fills it when a known Kiosk ID is re-entered.
+
+  **Required user re-steps for these fixes to take effect:** (1) re-explore each kiosk using the
+  SAME Kiosk ID that appears in Configuration → Device Map (so URL persists + screens re-tag);
+  (2) confirm each Device Map alias (e.g. `VPS`, `RPS`) maps to that kiosk_id. Re-uploading the test
+  Excel is optional — execution re-resolves each test's kiosk via the Device Map at run time.
+
 ### Studio / infrastructure (sibling `kiosk-test-studio`)
 
 - ✅ **`fetch` had no timeout** — dashboard hung on "Loading…", Reset froze uncancellably, readiness
@@ -318,11 +347,17 @@ Legend: ✅ fixed · ⚠️ fixed but **not verified live / fragile** · 🔲 st
 
 ### Lingering / open items
 
+- ⚠️ **Kiosk-URL lifecycle fix unverified live (2026-07-08)** — the wrong-kiosk-URL, remembered-URL,
+  and multi-app-preservation fixes above are unit-tested (merge/scope/alias logic) and typecheck-clean,
+  but need a live browser + Claude API run against the real kiosk apps to confirm end-to-end. Requires
+  the user re-steps noted in that section (re-explore per kiosk; align Device Map alias→kiosk_id).
 - 🔲 **Mixed-scale coordinate fix unverified live** — clear existing app maps and re-explore with a
   real Claude API + browser to confirm end-to-end.
-- 🔲 **Real-robot backend parity** — every Playwright-side interaction fix (esp. the post-click
-  settle/`wait_for_load_state` from the mid-transition bug) must be mirrored into `real_robot.py`.
-  This ties into the `_base_url`-era refactor: keep arm vs AGV routing and timing in sync.
+- ⚠️ **Real-robot backend parity** — `real_robot.tap()` already carries the post-tap settle
+  (`time.sleep(0.8)` with rationale) since the real backend has no DOM to `wait_for_load_state` on, and
+  `navigate_to_url` is a correct Playwright-only no-op (a physical robot faces the device it drove to).
+  So the interaction-timing parity is as close as the DOM-less backend allows; still untested vs real
+  hardware. Keep arm vs AGV routing/timing in sync when editing either backend.
 - 🔲 **Unexplained coordinate regression** — the layout-shift episode was worked around ("restore the
   previous layout"), not fixed in code.
 - 🔲 **Verification debt** — the validation-field fix and per-run screenshot routing had backend edits

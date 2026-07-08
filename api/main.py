@@ -237,10 +237,41 @@ def list_test_cases(kiosk_id: Optional[str] = None, db: Session = Depends(get_db
     return [_tc_summary(t) for t in q.order_by(models.TestCase.test_id).all()]
 
 
-def _infer_kiosk_id(test_id: str, steps_raw: str = "") -> str:
-    """Derive kiosk_id from test_id prefix or step content."""
-    tid = test_id.upper()
-    text = (test_id + " " + steps_raw).upper()
+def _infer_kiosk_id(test_id: str, steps_raw: str = "", db: Optional[Session] = None) -> str:
+    """Derive the kiosk_id a test case belongs to — the single join key used across the whole
+    lifecycle (exploration → device map → test cases → execution → results).
+
+    Resolution order (first match wins):
+      1. Device-map alias.  A test id like ``TC-VPS-001`` names its device via the ``VPS`` token;
+         we match that token (or any configured alias appearing in the id/steps) to a
+         DeviceConfig and return its linked kiosk_id.  This is the user-configured VPS→kiosk-1
+         mapping and the primary, explicit path.
+      2. A configured KioskConfig.kiosk_id appearing verbatim in the id/steps.
+      3. Legacy K-01/K-02 text heuristic (kept so older test suites keep working).
+    """
+    import re
+    text   = (test_id + " " + (steps_raw or "")).upper()
+    tokens = {t for t in re.split(r"[-_\s]+", text) if t}
+
+    if db is not None:
+        try:
+            # 1. Device alias → kiosk_id (e.g. VPS → kiosk-1).  Prefer a token-exact alias match
+            #    (TC-VPS-001 → 'VPS'); fall back to an alias appearing anywhere in the text.
+            devices = db.query(models.DeviceConfig).all()
+            for d in devices:
+                if d.alias and d.kiosk_id and d.alias.upper() in tokens:
+                    return d.kiosk_id
+            for d in devices:
+                if d.alias and d.kiosk_id and d.alias.upper() in text:
+                    return d.kiosk_id
+            # 2. A configured kiosk id mentioned directly.
+            for k in db.query(models.KioskConfig).all():
+                if k.kiosk_id and k.kiosk_id.upper() in tokens:
+                    return k.kiosk_id
+        except Exception:
+            pass
+
+    # 3. Legacy heuristic.
     if "K-01" in text or "K1" in text or "KIOSK-1" in text or "KIOSK 1" in text:
         return "K-01"
     if "K-02" in text or "K2" in text or "KIOSK-2" in text or "KIOSK 2" in text:
@@ -268,7 +299,7 @@ def upload_test_cases(
 
     saved = 0
     for tc in cases:
-        tc_kiosk = kiosk_id or _infer_kiosk_id(tc["test_id"], tc.get("steps_raw", ""))
+        tc_kiosk = kiosk_id or _infer_kiosk_id(tc["test_id"], tc.get("steps_raw", ""), db)
         existing = db.query(models.TestCase).filter_by(test_id=tc["test_id"]).first()
         if existing:
             for k, v in tc.items():
@@ -896,7 +927,7 @@ _explore_jobs: dict = {}
 
 
 @app.post("/api/explore", status_code=202)
-def start_explore(req: ExploreRequest):
+def start_explore(req: ExploreRequest, db: Session = Depends(get_db)):
     # Verify the kiosk app is reachable before spawning the explorer.
     import urllib.request, urllib.error
     try:
@@ -912,6 +943,19 @@ def start_explore(req: ExploreRequest):
                 f"then try again."
             ),
         )
+
+    # Remember the URL against this kiosk_id so the whole lifecycle (test planning, execution,
+    # results) can reuse it — no need to re-enter it per run.  Upsert KioskConfig.url; other
+    # kiosk fields (name, robot, screen dims) are left intact on an existing row.
+    kid = (req.kiosk_id or "").strip()
+    if kid:
+        kcfg = db.query(models.KioskConfig).filter_by(kiosk_id=kid).first()
+        if kcfg:
+            kcfg.url        = req.kiosk_url
+            kcfg.updated_at = datetime.utcnow()
+        else:
+            db.add(models.KioskConfig(kiosk_id=kid, name=kid, url=req.kiosk_url))
+        db.commit()
 
     explore_id = f"explore-{uuid.uuid4().hex[:8]}"
     _explore_jobs[explore_id] = {"status": "running", "message": "Exploration in progress…"}
@@ -1222,6 +1266,7 @@ def _execute_run(run_id: str, req: RunRequest):
         return
 
     _prev_screens_dir = settings.screenshots_dir
+    _prev_kiosk_url   = settings.kiosk_url
     try:
         # Route this run's step screenshots into a per-run folder: screenshots/<run_id>/
         _run_dir = _run_screens_dir(run_id)
@@ -1271,19 +1316,50 @@ def _execute_run(run_id: str, req: RunRequest):
                 f"in {src}. Available: {avail}"
             )
 
-        # Derive kiosk_id from the selected test cases when not explicitly set
-        if not run.kiosk_id:
+        # Resolve which kiosk each selected test targets — the single join key used across the
+        # lifecycle.  Re-resolve via the alias-aware resolver (device map) so runs are correct
+        # even for suites uploaded before the kiosk/device map was configured.  An explicit
+        # run.kiosk_id from the caller wins.
+        if run.kiosk_id:
+            kiosk_ids = [k.strip() for k in run.kiosk_id.split(",") if k.strip()]
+        else:
             kiosk_ids = list(dict.fromkeys(
-                tc.get("kiosk_id", "") for tc in test_cases if tc.get("kiosk_id")
+                _infer_kiosk_id(tc.get("test_id", ""), tc.get("steps_raw", ""), db)
+                for tc in test_cases
             ))
             run.kiosk_id = ",".join(kiosk_ids) if kiosk_ids else "K-01"
             db.commit()
+
+        # Point the browser at the target kiosk's URL — remembered from exploration (KioskConfig.url).
+        # This is the fix for a test opening the wrong kiosk: the URL now follows the test's kiosk,
+        # not a single global default.  Falls back to the previous global when unconfigured.
+        primary_kiosk = kiosk_ids[0] if kiosk_ids else ""
+        if primary_kiosk:
+            kcfg = db.query(models.KioskConfig).filter_by(kiosk_id=primary_kiosk).first()
+            if kcfg and kcfg.url:
+                settings.kiosk_url = kcfg.url
+                _broadcast(run_id, {"event": "log", "run_id": run_id,
+                                    "message": f"Target kiosk '{primary_kiosk}' → {kcfg.url}"})
+                print(f"  [RUN] kiosk '{primary_kiosk}' URL → {kcfg.url}")
+            else:
+                print(f"  [RUN] ⚠ no URL configured for kiosk '{primary_kiosk}' — using {settings.kiosk_url}. "
+                      f"Explore this kiosk in App Explorer (or set its URL in Configuration).")
 
         _app_map = None
         if Path(settings.app_map_path).exists():
             _app_map = app_map_store.load(settings.app_map_path)
             if "keyboard_map" in _app_map:
                 robot.set_keyboard_map(_app_map["keyboard_map"])
+            # Single-kiosk run → scope the map to just that kiosk's screens so the planner never
+            # plans/verifies against another kiosk's screens (no-op for legacy single-app maps).
+            # Multi-kiosk (E2E) runs keep the full map and switch apps per-device via plan tags.
+            if len(kiosk_ids) == 1 and primary_kiosk:
+                _scoped = app_map_store.scoped_to_app(_app_map, primary_kiosk)
+                _n_all  = len((_app_map.get("screens") or {}))
+                _n_sc   = len((_scoped.get("screens") or {}))
+                if _n_sc != _n_all:
+                    print(f"  [RUN] Scoped app_map to kiosk '{primary_kiosk}': {_n_sc}/{_n_all} screens")
+                _app_map = _scoped
 
         # Real robot: calibrate once up front so the very first tap uses the camera's MEASURED
         # resolution (scale factors) instead of the config fallback.  Non-fatal on failure.
@@ -1380,8 +1456,10 @@ def _execute_run(run_id: str, req: RunRequest):
         db.commit()
         _broadcast(run_id, {"event": "run_error", "run_id": run_id, "error": str(e)})
     finally:
-        # Restore the base screenshots dir so later exploration/other work isn't misdirected.
+        # Restore the base screenshots dir + global kiosk URL so later exploration/other work
+        # isn't misdirected by this run's per-kiosk overrides.
         settings.screenshots_dir = _prev_screens_dir
+        settings.kiosk_url       = _prev_kiosk_url
 
 
 def _run_defect_agent(run_id: str, kiosk_id: str, failed_results: list):
