@@ -294,6 +294,24 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
         # ── type ──────────────────────────────────────────────────────────────
         if action == "type":
             value = _resolve_credentials(step.get("value", ""), scenario, credentials)
+            px  = step.get("px", 0)
+            py  = step.get("py", 0)
+            eid = step.get("element_id", "")
+            sid = step.get("screen_id", "")
+            # Focus the target field FIRST when the plan supplies its coordinates. type_text() types
+            # into whatever is currently focused and its clear (Ctrl+A) selects text in the focused
+            # element — with NOTHING focused, Ctrl+A selects the whole PAGE and the value goes nowhere
+            # (observed on VPS: every field highlighted, amount 300 never entered). Login-style plans
+            # emit a separate tap step before the type (field already focused, no px/py on the type
+            # step → skip). A standalone type step — "enter amount 300" — carries its own px/py and
+            # NO preceding tap, so it must self-focus. This makes typing work for EVERY app, not just
+            # login flows (previously it only worked when a prior tap happened to focus the field).
+            if px and py:
+                print(f"    {i:>2}. focus {eid!r} @ ({px},{py})  (focus before type)")
+                robot.tap(px, py)
+                time.sleep(0.3)
+            else:
+                print(f"    {i:>2}. type  (no coords on step — relying on prior tap's focus)")
             print(f"    {i:>2}. type  {value!r}")
             robot.type_text(value, clear_first=True)
             time.sleep(0.3)
@@ -303,7 +321,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 if after_shot:
                     last_screenshot = after_shot
             sr = {"step": f"type: {value[:30]}", "success": True, "method": "app_map",
-                  "screenshot_after": after_shot}
+                  "screen_id": sid, "element_id": eid, "screenshot_after": after_shot}
             step_results.append(sr)
             if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
             continue
@@ -614,7 +632,8 @@ def run_vision_step(state: TestRunnerState) -> dict:
     #   demo       → verify always passes (scripted demo path)
     if structured_plan:
         backend = settings.robot_backend
-        print(f"  [RUN] Tier-1/2 [{backend}] — executing {len(structured_plan.get('steps') or [])} steps from app_map (0 LLM calls)")
+        print(f"  [RUN] TIER-1/2 EXECUTION [{backend}] — running {len(structured_plan.get('steps') or [])} "
+              f"stored-coordinate steps from the app map (0 LLM calls)")
 
         # Reset to app entry and wait for the SPA / camera to settle before
         # the first verify step.
@@ -642,16 +661,18 @@ def run_vision_step(state: TestRunnerState) -> dict:
             else:
                 completed = step_results         # keep the failed verify/tap in the audit trail
             t3_mode = "resume"
+            _why = last_sr.get("observation") or last_sr.get("note") or last_sr.get("step", "")
             print(
-                f"\n  [RUN] Tier-1/2 stopped at step {failed_idx + 1} "
-                f"(method={last_sr.get('method', '?')}) — resuming Tier-3 from current screen (no reset)"
+                f"\n  [RUN] TIER-1/2 EXECUTION: {outcome.upper()} at step {failed_idx + 1} "
+                f"(method={last_sr.get('method', '?')}) — reason: {_why!r}"
             )
+            print(f"  [RUN] → handing off to TIER-3 (vision agent), resuming from the CURRENT screen (no reset)")
             t3_result = _run_tier3_continue(state, tc, completed, failed_idx)
 
             t3_steps   = t3_result.get("step_results") or []
             t3_outcome = t3_result.get("outcome", "failed")
             t3_passed  = sum(1 for r in t3_steps if r.get("success"))
-            print(f"\n  [TIER-3/{t3_mode}] {tc['test_id']}  {t3_outcome.upper()}  ({t3_passed}/{len(t3_steps)} steps passed)")
+            print(f"\n  [RUN] TIER-3 (vision) RESULT: {tc['test_id']}  {t3_outcome.upper()}  ({t3_passed}/{len(t3_steps)} steps passed)")
             if t3_result.get("screen_history"):
                 print(f"           Journey: {' -> '.join(t3_result['screen_history'])}")
             test_result: TestResult = {
@@ -666,7 +687,7 @@ def run_vision_step(state: TestRunnerState) -> dict:
             }
             return {"test_results": [*(state.get("test_results") or []), test_result]}
 
-        print(f"\n  [RESULT] {tc['test_id']}  {outcome.upper()}  ({passed}/{len(step_results)} steps passed)")
+        print(f"\n  [RUN] TIER-1/2 EXECUTION: {outcome.upper()} — {tc['test_id']}  ({passed}/{len(step_results)} steps passed, 0 LLM calls)")
 
         test_result: TestResult = {
             "test_id":        tc["test_id"],
@@ -678,7 +699,7 @@ def run_vision_step(state: TestRunnerState) -> dict:
         return {"test_results": [*(state.get("test_results") or []), test_result]}
 
     # ── Tier 3: VisionAgent (screenshot + Claude vision per step) ─────────────
-    print(f"  [RUN] Tier-3 vision-agent")
+    print(f"  [RUN] TIER-3 (vision agent) — no structured plan; planning+executing from live screenshots")
 
     result = _run_tier3(state, tc)
 

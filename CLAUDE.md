@@ -374,6 +374,48 @@ Legend: ✅ fixed · ⚠️ fixed but **not verified live / fragile** · 🔲 st
     only (no `login`), an RPS test to RPS screens only. Stale `TC-VPS-001` cached plan deleted.
     **User: regenerate the plan** (Test Intake → force) so the frontend localStorage copy refreshes.
 
+### Structured-plan `type` step now focuses the field (2026-07-08)
+
+- ✅ **Type steps didn't enter the value — the whole page got "select-all"ed instead** (`TC-VPS-001`:
+  amount `300` never entered; every field highlighted; `Use Mock Card` then loaded nothing; verify
+  correctly FAILED with "$300.00 not present"). Root cause: in `run_vision_step._execute_structured_plan`
+  the `type` handler called `robot.type_text(value, clear_first=True)` **without first focusing the
+  target field**. `type_text` types into whatever is focused and its `clear_first` sends Ctrl+A — with
+  nothing focused, Ctrl+A selected the whole PAGE and the characters went nowhere. This was an
+  **app-shaped** bug, not app-specific code: login-style plans (RPS) emit a *separate tap step before*
+  the type, so the field was already focused; a standalone type step (VPS "enter amount") carries its
+  own `px/py` and has no preceding tap, so nothing was focused. Fix: the `type` handler now taps the
+  field's `px/py` to focus it **when the step carries coordinates**, then types (mirrors the App
+  Explorer's `execute_action._run_steps`). Type steps without coords still rely on the prior tap, so
+  login flows are unchanged. Generic for every app. The `tap()` exact-point branch returns the input
+  directly, so focusing never snaps to the nearby button. The plan for `TC-VPS-001` was already
+  correct — only execution was broken — so the cached plan was kept.
+- ✅ **Tier logging is now explicit end-to-end** (developer can see where a run routes/fails):
+  planning logs `TIER-1 (plan cache): HIT/MISS/STALE → moving to TIER-2`, `TIER-2: SUCCESS/FAILED →
+  TIER-3`, `TIER-3 (legacy vision)`; execution logs `TIER-1/2 EXECUTION … (0 LLM calls)`, and on a
+  failure `TIER-1/2 EXECUTION: FAILED at step N (method=…) — reason: <observation> → handing off to
+  TIER-3 (vision), resuming from current screen`. The validation pipeline already reports accurate
+  reasons ("expected 'X' … but it is not present / shows 'Y'"); the earlier "wrong validation" was a
+  downstream symptom of the unfocused-type bug, resolved by the fix. **User: re-run `TC-VPS-001`** to
+  confirm the amount is entered and the balance verifies (needs the live browser + Claude API).
+  ✅ **Confirmed live: `TC-VPS-001` PASSED** after this fix.
+
+### Studio crashed on a malformed plan `required_config` (2026-07-08)
+
+- ✅ **Test Intake page white-screened during plan generation for `TC-RPS-001`** — `Uncaught
+  TypeError: Cannot read properties of undefined (reading 'toLowerCase')` at `TestIntake.tsx:467`
+  (`placeholder={`Enter ${f.label.toLowerCase()}`}`). Root cause: Claude's generated plan included a
+  `required_config` entry that omitted `label` (the `_TC_PLAN_PROMPT` schema lists key/label/type but
+  the model doesn't always emit all three), and the UI dereferenced `f.label` unguarded. Fixed at BOTH
+  layers so neither a bad plan nor a bad render can recur (generic, not RPS-specific):
+  - **Frontend (`kiosk-test-studio/TestIntake.tsx`)** — `credFields` now drops entries with no `key`
+    and falls back to `key` for a missing `label`, so the page can never crash on plan data.
+  - **Backend (`api/main.py` `POST /tc-plan`)** — normalises `required_config` before caching/returning:
+    drops non-dict/keyless entries, defaults `label` from the key (`existing_card_number` →
+    "Existing Card Number") and `type` to `text`. Unit-tested: missing-label defaulted, keyless/garbage
+    dropped. Root-cause fix so malformed config never reaches the UI or the plan cache.
+  - **User: regenerate the `TC-RPS-001` plan** (Test Intake) so the cleaned config replaces the cached one.
+
 ### Studio / infrastructure (sibling `kiosk-test-studio`)
 
 - ✅ **`fetch` had no timeout** — dashboard hung on "Loading…", Reset froze uncancellably, readiness

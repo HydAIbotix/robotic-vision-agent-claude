@@ -850,6 +850,23 @@ def get_tc_plan(req: TcPlanRequest, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(500, f"Plan generation failed: {e}")
 
+    # Normalise required_config so a malformed entry can never break the studio (it crashed the
+    # Test Intake page reading `label.toLowerCase()` on a Claude entry that omitted `label`).
+    # Drop entries without a key; default label from the key and type to "text".
+    _norm_cfg = []
+    for c in (plan.get("required_config") or []):
+        if not isinstance(c, dict):
+            continue
+        key = (c.get("key") or "").strip()
+        if not key:
+            continue
+        _norm_cfg.append({
+            "key":   key,
+            "label": (c.get("label") or key.replace("_", " ").title()),
+            "type":  (c.get("type") or "text"),
+        })
+    plan["required_config"] = _norm_cfg
+
     # Stamp and save using the shared plan_cache (same file the test runner reads)
     plan["generated_at"] = datetime.utcnow().isoformat() + "Z"
     _plan_cache.invalidate_all_for(req.test_id)  # remove any stale hash-based files

@@ -79,24 +79,31 @@ def _record(event_type: str, endpoint: str, cmd_id: str,
         _events.pop(0)
 
 
-def _post_to(base: str, endpoint: str, body: dict, timeout: float = 10.0) -> dict:
+def _resp_timeout(timeout: Optional[float] = None) -> float:
+    """Per-call HTTP response timeout — configurable via settings.robot_response_timeout_s (2s
+    default). Every robot REST call uses this so a hung/slow robot fails fast and gracefully
+    instead of stalling the suite. Callers may override for genuinely long single calls (capture)."""
+    return timeout if timeout is not None else settings.robot_response_timeout_s
+
+
+def _post_to(base: str, endpoint: str, body: dict, timeout: Optional[float] = None) -> dict:
     url = f"{base}/{endpoint.lstrip('/')}"
     t0  = time.time()
-    resp = requests.post(url, json=body, timeout=timeout)
+    resp = requests.post(url, json=body, timeout=_resp_timeout(timeout))
     t1  = time.time()
     _record("POST", endpoint, body.get("cmd_id", ""), t0, t1, resp.status_code, {})
     resp.raise_for_status()
     return resp.json()
 
 
-def _post(endpoint: str, body: dict, timeout: float = 10.0) -> dict:
+def _post(endpoint: str, body: dict, timeout: Optional[float] = None) -> dict:
     return _post_to(_base_for(endpoint), endpoint, body, timeout)
 
 
-def _get(endpoint: str, timeout: float = 5.0) -> dict:
+def _get(endpoint: str, timeout: Optional[float] = None) -> dict:
     url = f"{_base_for(endpoint)}/{endpoint.lstrip('/')}"
     t0  = time.time()
-    resp = requests.get(url, timeout=timeout)
+    resp = requests.get(url, timeout=_resp_timeout(timeout))
     t1  = time.time()
     _record("GET", endpoint, "", t0, t1, resp.status_code, {})
     resp.raise_for_status()

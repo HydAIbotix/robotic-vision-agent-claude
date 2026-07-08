@@ -100,6 +100,11 @@ class Settings(BaseSettings):
     arm_move_timeout_s: float = 30.0
     card_op_timeout_s: float = 30.0
     robot_poll_interval_s: float = 0.5
+    # Max time to wait for a SINGLE robot REST call to respond (HTTP request timeout). The physical
+    # arm/AGV can be slow to answer; if a command gets no response within this window we abort and
+    # fail the step gracefully (see run_vision_step's try/except → Tier-3/fail path). Kept small and
+    # configurable so a hung robot never stalls a whole suite. Applies to every real-robot API call.
+    robot_response_timeout_s: float = 2.0
 
     # Management API (FastAPI server for management frontend)
     api_host: str = "0.0.0.0"

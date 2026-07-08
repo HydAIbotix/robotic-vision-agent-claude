@@ -118,13 +118,16 @@ def parse_steps(state: TestRunnerState) -> dict:
         if app_id:
             app_map = app_map_store.scoped_to_app(app_map, app_id)
 
+    _scope_note = f" (scoped to kiosk '{tc.get('kiosk_id')}')" if tc.get("kiosk_id") else ""
+    print(f"\n  [PLAN] {tc['test_id']}: selecting a plan tier{_scope_note}")
+
     # ── Tier 1: cache lookup ──────────────────────────────────────────────────
     if app_map:
         map_version = app_map_store.version_hash(app_map)
         cached = plan_cache.load(tc["test_id"], tc["steps_raw"], map_version, tc.get("expected_results_raw", ""))
         if cached and plan_cache.is_valid(cached, app_map):
             n = len(cached.get("steps") or [])
-            print(f"\n  [PARSE] Tier-1 cache hit — {n} steps  (0 LLM calls)")
+            print(f"  [PLAN] TIER-1 (plan cache): HIT — reusing cached {n}-step plan (0 LLM calls)")
             _print_plan(cached)
             return {
                 "structured_plan":   cached,
@@ -132,13 +135,14 @@ def parse_steps(state: TestRunnerState) -> dict:
                 "credential_scenario": cached.get("credential_scenario", "valid"),
             }
         if cached:
-            print(f"\n  [PARSE] Cache stale (element missing from current app_map) — re-planning")
+            print(f"  [PLAN] TIER-1 (plan cache): STALE — cached plan references elements no longer in "
+                  f"the app map → moving to TIER-2 (re-plan)")
         else:
-            print(f"\n  [PARSE] No cache entry — generating plan")
+            print(f"  [PLAN] TIER-1 (plan cache): MISS — no cached plan → moving to TIER-2 (re-plan)")
 
     # ── Tier 2: re-plan from element inventory (text-only LLM call) ───────────
     if app_map:
-        print(f"  [PARSE] Tier-2 — planning from app_map element inventory (1 text call)")
+        print(f"  [PLAN] TIER-2 (re-plan from app map): generating plan from element inventory (1 text LLM call)…")
         plan = _tier2_plan(tc, app_map, credentials)
         if plan:
             # Safety net: any tap with an empty element_id is a hallucinated step —
@@ -150,10 +154,10 @@ def parse_steps(state: TestRunnerState) -> dict:
                     step["description"] = step.get("description") or "complete remaining test steps via vision"
                     _n_converted += 1
             if _n_converted:
-                print(f"  [PARSE] ⚠ {_n_converted} empty-element tap(s) converted → vision_required")
+                print(f"  [PLAN] ⚠ {_n_converted} empty-element tap(s) converted → vision_required (Tier-3 will handle them)")
 
             n = len(plan.get("steps") or [])
-            print(f"  [PARSE] Tier-2 plan: {n} steps")
+            print(f"  [PLAN] TIER-2: SUCCESS — produced {n}-step plan (cached for reuse)")
             _print_plan(plan)
             # Cache for future runs
             plan_cache.save(plan, tc["test_id"], tc["steps_raw"], map_version, tc.get("expected_results_raw", ""))
@@ -162,10 +166,12 @@ def parse_steps(state: TestRunnerState) -> dict:
                 "planned_steps":     [],
                 "credential_scenario": plan.get("credential_scenario", "valid"),
             }
-        print(f"  [PARSE] Tier-2 failed — falling back to Tier-3")
+        print(f"  [PLAN] TIER-2: FAILED — Claude returned no usable plan → falling back to TIER-3 (legacy vision)")
+    else:
+        print(f"  [PLAN] No app map available → skipping TIER-1/TIER-2, using TIER-3 (legacy vision)")
 
     # ── Tier 3: legacy format (no app_map, or Tier-2 failed) ─────────────────
-    print(f"  [PARSE] Tier-3 — legacy vision-agent format (1 text call + image calls during execution)")
+    print(f"  [PLAN] TIER-3 (legacy vision agent): planning from screenshots (1 text call + per-step image calls at run time)")
     planned_steps, scenario = _tier3_plan(tc, app_map, credentials)
     print(f"  [PARSE] {len(planned_steps)} steps (credential_scenario={scenario!r})")
     for i, s in enumerate(planned_steps, 1):
