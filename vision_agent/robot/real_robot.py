@@ -202,7 +202,7 @@ def capture_screen(save_path: str) -> dict:
     """
     t0   = time.time()
     resp = requests.post(
-        f"{_base_url()}/capture",
+        f"{_arm_base_url()}/capture",
         json={"type": "screen"},
         timeout=20.0,
     )
