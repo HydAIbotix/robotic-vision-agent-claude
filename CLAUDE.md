@@ -205,6 +205,129 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
 
 ---
 
+## Active & Past Issues
+
+Debugging history from the build session ("Robotics vision sub-agent with LangGraph", 2026-06-25 →
+07-01) plus follow-ups. Read this before touching coordinate math, the robot backends, the explorer,
+or the Tier-3 path — most of these are subtle and have bitten us already.
+Legend: ✅ fixed · ⚠️ fixed but **not verified live / fragile** · 🔲 still open.
+
+### Coordinate & vision accuracy (the fragile foundation — most bugs trace here)
+
+- ✅ **Double-multiplied coordinates (taps millions of px off-screen).** `analyze_screen` already
+  converted normalized→pixels before storing in `app_map`, then `execute_action._get_pixel_center`
+  multiplied by the viewport *again* (`981 × 1400 = 1,373,400`). Fix: `_get_pixel_center` returns the
+  stored pixel center directly; deleted the stale `_VIEWPORT_W/H` constants.
+- ✅ **Vision returns MIXED coordinate scales in one response** — some elements normalized `[0,1]`,
+  others raw pixels, in the same reply; `_norm_to_px` blew up the pixel ones ~1400×. Fix: made
+  `_norm_to_px` **per-value scale-aware** (single source in `analyze.py`, imported by
+  `explore_screen.py`), and made `_dom_correct_elements` DOM-authoritative (a text match snaps to the
+  DOM's exact coordinate regardless of distance; each DOM element consumed once). ⚠️ Root-cause fix
+  was unit-tested on the captured broken data but **never confirmed in a live exploration** — old
+  maps have bad coords baked in and must be cleared + re-explored.
+- ✅ **DOM snap to the wrong element** (Sign In landed on the password field / a dev-settings link).
+  Claude placed the button ~40px too high; the nearest-element snap ignored element type. Fix: `tap()`
+  tries `document.elementFromPoint` first, then searches within an 80px radius sorting
+  `<button>` → `<input>` → distance.
+- ✅ **Tier-3 screenshot captured mid-transition** → false "screen did not transition" → retry on the
+  wrong screen → FAIL. Login API is async (~300–700ms) but `tap()` waited only 300ms. Fix: `tap()`
+  now `wait_for_load_state("domcontentloaded", timeout=1200)` after click. ⚠️ **Must be mirrored into
+  `real_robot.py`** (real backend uses a fixed `time.sleep(0.8)` — see the robot-parity note below).
+- 🔲 **Coordinate accuracy from vision is mitigated, not solved.** The DOM snap, button-preference
+  sort, and scale-tolerant converter all compensate for Claude returning imprecise/mixed coordinates.
+  A mid-session regression (elements shifted, e.g. `email_input` x=462 vs expected x=981) was never
+  fully root-caused — attributed to a changed/left-aligned kiosk layout or DPI/viewport difference.
+
+### Robot interaction (Playwright & keyboard)
+
+- ✅ **Login never submitted** — `tap()` used JS `element.click()`, which fires only `click`, not
+  `mousedown→focus→mouseup`, so React's `onFocus` never opened the on-screen keyboard and the
+  controlled `inputMode="none"` field never updated. Fix: click via `page.mouse.click(cx,cy)` (real
+  event chain); type via `page.keyboard.type(text, delay=30)` so `onChange` fires per char.
+- ✅ **Virtual-keyboard typing errors.** Three causes: (a) the on-screen keyboard is *one-shot* but
+  `_click_key` tapped shift **before and after** an uppercase letter → re-enabled caps
+  ("Password123" → "PASSWORD123"); (b) space looked up as `' '` but stored as `"space"`; (c) the
+  "Done" key coordinate sometimes hit the adjacent `-` key. Fix: remove the second shift tap; map
+  `" " → "space"`; dismiss via `[data-testid="keyboard-done"]` before falling back to coordinates.
+- ✅ **Keyboard mapping tapped a display label** — `_map_keyboard`'s type filter included `"text"`,
+  which matched `header_title` instead of an input. Fix: drop `"text"` from the filter.
+- ✅ **`Mouse.wheel()` signature crash** — called with 4 args; Playwright takes `wheel(dx, dy)`. Fix:
+  `mouse.move(x,y)` then `mouse.wheel(0, delta_y)`.
+- ✅ **Session persisted across resets** — `reset_to_entry()` navigated to root but the SPA restored
+  its session from `localStorage` and auto-redirected to products. Fix: clear `localStorage` +
+  `sessionStorage` before navigating.
+
+### App Explorer correctness
+
+- ✅ **Excessive logout/login; `sign_out` explored from every page** — `execute_action` called
+  `reset_to_entry()` (full login replay) before *every* action. Fix: skip reset when the current DOM
+  screen matches the action's source; use `navigate_to_screen()` (one sidebar click) between
+  authenticated screens; full-reset only when a valid login is genuinely required
+  (`_requires_valid_login`). Global elements deduped via `app_map["element_transitions"]`. Removed
+  kiosk-specific hardcoding (`_DOM_SCREENS`, `_NAV_LABELS`, `_AUTHENTICATED_SCREEN_IDS`).
+- ✅ **SPA nav screens collapsed to one perceptual hash** — all views share URL `localhost:5173` and
+  the shared sidebar dominates the 16×16 aHash, so distinct screens hashed identically. Fix:
+  `get_dom_screen_id()` reads each screen's unique `data-testid="*-screen"` as the primary oracle in
+  `identify_result.py`, before hash lookup.
+- ✅ **Skeleton/"unknown" screen entries; sign-up misidentified as login** — `identify_result` created
+  a skeleton entry, so `explore_screen`'s `screen_id not in screens` check skipped analysis. Fix:
+  gate on `if not existing.get("elements")`; when `screen_id == "unknown"` use
+  `last_result_screen_id`; prefer `last_result_screen_id` over `_analyze_fresh` (which returns "login"
+  for the look-alike sign-up form).
+- ✅ **Commerce walkthrough never reached cart/payment/success.** Three compounding bugs in
+  `run_explorer.py`: (a) looked up login by `entry_screen="signin"` but the screen was keyed
+  `"sign_in"`; (b) tapped "Add to Cart" with quantity 0 (never incremented); (c) searched increment
+  by id-keywords `"increment"/"plus"` but the real element was `nexora_increase` (type `stepper`,
+  label `+`). Fix: find the login screen **by content** (email + sign-in elements), increment before
+  add-to-cart, and let Opus pick elements by goal rather than hardcoded ids; DOM-verify each nav.
+
+### Test Runner / Tier-3
+
+- ✅ **`(0,0)` tap treated as success → false PASS, Tier-3 never fired.** Screens missing from the
+  app_map at plan time got `(0,0)` coords; the executor counted that as success so `outcome` never
+  became `failed`. Fix: in `run_vision_step.py`, treat a `(0,0)` tap as an explicit failure to trip
+  the Tier-3 vision fallback. (Real cure is exploration reaching those screens.)
+- ✅ **Hardcoded credentials / login loop.** Tier-3 looped logging in with `user@example.com` — a
+  literal example in the `PLAN_STEPS` prompt (`vision_agent/prompts.py`), and intake credentials were
+  never threaded in. Fix: removed the example, added a "use only provided credentials" rule, thread
+  intake `credentials` in via `cred_hint`, and resume from the current screen on failure instead of
+  resetting to login. **Hard rule: never hardcode credentials anywhere.**
+- ✅ **Bare `json.loads()` crashed the whole run** on one empty/transient LLM response
+  (`Expecting value: line 1 column 1`). Fix: resilient `invoke_json()` in `vision_agent/llm.py`
+  (retries, empty/multi-block handling, safe fallback), applied to plan/validate/explorer nodes — one
+  bad response now degrades a single step, not the run.
+- ⚠️ **Validation silently skipped + hallucinated verdict** — a wrong-total test PASSED and the report
+  claimed it "verified $856" when the screen showed $756.67. Field-name mismatch: executor read
+  `expected_text`, plan wrote `expected_value`, so the check was skipped and `conclusive_verdict`
+  fabricated a match. Fix: read **both** keys; an empty-DOM verify now **auto-FAILS** (was
+  auto-passing); failure message reports the actual on-screen value. Backend verified; **full browser
+  re-verification was still pending** at the last checkpoint.
+
+### Studio / infrastructure (sibling `kiosk-test-studio`)
+
+- ✅ **`fetch` had no timeout** — dashboard hung on "Loading…", Reset froze uncancellably, readiness
+  showed API ✅ before it responded. Fix: `req()` uses `AbortController` (10s default, 30s for
+  `/reset`), Cancel aborts the in-flight request, `apiOnline` starts `false`.
+- ✅ **`ECONNREFUSED` — Vite proxy IPv6 vs uvicorn IPv4.** On Win11 + Node 17+, `localhost` resolves
+  to `::1` first but uvicorn bound IPv4-only. Fix: proxy target set to explicit
+  `http://127.0.0.1:8001`.
+- ✅ **Reset didn't clear data / exploring a down app "succeeded".** ORM bulk-deletes silently skipped
+  rows (and an old uvicorn predated the `/reset` route); explore never checked URL reachability. Fix:
+  raw SQL `DELETE FROM …`; reachability check in `start_explore()` returns HTTP 400 immediately when
+  the URL is unreachable.
+
+### Lingering / open items
+
+- 🔲 **Mixed-scale coordinate fix unverified live** — clear existing app maps and re-explore with a
+  real Claude API + browser to confirm end-to-end.
+- 🔲 **Real-robot backend parity** — every Playwright-side interaction fix (esp. the post-click
+  settle/`wait_for_load_state` from the mid-transition bug) must be mirrored into `real_robot.py`.
+  This ties into the `_base_url`-era refactor: keep arm vs AGV routing and timing in sync.
+- 🔲 **Unexplained coordinate regression** — the layout-shift episode was worked around ("restore the
+  previous layout"), not fixed in code.
+- 🔲 **Verification debt** — the validation-field fix and per-run screenshot routing had backend edits
+  but frontend build + browser verification were still pending at the last checkpoint.
+
 ## Conventions
 
 - Add config via `vision_agent/config.py` `Settings` (never read `os.environ` directly).
