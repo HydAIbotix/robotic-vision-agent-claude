@@ -122,6 +122,7 @@ initial: ExplorerState = {
     "last_result_is_new":    False,
     "last_result_screen_id": "",
     "approach_paths":        {},
+    "captured_values":       {},
     "complete":              False,
 }
 

@@ -331,6 +331,20 @@ Legend: ✅ fixed · ⚠️ fixed but **not verified live / fragile** · 🔲 st
   SAME Kiosk ID that appears in Configuration → Device Map (so URL persists + screens re-tag);
   (2) confirm each Device Map alias (e.g. `VPS`, `RPS`) maps to that kiosk_id. Re-uploading the test
   Excel is optional — execution re-resolves each test's kiosk via the Device Map at run time.
+- ✅ **Clear-ALL-apps left previous kiosk's screenshots behind.** `_delete_exploration_shots(None)`
+  only deleted files matching a prefix allowlist (`explore_/aria_/scroll_/walkthrough_`), so
+  `keyboard_map_*.png`, `calibration.png`, `health_capture.png` survived and showed up on the App Map
+  after re-exploring another kiosk. Fix: global clear now nukes EVERY top-level image file + the whole
+  `annotated/` folder (execution shots live in per-run subfolders and are untouched — verified by test).
+  Per-app clear stays surgical (only the cleared app's screens' shots; other apps preserved).
+- ✅ **Explorer now captures & reuses app-generated identifiers.** The explorer couldn't reach
+  stateful management flows (add money / check balance of a *just-issued* card) because it had no way
+  to carry the generated card number across screens. Fix: `SUGGEST_EXPLORABLE_ACTIONS` now (a) mandates
+  exploring account/card/entity **management** actions (top-up, balance, view/manage existing, history),
+  and (b) captures identifiers the app displays into `captured_values`, reusable on later screens via
+  `{{captured.NAME}}`. New `ExplorerState.captured_values` accumulates them in `explore_screen`;
+  `execute_action._resolve` substitutes them (like credential placeholders). Discover during
+  exploration, not deferred to test-time. ⚠️ Needs a live exploration run to confirm end-to-end.
 
 ### Studio / infrastructure (sibling `kiosk-test-studio`)
 

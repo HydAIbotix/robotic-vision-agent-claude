@@ -474,10 +474,17 @@ def explore_screen(state: ExplorerState) -> dict:
         for el in elements
     )
 
+    captured = dict(state.get("captured_values") or {})
+    available_captured = (
+        "\n".join(f"  {{{{captured.{k}}}}} = {v!r}" for k, v in captured.items())
+        if captured else "  (none captured yet)"
+    )
+
     prompt = SUGGEST_EXPLORABLE_ACTIONS.format(
         screen_id=screen_id,
         screen_description=screen["description"],
         elements_text=elements_text,
+        available_captured=available_captured,
         valid_email=valid.get("email", "tester@example.com"),
         valid_password=valid.get("password", "Password123"),
         invalid_email=invalid.get("email", "baduser@example.com"),
@@ -486,6 +493,17 @@ def explore_screen(state: ExplorerState) -> dict:
 
     data = invoke_json(get_explorer_llm(), [HumanMessage(content=prompt)],
                        default={"explorable_actions": []}, label="suggest_actions")
+
+    # Accumulate any identifier Claude captured on this screen (issued card number, order id, …)
+    # so later screens' management flows can reuse it via {{captured.NAME}}.  Never overwrite an
+    # existing capture with an empty/placeholder value.
+    new_caps = data.get("captured_values") or {}
+    if isinstance(new_caps, dict):
+        for k, v in new_caps.items():
+            if v and str(v).strip() and "{{" not in str(v):
+                captured[str(k)] = str(v).strip()
+        if new_caps:
+            print(f"  [EXPLORE] '{screen_id}': captured values → {list(new_caps.keys())}")
 
     # ── 5b. Persist element dependencies as ground truth on the screen ────────
     # These record which action elements (add / submit / confirm / proceed) consume state
@@ -583,4 +601,5 @@ def explore_screen(state: ExplorerState) -> dict:
         "exploration_queue":  queue,
         "last_result_is_new": False,
         "approach_paths":     approach_paths,
+        "captured_values":    captured,
     }

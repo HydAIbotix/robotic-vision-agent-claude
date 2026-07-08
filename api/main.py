@@ -1059,17 +1059,37 @@ def _delete_exploration_shots(screen_ids: Optional[set[str]] = None) -> int:
     screen_ids=None → delete ALL exploration shots (global clear / clean slate).
     screen_ids given → delete only those screens' annotated shots, plus raw shots whose
                        filename references one of those screen ids (per-app clear).
-    Execution screenshots (screenshots/<run_id>/…) are never affected.
+    Execution screenshots (screenshots/<run_id>/…) are never affected — they live in per-run
+    SUBFOLDERS, and every loop here only touches FILES at the top level (or in annotated/).
     """
     base = _base_screens_dir()
     removed = 0
-
-    # Annotated: screenshots/annotated/<screen_id>_<ts>.png
     ann_dir = base / "annotated"
+
+    # ── Global clear = true clean slate ───────────────────────────────────────
+    # Remove EVERY top-level capture regardless of prefix/extension and the whole annotated
+    # folder.  Prefix-filtering (below) missed artifacts like keyboard_map_*.png, calibration.png
+    # and health_capture.png, so re-exploring another kiosk left the previous kiosk's shots on the
+    # App Map page.  This nukes all of them; execution shots (subfolders) are skipped by is_file().
+    if screen_ids is None:
+        if base.exists():
+            if ann_dir.exists():
+                for f in ann_dir.glob("*"):
+                    if f.is_file():
+                        try: f.unlink(); removed += 1
+                        except OSError: pass
+            for f in base.iterdir():
+                if f.is_file() and f.suffix.lower() in {".png", ".jpg", ".jpeg"}:
+                    try: f.unlink(); removed += 1
+                    except OSError: pass
+        return removed
+
+    # ── Per-app clear = only the given screens' shots (other apps preserved) ───
+    # Annotated: screenshots/annotated/<screen_id>_<ts>.png
     if ann_dir.exists():
         for f in ann_dir.glob("*.png"):
             sid = f.stem.rsplit("_", 1)[0] if f.stem.rsplit("_", 1)[-1].isdigit() else f.stem
-            if screen_ids is None or sid in screen_ids:
+            if sid in screen_ids:
                 try: f.unlink(); removed += 1
                 except OSError: pass
 
@@ -1077,7 +1097,7 @@ def _delete_exploration_shots(screen_ids: Optional[set[str]] = None) -> int:
     for f in base.glob("*.png"):
         if not f.name.startswith(_EXPLORE_SHOT_PREFIXES) and f.name != "explore_entry.png":
             continue
-        if screen_ids is None or any(sid in f.name for sid in screen_ids):
+        if any(sid in f.name for sid in screen_ids):
             try: f.unlink(); removed += 1
             except OSError: pass
     return removed

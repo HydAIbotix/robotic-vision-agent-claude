@@ -43,6 +43,11 @@ class ExplorerState(TypedDict):
     # to reach that screen.  Entry screen maps to [].  Used by execute_action to
     # reset the browser before each action regardless of what ran before.
     approach_paths: dict
+    # Identifiers the app generated & displayed during exploration (e.g. an issued card
+    # number), keyed by snake_case name.  Accumulated by explore_screen from Claude's
+    # captured_values; consumed by execute_action via {{captured.NAME}} placeholders so
+    # stateful management flows (add money / check balance) can be reached during exploration.
+    captured_values: dict
 
     # ── Output ────────────────────────────────────────────────────────────────
     complete: bool

@@ -13,6 +13,10 @@ Available credentials for form testing:
   valid:   email={valid_email}, password={valid_password}
   invalid: email={invalid_email}, password={invalid_password}
 
+Identifiers the app has ALREADY generated during this exploration (reuse these — see the
+"USING VALUES THE APP JUST GENERATED" section below):
+{available_captured}
+
 Return ONLY valid JSON:
 {{
   "explorable_actions": [
@@ -36,8 +40,39 @@ Return ONLY valid JSON:
         {{"action_type": "tap", "element_id": "<the state-setter>", "value": null}}
       ]
     }}
-  ]
+  ],
+  "captured_values": {{
+    "<snake_case_name e.g. card_number>": "<the exact identifier string VISIBLE on THIS screen>"
+  }}
 }}
+
+═══ MANDATORY: ACCOUNT / CARD / ENTITY MANAGEMENT FLOWS ═══════════════════════════
+Just as important as checkout: any action that operates on an ALREADY-CREATED entity MUST be
+explored, never skipped. This includes — check balance, add money / top-up / recharge / reload,
+view or manage an existing card / account / booking / order, transaction history, edit / update,
+cancel, renew. These lead to screens the test suite must cover.
+
+Do NOT skip such a button just because it appears to need an identifier (a card number, account
+id, reference). If the app can CREATE the entity, the identifier becomes available — either it is
+shown on a screen you can reach, or it is in the "already generated" list above. Generate the
+action; supply the identifier via a captured value (below). Treat these exactly like the
+flow-completion buttons: they are mandatory and exempt from the per-screen action limit.
+
+═══ USING VALUES THE APP JUST GENERATED ═══════════════════════════════════════════
+When the app generates and DISPLAYS a new identifier (a card number, account id, order/booking
+reference, PIN, confirmation code), it must be captured so later screens can consume it — otherwise
+management flows like "add money to this card" or "check this card's balance" can never be reached
+during exploration (they'd need a value nobody remembered).
+
+  1. CAPTURE: if an element on THIS screen shows such a freshly-generated identifier, add it to
+     "captured_values" (e.g. {{"card_number": "4111 1111 1111 1111"}}). Use the exact visible string.
+  2. REUSE: when a field on THIS screen needs a previously-generated identifier (see the
+     "already generated" list above), write it into that step's value as the placeholder
+     {{{{captured.NAME}}}} — e.g.
+       {{"action_type": "type", "element_id": "card_number_input", "value": "{{{{captured.card_number}}}}"}}
+     The explorer substitutes the real captured value at execution time.
+
+Return "captured_values": {{}} when this screen displays no new identifier.
 
 ═══ MANDATORY: FLOW-COMPLETION BUTTONS ════════════════════════════════════════════
 Buttons that advance a multi-step user flow (checkout, payment, booking, order, purchase,

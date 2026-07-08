@@ -28,19 +28,27 @@ def _requires_valid_login(screen_id: str, approach_paths: dict) -> bool:
     return False
 
 
-def _resolve(value: str, credentials: dict) -> str:
-    """Substitute credential placeholders written by SUGGEST_EXPLORABLE_ACTIONS."""
+def _resolve(value: str, credentials: dict, captured: dict | None = None) -> str:
+    """Substitute credential + captured-value placeholders written by SUGGEST_EXPLORABLE_ACTIONS.
+
+    Credentials → {{valid_email}} etc.  Captured identifiers (issued card number, order id, …)
+    generated earlier in the exploration → {{captured.NAME}}, so stateful management flows
+    (add money / check balance) can be driven with the value the app itself produced.
+    """
     if not value:
         return value
     valid   = credentials.get("valid", {})
     invalid = credentials.get("invalid", {})
-    return (
+    out = (
         value
         .replace("{{valid_email}}",      valid.get("email",    "tester@example.com"))
         .replace("{{valid_password}}",   valid.get("password", "Password123"))
         .replace("{{invalid_email}}",    invalid.get("email",  "baduser@example.com"))
         .replace("{{invalid_password}}", invalid.get("password", "WrongPass!"))
     )
+    for name, val in (captured or {}).items():
+        out = out.replace(f"{{{{captured.{name}}}}}", str(val))
+    return out
 
 
 def _get_pixel_center(app_map: dict, screen_id: str, element_id: str) -> tuple[int, int] | None:
@@ -57,7 +65,8 @@ def _get_pixel_center(app_map: dict, screen_id: str, element_id: str) -> tuple[i
     return None
 
 
-def _run_steps(steps: list, screen_id: str, app_map: dict, credentials: dict) -> None:
+def _run_steps(steps: list, screen_id: str, app_map: dict, credentials: dict,
+               captured: dict | None = None) -> None:
     """
     Execute a list of ExplorationSteps against the live robot backend.
 
@@ -68,7 +77,7 @@ def _run_steps(steps: list, screen_id: str, app_map: dict, credentials: dict) ->
     for step in steps or []:
         act = step["action_type"]
         eid = step.get("element_id", "")
-        val = _resolve(step.get("value") or "", credentials)
+        val = _resolve(step.get("value") or "", credentials, captured)
         center = _get_pixel_center(app_map, screen_id, eid)
         px = center[0] if center else 700   # ~centre of 1400-wide viewport
         py = center[1] if center else 450   # ~centre of 900-tall viewport
@@ -97,6 +106,7 @@ def _do_reset_and_replay(
     approach_paths: dict,
     app_map: dict,
     credentials: dict,
+    captured: dict | None = None,
 ) -> None:
     """Full reset: clear session storage, navigate to entry URL, replay approach path."""
     robot.reset_to_entry()
@@ -104,7 +114,7 @@ def _do_reset_and_replay(
     approach = approach_paths.get(action["screen_id"], [])
     for past_action in approach:
         print(f"    [REPLAY] {past_action['screen_id']}::{past_action['action_key']}")
-        _run_steps(past_action["steps"], past_action["screen_id"], app_map, credentials)
+        _run_steps(past_action["steps"], past_action["screen_id"], app_map, credentials, captured)
         time.sleep(0.6)
 
 
@@ -115,6 +125,7 @@ def execute_action(state: ExplorerState) -> dict:
     credentials    = state.get("credentials") or {}
     app_map        = state.get("app_map") or {}
     approach_paths = state.get("approach_paths") or {}
+    captured       = state.get("captured_values") or {}
     known_screens  = app_map.get("screens") or {}
 
     full_key = f"{action['screen_id']}::{action['action_key']}"
@@ -167,10 +178,10 @@ def execute_action(state: ExplorerState) -> dict:
         print(f"    [RESET] DOM check failed ({e}) — full reset")
 
     if reset_needed:
-        _do_reset_and_replay(action, approach_paths, app_map, credentials)
+        _do_reset_and_replay(action, approach_paths, app_map, credentials, captured)
 
     # ── Execute the queued action ─────────────────────────────────────────────
-    _run_steps(action["steps"], action["screen_id"], app_map, credentials)
+    _run_steps(action["steps"], action["screen_id"], app_map, credentials, captured)
     time.sleep(1.0)  # allow any page transition to fully settle
 
     # ── Capture the result screenshot ─────────────────────────────────────────
