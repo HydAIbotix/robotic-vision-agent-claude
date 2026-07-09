@@ -416,6 +416,83 @@ Legend: ✅ fixed · ⚠️ fixed but **not verified live / fragile** · 🔲 st
     dropped. Root-cause fix so malformed config never reaches the UI or the plan cache.
   - **User: regenerate the `TC-RPS-001` plan** (Test Intake) so the cleaned config replaces the cached one.
 
+### Cross-kiosk E2E execution (load at VPS → buy at RPS → verify at VPS) (2026-07-08)
+
+`TC-E2E-001` exercised a flow spanning BOTH kiosks. Four distinct defects, all now fixed generically
+(no VPS/RPS-specific code); applies to every execution mode (playwright + real robot):
+
+- ✅ **Whole RPS half collapsed into one un-plannable `vision_required` step.** Root cause: the
+  per-kiosk plan scoping added earlier resolved the E2E test to a SINGLE kiosk and hid the other
+  kiosk's screens, so Claude had nothing to plan the RPS flow from. Fix: scoping is now KIOSK-SET
+  aware — new `_infer_kiosk_ids` returns every kiosk a test references (ordered by first mention in
+  the steps), and `store.scoped_to_apps` filters the map to the UNION of those apps. A single-kiosk
+  test still scopes tight (VPS never sees RPS's login); a cross-kiosk E2E sees BOTH apps. Wired through
+  `/tc-plan`, `_execute_run` (stamps `tc["kiosk_ids"]`), and `parse_steps` (scopes to `tc["kiosk_ids"]`),
+  so the cache key matches UI↔runner. `_TC_PLAN_PROMPT` + `PLAN_FROM_MAP` gained a CROSS-KIOSK section
+  ("plan the whole journey; tag each step's `device`; the runtime switches apps from the tag"), and the
+  shared `element_inventory_for_prompt` now tags each SCREEN with its `app/kiosk` in multi-app maps.
+- ✅ **`$4000` never entered — the `type` step had no `value`.** Claude put the amount only in the
+  description. Fix: both planner prompts now REQUIRE a non-empty `value` on every type step (and px/py
+  so the field self-focuses). The executor also fails a type step loudly if the value is empty/unresolved.
+- ✅ **"enter the SAME card number issued at VPS" was impossible** — a value generated at runtime can't
+  be hard-coded at plan time. Added a generic capture mechanism: a `capture` plan action reads the
+  displaying element's live text into a named var; later `type` steps reference it as
+  `{{captured.NAME}}`. `run_vision_step` handles `capture` (playwright DOM read via testid/point;
+  best-effort elsewhere) and substitutes `{{captured.*}}` in type values; an unresolved placeholder
+  fails the step → Tier-3. Prompts document it as the ONE allowed placeholder exception.
+- ✅ **Flow aborted silently at the Tier-3/resume hop (per the defect-intelligence report).** The
+  cross-kiosk device switch (`move_to_position` + browser `navigate_to_url`) and the tap/type robot
+  calls are now wrapped so ANY failure (real-robot API timeout, nav error) is recorded as a failed
+  step and follows the normal failure path (Tier-3 → fail) instead of crashing the suite. Added
+  explicit `[CROSS-KIOSK] switch device X → Y (kiosk Z)` logging and a loud warning when a device has
+  no configured URL (so the second app can't load).
+
+**Robot-mode parity + configurable response timeout (applies to all fixes above):**
+- ✅ New `settings.robot_response_timeout_s` (**default 2.0s**) — every real-robot REST call
+  (`_post`/`_get`/`capture`) uses it as the HTTP response timeout, so a hung/slow robot fails fast.
+  A timeout raises → the runner's try/except fails the step gracefully via the existing path. The
+  physical-action wait (`base_move_timeout_s`/`arm_move_timeout_s`) is unchanged and separate.
+- ✅ **`real_robot.move_to_position(x,y,θ)` implemented** (was missing → cross-kiosk moves were a
+  silent no-op on the real backend). It drives the base via `/base/goto` with the non-blocking
+  POST→poll pattern, so real-robot cross-kiosk hops invoke the robot API. Playwright/demo keep it a
+  no-op (URL switch handles the app change) — identical I/O across backends.
+- Execution plan preview already groups steps by `device`; with device tags now emitted per step, an
+  E2E plan renders as separate VPS / RPS groups (plan shown separated by kiosk).
+- **User: regenerate the `TC-E2E-001` plan** (stale one deleted) and re-run to confirm end-to-end
+  (needs live browser + Claude API; the card-number capture depends on the VPS "card issued" element
+  being present in the app map — if absent, that portion degrades to Tier-3 vision).
+
+### AGV / mobile-base test steps + self-explanatory command ids (2026-07-09)
+
+Raw test cases now drive the AGV (mobile base), not just the arm/touchscreen. Example steps:
+"Move the AGV to VPS → check the AGV state → wait 30s → move back home".
+
+- ✅ **Device identity is content-driven, not name-driven.** Per-step device targeting comes from the
+  STEP TEXT: Claude tags each step's `target`/`device` by reading the step (e.g. "Move AGV to VPS" →
+  `target: VPS`). The test-id is only a *fallback* input to `_infer_kiosk_ids` (which decides which app
+  maps to load for planning); it never overrides what the steps say. At runtime the device ALIAS is
+  resolved to its **kiosk_id from the Device Map** and that kiosk_id is the target passed to the robot
+  API (`VPS` → `kiosk-1` → `/base/goto {kiosk_id: "kiosk-1"}`).
+- ✅ **New plan actions for base ops** (both `_TC_PLAN_PROMPT` and `PLAN_FROM_MAP` + the executor):
+  `move` (AGV goto a device alias or reserved `home`), `check_state` (assert `/base/state` or
+  `/arm/state`, optional `expected_state`), `wait` (bounded sleep). These carry NO screen_id/px/py and
+  produce NO screenshot. `_execute_structured_plan` handles them; the cross-kiosk auto-switch is
+  skipped for these actions so a `move` never double-drives the base. `is_valid` already ignores
+  non-`tap` steps, so an AGV-only plan is cache-valid, and Tier-1 cache load now works even with no
+  app_map (pure base tests). `_PLANNER_VERSION` bumped → old plans re-generate.
+- ✅ **Self-explanatory command ids.** `real_robot._new_cmd_id(label)` now emits `cmd-<n>-<label>`
+  with a per-test counter (`reset_command_seq()` at each test start): `cmd-1-goto-VPS`,
+  `cmd-2-arm-click`, `cmd-3-arm-type`, `cmd-4-base-state`, `cmd-5-arm-abort`, `card-tap-<kiosk>`, …
+  A user reading the log/monitor can tell exactly what each command did and in what order.
+- ✅ **Robot-API telemetry in the live monitor.** Every real-robot REST call is recorded (endpoint,
+  cmd_id, HTTP status, latency, request/response time) and `_record` prints a `[ROBOT API] …` line;
+  the runner flushes new events after each step to the live monitor as `log` events
+  (`[ROBOT API] POST /base/goto (cmd-1-goto-VPS) → 202 in 34ms`). No-op for playwright/demo.
+- ✅ **Empty screenshots handled gracefully.** AGV steps set `screenshot_after: ""`; `StepShots.tsx`
+  already renders nothing for an empty path, and `_cap` returns `""` on any capture failure — no
+  broken images, no crash. All backends: real fires the base/state APIs; playwright/demo simulate an
+  idle base (no-op fallbacks added to `stubs.py`) so the same plan runs (validates structure) in dev.
+
 ### Studio / infrastructure (sibling `kiosk-test-studio`)
 
 - ✅ **`fetch` had no timeout** — dashboard hung on "Loading…", Reset froze uncancellably, readiness

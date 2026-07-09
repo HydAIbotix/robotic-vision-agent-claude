@@ -107,6 +107,32 @@ def move_to_position(x: float, y: float, theta: float) -> dict:
     return {"success": True, "x": x, "y": y, "theta": theta}
 
 
+# ── AGV / base + state (no-op fallbacks; the real backend overrides these) ────────
+# Present here so playwright / demo runs of AGV-movement test cases don't raise — they
+# simulate a healthy idle base. In real-robot mode these are provided by real_robot.py
+# and hit the physical /base/* and /*/state APIs instead.
+
+def navigate_to_kiosk(kiosk_id: str, timeout_s=None) -> dict:
+    """Simulated AGV move (no physical base in demo/playwright)."""
+    print(f"    [ROBOT] navigate_to_kiosk({kiosk_id!r}) — simulated (no base in this backend)")
+    return {"success": True, "kiosk_id": kiosk_id, "state": "idle", "simulated": True}
+
+
+def get_base_state() -> dict:
+    """Simulated AGV base state."""
+    return {"state": "idle", "simulated": True}
+
+
+def get_arm_state() -> dict:
+    """Simulated arm state."""
+    return {"state": "idle", "simulated": True}
+
+
+def get_events(since_idx: int = 0) -> list:
+    """No robot-API telemetry in demo/playwright (no physical robot calls)."""
+    return []
+
+
 def update_explorer_progress(explored: int, total: int, current_action: str = "") -> None:
     """No-op in demo/real modes — progress HUD only renders in playwright mode."""
     pass

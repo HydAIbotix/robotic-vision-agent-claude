@@ -105,6 +105,33 @@ ONLY — your plan must be correct with or without them.
 In all cases the ACTUAL low-level preconditions and checks come from the app_map, its transitions,
 and the observed prerequisites — the natural-language notes only point you in the right direction.
 
+━━━ CROSS-KIOSK / MULTI-APP FLOWS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+The inventory may contain screens from MORE THAN ONE app/kiosk (each SCREEN line is tagged with its
+"app/kiosk"). An end-to-end test can move between them (e.g. load a card on one kiosk, then buy on
+another, then return). Plan the WHOLE journey across apps, in the order the raw steps describe, and
+set each step's "device" to the alias for the app that screen belongs to. When the flow crosses to
+another app, just start tagging steps with the new device — the runtime switches apps automatically
+from the device tag; do NOT emit a step for the move itself. Use real screen_id/element_id/px/py
+from each app's own screens.
+
+━━━ RUNTIME-CAPTURED VALUES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+When a later step must reuse a value the app GENERATED at runtime (e.g. "enter the SAME card number
+issued earlier"), you cannot hard-code it. Emit a capture step when the value first appears, then
+reference it later as {{{{captured.NAME}}}}:
+  {{"action":"capture","screen_id":"<screen>","element_id":"<element that DISPLAYS the value>","capture_as":"card_number","device":"<alias>"}}
+  {{"action":"type","screen_id":"<screen>","element_id":"<input>","px":<int>,"py":<int>,"value":"{{{{captured.card_number}}}}","device":"<alias>"}}
+Only use capture when the displaying element is in the inventory; otherwise emit vision_required.
+The {{{{captured.NAME}}}} token is the ONE allowed exception to the "no placeholder tokens" rule below.
+
+━━━ AGV / MOBILE-BASE ACTIONS (no screen involved) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Some steps drive the robot's mobile base rather than touching a screen. Map them to:
+  • "Move the AGV/base to <device>" / "go to <device>" / "return to home" →
+      {{"action":"move","target":"<device alias or 'home'>"}}  (runtime resolves alias → kiosk_id → AGV goto API)
+  • "Check the AGV/arm state/status" → {{"action":"check_state","target":"agv"|"arm","expected_state":"idle"}}
+  • "Wait N seconds" → {{"action":"wait","seconds":N}}
+These carry NO screen_id/element_id/px/py and produce NO screenshot. Do not add a screen "verify"
+for a pure base movement.
+
 ━━━ UNKNOWN SCREENS / ELEMENTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 If a step needs a screen or element NOT in the inventory, do NOT invent or guess ids/coords and
 do NOT emit an empty element_id. Emit {{"action":"vision_required","description":"<remaining goal>"}}
@@ -121,21 +148,30 @@ Return ONLY valid JSON (no markdown fences) with these keys IN THIS ORDER:
      confirm an EARLIER step set the state it consumes; if any is missing, add it before finalizing.",
   "steps": [
     {{"action":"verify","expected_screen":"<screen_id>","description":"...","expected_text":"<value, only when checking one>","value_element_id":"<inventory id that shows the value>"}},
-    {{"action":"tap","screen_id":"<screen_id>","element_id":"<id from inventory>","px":<int>,"py":<int>}},
-    {{"action":"type","value":"<text to type; use the credential values above when signing in>"}},
+    {{"action":"tap","screen_id":"<screen_id>","element_id":"<id from inventory>","px":<int>,"py":<int>,"device":"<alias, in multi-app maps>"}},
+    {{"action":"type","screen_id":"<screen_id>","element_id":"<input id>","px":<int>,"py":<int>,"value":"<text to type; credential values when signing in>","device":"<alias, in multi-app maps>"}},
+    {{"action":"capture","screen_id":"<screen_id>","element_id":"<element that displays a runtime value>","capture_as":"<name>","device":"<alias>"}},
+    {{"action":"move","target":"<device alias or 'home'>"}},
+    {{"action":"check_state","target":"agv"|"arm","expected_state":"idle"}},
+    {{"action":"wait","seconds":<N>}},
     {{"action":"vision_required","description":"..."}}
   ]
 }}
 
 Hard rules:
 - tap steps: copy screen_id, element_id, px, py EXACTLY from the inventory (verbatim ids only).
+- type steps: ALWAYS include px/py for the target input (so the field is focused before typing) and
+  a non-empty "value" — never emit an empty value.
+- device: in a MULTI-APP inventory (screens tagged with app/kiosk), set "device" on every robot step
+  to that screen's app alias so cross-kiosk hops switch apps. In a single-app map, omit it.
 - verify steps: MUST include expected_screen (a screen_id from the inventory). When the test
   explicitly checks a specific value (order total, error text, transaction id), add expected_text
   with the exact expected string AND value_element_id set to the inventory id of the element on
   expected_screen that DISPLAYS that value (match by the field the step names — e.g. an order
   total → the element whose label/note identifies it as the total). Set value_element_id only
   when such an element exists in the inventory; otherwise omit it (validation falls back to vision).
-- type steps: substitute the ACTUAL value; never leave a placeholder token.
+- type steps: substitute the ACTUAL value; never leave a placeholder token — EXCEPT {{{{captured.NAME}}}}
+  for a value captured earlier by a "capture" step (see RUNTIME-CAPTURED VALUES above).
 - invalid-credential tests: credential_scenario="invalid" and use the invalid values.
 - The "reasoning" field is required and must justify every non-obvious step; a plan whose steps
   contradict or skip something in "reasoning" is wrong — fix the steps, not the reasoning.

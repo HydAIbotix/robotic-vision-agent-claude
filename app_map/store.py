@@ -120,32 +120,45 @@ def remove_app(existing: Optional[dict], app_id: str) -> Optional[dict]:
     }
 
 
-def scoped_to_app(app_map: Optional[dict], app_id: str) -> Optional[dict]:
-    """Return a copy of the multi-app map containing ONLY the given app's screens.
+def scoped_to_apps(app_map: Optional[dict], app_ids) -> Optional[dict]:
+    """Return a copy of the multi-app map containing ONLY the given apps' screens.
 
-    Used at execution time so a single-kiosk test run plans against (and verifies against)
-    just that kiosk's screens — never the screens of another kiosk that happens to live in
-    the same combined app_map.json.  All top-level keys (keyboard_map, apps, etc.) are
-    preserved; only ``screens`` is filtered and ``entry_screen`` is set to the app's own entry.
+    The general form of ``scoped_to_app`` — accepts one or MORE app_ids so a CROSS-KIOSK test
+    (e.g. an E2E flow that loads a card at VPS then buys at RPS) is planned against the UNION of
+    exactly the kiosks it touches, and no others.  A single-kiosk test passes one id and behaves
+    identically to before.  All top-level keys (keyboard_map, apps, etc.) are preserved; only
+    ``screens`` is filtered and ``entry_screen`` is set to the FIRST requested app's entry.
 
     No-op (returns the map unchanged) when:
-      - app_id is blank, or
+      - app_ids is empty, or
       - the map has no per-screen app_id tags (legacy single-app map), or
-      - no screen matches app_id (avoid returning an empty map that would break planning).
+      - no screen matches any requested app_id (avoid an empty map that would break planning).
     """
-    if not app_map or not app_id:
+    if not app_map:
         return app_map
+    wanted = [a for a in ([app_ids] if isinstance(app_ids, str) else (app_ids or [])) if a]
+    if not wanted:
+        return app_map
+    wanted_set = set(wanted)
     screens = app_map.get("screens") or {}
-    tagged  = {sid: sc for sid, sc in screens.items() if (sc.get("app_id") or "") == app_id}
+    tagged  = {sid: sc for sid, sc in screens.items() if (sc.get("app_id") or "") in wanted_set}
     if not tagged:
         return app_map
-    app_entry = ""
     apps = app_map.get("apps") or {}
-    if app_id in apps:
-        app_entry = apps[app_id].get("entry_screen", "")
+    # entry_screen = the first requested app's own entry (fall back to any tagged screen).
+    app_entry = ""
+    for aid in wanted:
+        if aid in apps and apps[aid].get("entry_screen") in tagged:
+            app_entry = apps[aid]["entry_screen"]
+            break
     if app_entry not in tagged:
         app_entry = next(iter(tagged))
     return {**app_map, "screens": tagged, "entry_screen": app_entry}
+
+
+def scoped_to_app(app_map: Optional[dict], app_id: str) -> Optional[dict]:
+    """Single-app convenience wrapper around scoped_to_apps (kept for existing call sites)."""
+    return scoped_to_apps(app_map, app_id)
 
 
 def prompt_summary(app_map: Optional[AppMap]) -> str:
@@ -178,8 +191,12 @@ def element_inventory_for_prompt(app_map: Optional[AppMap]) -> str:
         f"Entry screen: {app_map.get('entry_screen', 'unknown')}",
         "",
     ]
+    # When the map spans multiple apps/kiosks, tell the planner which app each screen belongs to so
+    # it can tag cross-kiosk steps with the right device and move between apps in the right order.
+    _multi_app = len({(sc.get("app_id") or "") for sc in (app_map.get("screens") or {}).values()} - {""}) > 1
     for sid, sc in (app_map.get("screens") or {}).items():
-        lines.append(f"SCREEN: {sid}")
+        _app = f"  (app/kiosk: {sc.get('app_id')})" if (_multi_app and sc.get("app_id")) else ""
+        lines.append(f"SCREEN: {sid}{_app}")
         lines.append(f"  Description: {sc.get('description', '')}")
         lines.append("  Interactive elements:")
         for el in sc.get("elements") or []:

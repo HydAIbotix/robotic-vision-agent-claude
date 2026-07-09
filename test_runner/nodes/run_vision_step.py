@@ -74,6 +74,30 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
     device_map  = _load_device_map()
     current_dev: str | None = None
     last_screenshot: str = ""  # updated after every step; used by subsequent verify steps
+    captured: dict[str, str] = {}   # runtime values captured mid-test (e.g. issued card number)
+
+    def _sub_captured(val: str) -> str:
+        """Substitute {{captured.NAME}} placeholders with values captured earlier in THIS test
+        (e.g. a card number issued at VPS, reused at RPS). Unknown names are left untouched."""
+        if not val or "{{captured." not in val:
+            return val
+        for name, cv in captured.items():
+            val = val.replace(f"{{{{captured.{name}}}}}", str(cv))
+        return val
+
+    def _robot_fail(idx: int, step_label: str, exc: Exception) -> None:
+        """Record a robot-action failure (e.g. a real-robot API timeout) as a normal failed step
+        so the run follows the EXISTING failure path (hand off to Tier-3, then fail) instead of
+        crashing the whole suite. Applies to every backend — playwright errors and real-robot
+        timeouts alike."""
+        reason = f"{type(exc).__name__}: {exc}"
+        print(f"    {idx:>2}. ✗ robot action failed — {reason}")
+        sr = {"step": step_label, "success": False, "method": "robot_error", "note": reason,
+              "observation": f"Robot action failed: {reason}"}
+        step_results.append(sr)
+        if run_id:
+            broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id,
+                                      "test_id": test_id, "step_index": idx, **sr})
 
     def _cap(tag: str, idx: int) -> str:
         """Capture the current screen into the run's screenshot folder. Returns the
@@ -87,30 +111,76 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             print(f"         [screenshot capture failed: {exc}]")
             return ""
 
+    # ── Robot-API telemetry → live monitor ────────────────────────────────────
+    # Every real-robot REST call is recorded (endpoint, cmd_id, status, latency, request/response
+    # time). Flush the new ones to the live monitor so a user watching a run sees each robot API
+    # call with its timing and status. No-op for playwright/demo (no physical robot calls).
+    _evt_seen = [0]
+    def _flush_robot_events() -> None:
+        try:
+            evs = robot.get_events(_evt_seen[0]) if hasattr(robot, "get_events") else []
+        except Exception:
+            evs = []
+        for ev in evs:
+            msg = (f"[ROBOT API] {ev.get('event_type','')} {ev.get('endpoint','')}"
+                   f"{(' (' + ev.get('cmd_id','') + ')') if ev.get('cmd_id') else ''} → "
+                   f"{ev.get('http_status','?')} in {ev.get('latency_ms','?')}ms")
+            if run_id:
+                broadcaster.emit(run_id, {"event": "log", "run_id": run_id, "test_id": test_id,
+                                          "message": msg, "robot_api": ev})
+        _evt_seen[0] += len(evs)
+
+    # Human-readable command ids restart at cmd-1 for each test (real backend only).
+    if hasattr(robot, "reset_command_seq"):
+        try:
+            robot.reset_command_seq()
+            _evt_seen[0] = len(robot.get_events()) if hasattr(robot, "get_events") else 0
+        except Exception:
+            pass
+
     for i, step in enumerate(plan.get("steps") or [], 1):
-        # ── device routing — move robot before first step on each new device ──
+        _flush_robot_events()   # surface the previous step's robot API calls
+        action = step.get("action", "")
+
+        # ── device routing — move robot / switch app before first step on each new device ──
+        # This is the CROSS-KIOSK hop for SCREEN-interaction steps (e.g. VPS → RPS → VPS). Any
+        # failure here (real-robot move timeout, or a browser navigation error) is recorded as a
+        # failed step so the run follows the normal failure path (Tier-3, then fail) instead of
+        # aborting silently — which is what the defect-intelligence node flagged for the E2E flow.
+        # Skipped for explicit AGV actions (move/wait/check_state): those manage their own base
+        # movement and don't interact with a device screen, so auto-switching would double-move.
         step_dev = step.get("device")
-        if step_dev and step_dev != current_dev:
+        if step_dev and step_dev != current_dev and action not in ("move", "navigate", "move_base", "wait", "check_state", "state"):
             dev_cfg = device_map.get(step_dev)
             if dev_cfg:
-                print(f"    [ROBOT] Moving to device '{step_dev}' @ ({dev_cfg['pos_x']}, {dev_cfg['pos_y']}, {dev_cfg['pos_theta']}°)")
-                robot.move_to_position(dev_cfg["pos_x"], dev_cfg["pos_y"], dev_cfg["pos_theta"])
-                time.sleep(0.8)  # allow robot/camera to settle
-                # Playwright: switch the browser to this device's app URL so the correct app's
-                # screens are shown.  (A physical robot just faces the device's own screen, so
-                # this is a no-op there.)  URL blank → single-app run, nothing to switch.
-                dev_url = dev_cfg.get("url") or ""
-                if settings.robot_backend == "playwright" and dev_url:
-                    svc = (getattr(settings, "card_service_url", "") or "").strip()
-                    if svc:
-                        dev_url += ("&" if "?" in dev_url else "?") + f"cardServiceUrl={svc}"
-                    try:
-                        robot.navigate_to_url(dev_url)
-                        time.sleep(0.5)
-                    except Exception as _e:
-                        print(f"    [PLAYWRIGHT] navigate to device url failed: {_e}")
+                _kid = dev_cfg.get("kiosk_id") or "?"
+                print(f"    [CROSS-KIOSK] Switch device '{current_dev or '—'}' → '{step_dev}' (kiosk '{_kid}')")
+                try:
+                    print(f"    [ROBOT] Moving to '{step_dev}' @ ({dev_cfg['pos_x']}, {dev_cfg['pos_y']}, {dev_cfg['pos_theta']}°)")
+                    robot.move_to_position(dev_cfg["pos_x"], dev_cfg["pos_y"], dev_cfg["pos_theta"])
+                    time.sleep(0.8)  # allow robot/camera to settle
+                    # Playwright: switch the browser to this device's app URL so the correct app's
+                    # screens are shown. (A physical robot just faces the device it drove to, so the
+                    # nav is a no-op there.) URL blank → single-app run, nothing to switch.
+                    dev_url = dev_cfg.get("url") or ""
+                    if settings.robot_backend == "playwright":
+                        if dev_url:
+                            svc = (getattr(settings, "card_service_url", "") or "").strip()
+                            if svc:
+                                dev_url += ("&" if "?" in dev_url else "?") + f"cardServiceUrl={svc}"
+                            print(f"    [CROSS-KIOSK] Navigating browser to {dev_url}")
+                            robot.navigate_to_url(dev_url)
+                            time.sleep(0.8)
+                        else:
+                            print(f"    [CROSS-KIOSK] ⚠ device '{step_dev}' (kiosk '{_kid}') has no URL configured "
+                                  f"— cannot switch apps; RPS/second-app screens will not load. Set its URL via "
+                                  f"App Explorer/Configuration.")
+                except Exception as exc:
+                    _robot_fail(i, f"switch to device {step_dev}", exc)
+                    return step_results, "failed"
             else:
-                print(f"    [ROBOT] Device '{step_dev}' not in device map — skipping move")
+                print(f"    [CROSS-KIOSK] ⚠ device '{step_dev}' not in device map — cannot move/switch; "
+                      f"steps for it may target the wrong app")
             current_dev = step_dev
         action = step.get("action", "")
 
@@ -256,7 +326,12 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 return step_results, "failed"
 
             print(f"    {i:>2}. tap   {eid!r} @ ({px},{py})  [{sid}]")
-            tap_result = robot.tap(px, py)
+            try:
+                tap_result = robot.tap(px, py)
+            except Exception as exc:
+                # e.g. real-robot API timeout (robot_response_timeout_s) — fail gracefully → Tier-3.
+                _robot_fail(i, f"tap: {eid} @ ({px},{py})", exc)
+                return step_results, "failed"
             time.sleep(0.5)
             # Fresh post-tap image for the next verify step.
             #   playwright → cheap browser screenshot; also saved as step evidence (UI).
@@ -294,10 +369,18 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
         # ── type ──────────────────────────────────────────────────────────────
         if action == "type":
             value = _resolve_credentials(step.get("value", ""), scenario, credentials)
+            value = _sub_captured(value)   # {{captured.card_number}} → the value captured earlier
             px  = step.get("px", 0)
             py  = step.get("py", 0)
             eid = step.get("element_id", "")
             sid = step.get("screen_id", "")
+            if "{{captured." in value:
+                print(f"    {i:>2}. ✗ type — unresolved capture placeholder {value!r} (nothing captured it) → fail")
+                sr = {"step": f"type: {value[:30]}", "success": False, "method": "unresolved_capture",
+                      "observation": f"Type value still contains an uncaptured placeholder: {value!r}"}
+                step_results.append(sr)
+                if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
+                return step_results, "failed"
             # Focus the target field FIRST when the plan supplies its coordinates. type_text() types
             # into whatever is currently focused and its clear (Ctrl+A) selects text in the focused
             # element — with NOTHING focused, Ctrl+A selects the whole PAGE and the value goes nowhere
@@ -306,14 +389,18 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             # step → skip). A standalone type step — "enter amount 300" — carries its own px/py and
             # NO preceding tap, so it must self-focus. This makes typing work for EVERY app, not just
             # login flows (previously it only worked when a prior tap happened to focus the field).
-            if px and py:
-                print(f"    {i:>2}. focus {eid!r} @ ({px},{py})  (focus before type)")
-                robot.tap(px, py)
-                time.sleep(0.3)
-            else:
-                print(f"    {i:>2}. type  (no coords on step — relying on prior tap's focus)")
-            print(f"    {i:>2}. type  {value!r}")
-            robot.type_text(value, clear_first=True)
+            try:
+                if px and py:
+                    print(f"    {i:>2}. focus {eid!r} @ ({px},{py})  (focus before type)")
+                    robot.tap(px, py)
+                    time.sleep(0.3)
+                else:
+                    print(f"    {i:>2}. type  (no coords on step — relying on prior tap's focus)")
+                print(f"    {i:>2}. type  {value!r}")
+                robot.type_text(value, clear_first=True)
+            except Exception as exc:
+                _robot_fail(i, f"type: {value[:30]}", exc)
+                return step_results, "failed"
             time.sleep(0.3)
             after_shot = ""
             if settings.robot_backend == "playwright":
@@ -324,6 +411,108 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                   "screen_id": sid, "element_id": eid, "screenshot_after": after_shot}
             step_results.append(sr)
             if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
+            continue
+
+        # ── capture — read a runtime value now for reuse in a later step ──────
+        # e.g. the card number issued at VPS, entered later at RPS via {{captured.card_number}}.
+        if action == "capture":
+            name = step.get("capture_as") or step.get("element_id") or "value"
+            eid  = step.get("element_id", "")
+            sid  = step.get("screen_id", "")
+            px   = step.get("px", 0); py = step.get("py", 0)
+            el   = None
+            if app_map and sid and eid:
+                el = next((e for e in ((app_map.get("screens") or {}).get(sid, {}) or {}).get("elements", [])
+                           if e.get("id") == eid), None)
+            if (not px or not py) and el and el.get("center"):
+                px, py = int(el["center"][0]), int(el["center"][1])
+            val = ""
+            try:
+                testid = (el or {}).get("testid")
+                if testid and hasattr(robot, "query_element_text"):
+                    val = robot.query_element_text(f'[data-testid="{testid}"]') or ""
+                if not val and px and py and hasattr(robot, "text_at_point"):
+                    val = robot.text_at_point(int(px), int(py)) or ""
+            except Exception as exc:
+                print(f"    {i:>2}. capture {name!r} — read failed: {exc}")
+            val = (val or "").strip()
+            captured[name] = val
+            print(f"    {i:>2}. capture {name!r} = {val!r}  [{'ok' if val else 'EMPTY → later {{captured}} will fail → Tier-3'}]")
+            sr = {"step": f"capture: {name}", "success": True, "method": "capture",
+                  "note": f"{name}={val!r}", "screen_id": sid, "element_id": eid}
+            step_results.append(sr)
+            if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
+            continue
+
+        # ── move — drive the AGV base to a device / home ─────────────────────
+        # "Move the AGV to VPS" / "Move back to home". The target device alias is resolved to its
+        # kiosk_id (the join key) and passed as the robot-API target; "home" is a reserved target.
+        # Real backend → /base/goto via robot.navigate_to_kiosk (invokes the AGV API, respects the
+        # response timeout, fails gracefully on timeout). Playwright/demo → simulated no-op.
+        if action in ("move", "navigate", "move_base"):
+            target_alias = (step.get("target") or step.get("device") or "").strip()
+            is_home = target_alias.lower() in ("home", "base", "dock")
+            # Resolve alias → kiosk_id for the API target (home passes through verbatim).
+            dev_cfg = device_map.get(target_alias) or {}
+            target = "home" if is_home else (dev_cfg.get("kiosk_id") or target_alias)
+            print(f"    {i:>2}. move  AGV → {target_alias or target!r} (robot target='{target}')")
+            try:
+                res = robot.navigate_to_kiosk(target) if hasattr(robot, "navigate_to_kiosk") else {"simulated": True}
+            except Exception as exc:
+                _flush_robot_events()
+                _robot_fail(i, f"move: AGV → {target_alias or target}", exc)
+                return step_results, "failed"
+            _flush_robot_events()
+            note = f"AGV moved to {target}" + (" (simulated)" if (res or {}).get("simulated") else "")
+            sr = {"step": f"move: AGV → {target_alias or target}", "success": True, "method": "robot_base",
+                  "device": target_alias, "note": note, "screenshot_after": ""}
+            step_results.append(sr)
+            if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
+            continue
+
+        # ── wait — sleep for N seconds (bounded) ─────────────────────────────
+        if action == "wait":
+            secs = step.get("seconds", step.get("duration_s", 0))
+            try:
+                secs = float(secs)
+            except (TypeError, ValueError):
+                secs = 0.0
+            secs = max(0.0, min(secs, 120.0))   # cap so a bad plan can't hang the suite
+            print(f"    {i:>2}. wait  {secs:g}s")
+            time.sleep(secs)
+            sr = {"step": f"wait: {secs:g}s", "success": True, "method": "wait", "screenshot_after": ""}
+            step_results.append(sr)
+            if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
+            continue
+
+        # ── check_state — assert AGV/arm state via the status API ────────────
+        # "Check the state of the AGV after reaching the device". No screenshot involved — reads
+        # /base/state (or /arm/state) and compares to the expected state when the plan names one.
+        if action in ("check_state", "state"):
+            target = (step.get("target") or "agv").strip().lower()
+            expected = (step.get("expected_state") or step.get("expected_value") or "").strip().lower()
+            try:
+                if target in ("arm", "robot") and hasattr(robot, "get_arm_state"):
+                    st = robot.get_arm_state()
+                elif hasattr(robot, "get_base_state"):
+                    st = robot.get_base_state()
+                else:
+                    st = {}
+            except Exception as exc:
+                _flush_robot_events()
+                _robot_fail(i, f"check_state: {target}", exc)
+                return step_results, "failed"
+            _flush_robot_events()
+            actual = str((st or {}).get("state", "")).lower()
+            ok = True if not expected else (expected in actual or actual in expected)
+            obs = f"{target} state = {actual or '?'}" + (f" (expected '{expected}')" if expected else "")
+            print(f"    {i:>2}. check_state {target} → {actual or '?'}  [{'PASS' if ok else 'FAIL'}]")
+            sr = {"step": f"check_state: {target}", "success": ok, "method": "robot_state",
+                  "observation": obs, "screenshot_after": ""}
+            step_results.append(sr)
+            if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
+            if not ok:
+                return step_results, "failed"
             continue
 
         # ── vision_required sentinel — planner found an uncharted screen ──────
@@ -344,6 +533,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
         # ── unknown ───────────────────────────────────────────────────────────
         print(f"    {i:>2}. [UNKNOWN action={action!r}] — skipped")
 
+    _flush_robot_events()   # surface the final step's robot API calls
     return step_results, "passed"
 
 

@@ -21,8 +21,8 @@ Non-blocking pattern (all tap/swipe/card ops)
   Timeout → POST abort endpoint → raise TimeoutError
 """
 import base64
+import re
 import time
-import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -38,6 +38,10 @@ _current_kiosk_id: str = ""
 # Telemetry ring-buffer — recent command events for management frontend polling
 _events: list[dict] = []
 _MAX_EVENTS = 500
+
+# Monotonic command counter → human-readable command ids (cmd-1-goto-VPS, cmd-2-arm-click, …).
+# Reset at the start of each run by reset_command_seq() so ids read 1..N per run.
+_cmd_seq = 0
 
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
@@ -58,13 +62,27 @@ def _base_for(endpoint: str) -> str:
     return _agv_base_url() if ep.startswith("/base") else _arm_base_url()
 
 
-def _new_cmd_id() -> str:
-    return f"cmd-{uuid.uuid4().hex[:12]}"
+def reset_command_seq() -> None:
+    """Restart the human-readable command counter (call once at the start of a run)."""
+    global _cmd_seq
+    _cmd_seq = 0
+
+
+def _new_cmd_id(label: str = "cmd") -> str:
+    """Self-explanatory command id: cmd-<n>-<label>, e.g. cmd-1-goto-VPS, cmd-3-arm-click.
+
+    The counter increments per robot command so a user reading the live monitor / robot event log
+    can tell exactly which command each id refers to and in what order it ran.
+    """
+    global _cmd_seq
+    _cmd_seq += 1
+    safe = re.sub(r"[^a-zA-Z0-9]+", "-", str(label)).strip("-") or "cmd"
+    return f"cmd-{_cmd_seq}-{safe}"
 
 
 def _record(event_type: str, endpoint: str, cmd_id: str,
             t0: float, t1: float, status: int, extra: dict) -> None:
-    _events.append({
+    evt = {
         "event_type":  event_type,
         "endpoint":    endpoint,
         "cmd_id":      cmd_id,
@@ -74,9 +92,13 @@ def _record(event_type: str, endpoint: str, cmd_id: str,
         "latency_ms":  round((t1 - t0) * 1000, 1),
         "http_status": status,
         **extra,
-    })
+    }
+    _events.append(evt)
     if len(_events) > _MAX_EVENTS:
         _events.pop(0)
+    # Console line mirrored to the run log — the runner also surfaces these in the live monitor.
+    print(f"    [ROBOT API] {event_type} {endpoint}"
+          f"{(' (' + cmd_id + ')') if cmd_id else ''} → {status} in {evt['latency_ms']}ms")
 
 
 def _resp_timeout(timeout: Optional[float] = None) -> float:
@@ -131,7 +153,8 @@ def _poll(
     # Timed out — attempt graceful abort
     if abort_ep:
         try:
-            _post(abort_ep, {"cmd_id": _new_cmd_id()}, timeout=5.0)
+            _abort_label = abort_ep.strip("/").replace("/", "-")  # /arm/abort → arm-abort
+            _post(abort_ep, {"cmd_id": _new_cmd_id(_abort_label)}, timeout=settings.robot_response_timeout_s)
         except Exception:
             pass
     raise TimeoutError(
@@ -211,7 +234,7 @@ def capture_screen(save_path: str) -> dict:
     resp = requests.post(
         f"{_arm_base_url()}/capture",
         json={"type": "screen"},
-        timeout=20.0,
+        timeout=_resp_timeout(),
     )
     t1 = time.time()
     _record("POST", "/capture", "", t0, t1, resp.status_code, {})
@@ -245,7 +268,7 @@ def tap(x: int, y: int) -> dict:
     verification without a separate /capture round-trip (saves an arm cycle).
     """
     u, v   = _scale(x, y)
-    cmd_id = _new_cmd_id()
+    cmd_id = _new_cmd_id("arm-click")
     print(f"    [ROBOT] tap viewport({x},{y}) → camera({u},{v})")
     post_resp = _post("/screen/click", {
         "kiosk_id":         _kiosk(),
@@ -388,7 +411,7 @@ def type_text(text: str, clear_first: bool = False) -> dict:
     if not points:
         return {"success": True, "text": text, "tapped_keys": 0}
 
-    cmd_id = _new_cmd_id()
+    cmd_id = _new_cmd_id("arm-type")
     print(f"    [ROBOT] type({text!r}) — {len(points)} key taps")
     _post("/screen/click", {
         "kiosk_id":         _kiosk(),
@@ -407,7 +430,7 @@ def swipe(x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> dict:
     """Swipe from (x1,y1) to (x2,y2) via two sequential taps with delay."""
     u1, v1 = _scale(x1, y1)
     u2, v2 = _scale(x2, y2)
-    cmd_id = _new_cmd_id()
+    cmd_id = _new_cmd_id("arm-swipe")
     print(f"    [ROBOT] swipe ({x1},{y1})→({x2},{y2})  [{duration_ms}ms]")
     _post("/screen/click", {
         "kiosk_id":         _kiosk(),
@@ -426,7 +449,7 @@ def setup(kiosk_definitions: list[dict], arm_poses: dict, nav_map: dict) -> dict
     Upload kiosk definitions, arm rest/home poses, and navigation map.
     Call once per robot session before any navigate_to_kiosk().
     """
-    cmd_id = _new_cmd_id()
+    cmd_id = _new_cmd_id("setup")
     body = {
         "kiosks":    kiosk_definitions,
         "arm_poses": arm_poses,
@@ -447,7 +470,7 @@ def navigate_to_kiosk(kiosk_id: str, timeout_s: Optional[float] = None) -> dict:
     """Drive the mobile base to kiosk_id; block until the robot arrives."""
     global _current_kiosk_id
     t = timeout_s or settings.base_move_timeout_s
-    cmd_id = _new_cmd_id()
+    cmd_id = _new_cmd_id(f"goto-{kiosk_id}")
     print(f"  [ROBOT] navigate_to_kiosk({kiosk_id!r})  timeout={t}s")
     _post("/base/goto", {"kiosk_id": kiosk_id, "cmd_id": cmd_id})
     result = _poll("/base/state", cmd_id, t, abort_ep="/base/abort")
@@ -456,8 +479,28 @@ def navigate_to_kiosk(kiosk_id: str, timeout_s: Optional[float] = None) -> dict:
     return result
 
 
+def move_to_position(x: float, y: float, theta: float) -> dict:
+    """Drive the mobile base to pose (x, y, theta°) before interacting with a device's touchscreen.
+
+    Backend-agnostic counterpart of stubs/playwright move_to_position (a no-op there — no physical
+    base). The test runner calls this for CROSS-KIOSK hops using each device's pose from the Device
+    Map. Non-blocking POST → poll: the HTTP call itself respects settings.robot_response_timeout_s
+    (fail fast if the base controller doesn't answer), while the physical move is awaited up to
+    base_move_timeout_s. A timeout raises, which the runner catches and fails the step gracefully."""
+    cmd_id = _new_cmd_id("base-goto")
+    print(f"  [ROBOT] move_to_position(x={x}, y={y}, θ={theta}°)")
+    _post("/base/goto", {"x": x, "y": y, "theta": theta, "cmd_id": cmd_id})
+    return _poll("/base/state", cmd_id, settings.base_move_timeout_s, abort_ep="/base/abort")
+
+
 def get_base_pose() -> dict:
     return _get("/base/pose")
+
+
+def get_base_state() -> dict:
+    """Current AGV base state (e.g. {'state':'idle'|'moving'|'error', ...}). GET, zero side-effects.
+    Used by 'check_state' plan steps to assert the base reached/settled at a device."""
+    return _get("/base/state")
 
 
 def get_arm_state() -> dict:
@@ -486,7 +529,7 @@ def calibrate(save_path: str = "./screenshots/calibration.png") -> dict:
 def card_pick(timeout_s: Optional[float] = None) -> dict:
     """Pick up a smart card from the card holder tray."""
     t      = timeout_s or settings.card_op_timeout_s
-    cmd_id = _new_cmd_id()
+    cmd_id = _new_cmd_id("card-pick")
     print("  [ROBOT] card_pick")
     _post("/card/pick", {"cmd_id": cmd_id})
     return _poll("/arm/state", cmd_id, t, abort_ep="/arm/abort")
@@ -495,7 +538,7 @@ def card_pick(timeout_s: Optional[float] = None) -> dict:
 def card_tap(reader_kiosk_id: str, timeout_s: Optional[float] = None) -> dict:
     """Present held card to the NFC reader on reader_kiosk_id."""
     t      = timeout_s or settings.card_op_timeout_s
-    cmd_id = _new_cmd_id()
+    cmd_id = _new_cmd_id(f"card-tap-{reader_kiosk_id}")
     print(f"  [ROBOT] card_tap → {reader_kiosk_id!r}")
     _post("/card/tap", {"kiosk_id": reader_kiosk_id, "cmd_id": cmd_id})
     return _poll("/arm/state", cmd_id, t, abort_ep="/arm/abort")
@@ -504,7 +547,7 @@ def card_tap(reader_kiosk_id: str, timeout_s: Optional[float] = None) -> dict:
 def card_replace(timeout_s: Optional[float] = None) -> dict:
     """Return held card to the card holder tray."""
     t      = timeout_s or settings.card_op_timeout_s
-    cmd_id = _new_cmd_id()
+    cmd_id = _new_cmd_id("card-replace")
     print("  [ROBOT] card_replace")
     _post("/card/replace", {"cmd_id": cmd_id})
     return _poll("/arm/state", cmd_id, t, abort_ep="/arm/abort")

@@ -107,38 +107,41 @@ def parse_steps(state: TestRunnerState) -> dict:
     app_map     = state.get("app_map")
     credentials = state.get("credentials") or {}
 
-    # ── Scope the map to THIS test's kiosk (single-app view) ──────────────────
-    # A test belongs to exactly one kiosk; the planner must see ONLY that kiosk's screens or it
-    # plans against the wrong app (e.g. a VPS test given RPS's login screen).  Scope here — the one
-    # planning choke point — so it's correct for every run shape, including mixed multi-kiosk runs
-    # where state carries the full combined map.  No-op for a legacy single-app map or an
-    # already-scoped map.  tc["kiosk_id"] is the resolved join key (stamped by _execute_run).
-    if app_map:
-        app_id = tc.get("kiosk_id") or ""
-        if app_id:
-            app_map = app_map_store.scoped_to_app(app_map, app_id)
+    # ── Scope the map to THIS test's kiosk(s) ─────────────────────────────────
+    # The planner must see ONLY the app(s) this test touches, or it plans against the wrong screens.
+    #   • single-kiosk test → one id  → a VPS test never gets RPS's login screen
+    #   • cross-kiosk E2E   → several → BOTH apps are visible so the RPS flow can be planned instead
+    #                                    of collapsing into one un-plannable vision_required step
+    # Scope here — the one planning choke point — so it's correct for every run shape, including mixed
+    # multi-kiosk runs where state carries the full combined map.  No-op for a legacy single-app map.
+    # tc["kiosk_ids"] is stamped by _execute_run (falls back to [kiosk_id]).
+    app_ids = tc.get("kiosk_ids") or ([tc["kiosk_id"]] if tc.get("kiosk_id") else [])
+    if app_map and app_ids:
+        app_map = app_map_store.scoped_to_apps(app_map, app_ids)
 
-    _scope_note = f" (scoped to kiosk '{tc.get('kiosk_id')}')" if tc.get("kiosk_id") else ""
+    _scope_note = f" (scoped to kiosk(s) {app_ids})" if app_ids else ""
     print(f"\n  [PLAN] {tc['test_id']}: selecting a plan tier{_scope_note}")
 
     # ── Tier 1: cache lookup ──────────────────────────────────────────────────
-    if app_map:
-        map_version = app_map_store.version_hash(app_map)
-        cached = plan_cache.load(tc["test_id"], tc["steps_raw"], map_version, tc.get("expected_results_raw", ""))
-        if cached and plan_cache.is_valid(cached, app_map):
-            n = len(cached.get("steps") or [])
-            print(f"  [PLAN] TIER-1 (plan cache): HIT — reusing cached {n}-step plan (0 LLM calls)")
-            _print_plan(cached)
-            return {
-                "structured_plan":   cached,
-                "planned_steps":     [],   # not used in Tier-1/2 path
-                "credential_scenario": cached.get("credential_scenario", "valid"),
-            }
-        if cached:
-            print(f"  [PLAN] TIER-1 (plan cache): STALE — cached plan references elements no longer in "
-                  f"the app map → moving to TIER-2 (re-plan)")
-        else:
-            print(f"  [PLAN] TIER-1 (plan cache): MISS — no cached plan → moving to TIER-2 (re-plan)")
+    # Attempt even when app_map is None: a pure AGV-movement test (move/wait/check_state, no
+    # screens) has a valid cached plan that needs no app_map. version_hash(None) → "no_map",
+    # matching what /tc-plan computed, and is_valid trusts a plan when there is no map to check.
+    map_version = app_map_store.version_hash(app_map)
+    cached = plan_cache.load(tc["test_id"], tc["steps_raw"], map_version, tc.get("expected_results_raw", ""))
+    if cached and plan_cache.is_valid(cached, app_map):
+        n = len(cached.get("steps") or [])
+        print(f"  [PLAN] TIER-1 (plan cache): HIT — reusing cached {n}-step plan (0 LLM calls)")
+        _print_plan(cached)
+        return {
+            "structured_plan":   cached,
+            "planned_steps":     [],   # not used in Tier-1/2 path
+            "credential_scenario": cached.get("credential_scenario", "valid"),
+        }
+    if cached:
+        print(f"  [PLAN] TIER-1 (plan cache): STALE — cached plan references elements no longer in "
+              f"the app map → moving to TIER-2 (re-plan)")
+    else:
+        print(f"  [PLAN] TIER-1 (plan cache): MISS — no cached plan → moving to TIER-2 (re-plan)")
 
     # ── Tier 2: re-plan from element inventory (text-only LLM call) ───────────
     if app_map:
@@ -193,5 +196,15 @@ def _print_plan(plan: dict) -> None:
             print(f"    {i:>2}. type  {val[:40]!r}")
         elif action == "verify":
             print(f"    {i:>2}. verify screen={step.get('expected_screen','')}  — {step.get('description','')}")
+        elif action == "capture":
+            print(f"    {i:>2}. capture {step.get('capture_as', step.get('element_id',''))} ← {step.get('element_id','')} [{step.get('screen_id','')}]")
+        elif action in ("move", "navigate", "move_base"):
+            print(f"    {i:>2}. move  AGV → {step.get('target', step.get('device',''))}")
+        elif action == "wait":
+            print(f"    {i:>2}. wait  {step.get('seconds', step.get('duration_s', 0))}s")
+        elif action in ("check_state", "state"):
+            print(f"    {i:>2}. check_state {step.get('target','agv')} == {step.get('expected_state','(any)')}")
         elif action == "vision_required":
             print(f"    {i:>2}. [VISION REQUIRED] {step.get('description','')}")
+        else:
+            print(f"    {i:>2}. {action}  {step.get('description','')}")

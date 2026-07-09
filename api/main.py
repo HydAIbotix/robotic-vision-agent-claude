@@ -279,31 +279,78 @@ def _infer_kiosk_id(test_id: str, steps_raw: str = "", db: Optional[Session] = N
     return "K-01"  # safe default
 
 
+def _infer_kiosk_ids(test_id: str, steps_raw: str = "", db: Optional[Session] = None) -> list[str]:
+    """ALL distinct kiosks a test references, in order of first appearance.
+
+    Most tests touch ONE kiosk → returns a single id (same as _infer_kiosk_id). A CROSS-KIOSK
+    E2E test names several devices in its steps (e.g. "load at VPS … buy at RPS …") → returns
+    every referenced kiosk, so planning/execution can span both apps. Matches Device Map aliases
+    and configured kiosk ids as whole words, ordered by where they first appear in the text.
+    Falls back to [_infer_kiosk_id(...)] when nothing explicit is found.
+    """
+    import re
+    text = (test_id + " " + (steps_raw or "")).upper()
+
+    def _first_pos(needle: str) -> int:
+        m = re.search(r"\b" + re.escape(needle.upper()) + r"\b", text)
+        return m.start() if m else -1
+
+    hits: list[tuple[int, str]] = []
+    if db is not None:
+        try:
+            for d in db.query(models.DeviceConfig).all():
+                if d.alias and d.kiosk_id:
+                    p = _first_pos(d.alias)
+                    if p != -1:
+                        hits.append((p, d.kiosk_id))
+            for k in db.query(models.KioskConfig).all():
+                if k.kiosk_id:
+                    p = _first_pos(k.kiosk_id)
+                    if p != -1:
+                        hits.append((p, k.kiosk_id))
+        except Exception:
+            pass
+
+    ordered: list[str] = []
+    for _, kid in sorted(hits, key=lambda t: t[0]):
+        if kid not in ordered:
+            ordered.append(kid)
+    return ordered or [_infer_kiosk_id(test_id, steps_raw, db)]
+
+
 def _scope_map_for_test(db: Optional[Session], app_map: Optional[dict],
-                        test_id: str, steps_raw: str = "") -> tuple[Optional[dict], str]:
-    """Scope a multi-app app_map down to the single kiosk a test belongs to.
+                        test_id: str, steps_raw: str = "") -> tuple[Optional[dict], list[str]]:
+    """Scope a multi-app app_map down to exactly the kiosk(s) a test references.
 
-    A test case belongs to exactly ONE kiosk. Planning and execution must therefore see ONLY
-    that kiosk's screens — otherwise Claude plans against another app's screens (e.g. a VPS test
-    was planned with RPS's login screen because the whole combined map was fed to it). This is the
-    single choke point that guarantees kiosk isolation for BOTH plan generation (/tc-plan) and
-    execution (_execute_run): resolve the test's kiosk_id, then filter the map to that app_id.
+    Planning and execution must see ONLY the target app(s)' screens — a single-kiosk test must not
+    be planned against another kiosk's screens (a VPS test once got RPS's login screen), and a
+    cross-kiosk E2E test must see BOTH apps it touches (otherwise the second kiosk's whole flow
+    collapses into one un-plannable vision_required step). This is the single choke point that
+    guarantees correct scoping for BOTH plan generation (/tc-plan) and execution (parse_steps):
+    resolve the test's kiosk_ids, then filter the map to the UNION of those app_ids.
 
-    Returns (scoped_map, kiosk_id). No-op (map unchanged) for a legacy single-app map or when the
-    kiosk can't be matched to a tagged app — but that mismatch is logged loudly when the map holds
-    more than one app, because it means a wrong-app plan could otherwise be produced.
+    Returns (scoped_map, kiosk_ids). No-op (map unchanged) for a legacy single-app map or when the
+    kiosks can't be matched to tagged apps — logged loudly when the map holds more than one app,
+    since that mismatch could otherwise yield a wrong-app plan.
     """
     from app_map import store as app_map_store
     if not app_map:
-        return app_map, ""
-    kiosk_id = _infer_kiosk_id(test_id, steps_raw, db)
-    scoped   = app_map_store.scoped_to_app(app_map, kiosk_id)
-    apps     = app_map.get("apps") or {}
-    if len(apps) > 1 and len(scoped.get("screens") or {}) == len(app_map.get("screens") or {}):
-        print(f"  [PLAN] ⚠ test '{test_id}' resolved to kiosk '{kiosk_id}', which matches no app in "
+        return app_map, []
+    kiosk_ids = _infer_kiosk_ids(test_id, steps_raw, db)
+    scoped    = app_map_store.scoped_to_apps(app_map, kiosk_ids)
+    apps      = app_map.get("apps") or {}
+    # Did the resolved kiosk(s) actually match tagged apps? (A 2-kiosk E2E test in a 2-kiosk env
+    # legitimately spans the whole map — that is NOT a mismatch. Only warn when NONE matched.)
+    tagged_app_ids = {(sc.get("app_id") or "") for sc in (app_map.get("screens") or {}).values()}
+    matched = any(kid in tagged_app_ids for kid in kiosk_ids)
+    if len(apps) > 1 and not matched:
+        print(f"  [PLAN] ⚠ test '{test_id}' resolved to kiosk(s) {kiosk_ids}, which match no app in "
               f"the map (apps: {list(apps)}). Plan will see ALL apps' screens — check that the Device "
               f"Map alias→kiosk_id matches the Kiosk ID used during exploration.")
-    return scoped, kiosk_id
+    else:
+        print(f"  [PLAN] test '{test_id}' scoped to kiosk(s) {kiosk_ids} "
+              f"({len(scoped.get('screens') or {})} screen(s))")
+    return scoped, kiosk_ids
 
 
 @app.post("/api/test-cases/upload")
@@ -663,6 +710,22 @@ CHANNEL DEFINITIONS (follow these exactly):
 - "db": Direct database queries, SQL checks, or backend record verification.
 - "validation": Assertions, verifications, checking expected outcomes, confirming state.
 
+ROBOT ACTIONS — map each raw step to the RIGHT action (the runtime already knows the robot APIs):
+- Touchscreen interactions on a device (channel "robot"): tap a button/element → action "tap";
+  enter/type text into a field → action "type" (with px/py + value); screen-content assertions →
+  action "verify".
+- AGV / MOBILE BASE movement (channel "robot") — the robot drives itself between devices:
+    • "Move the AGV/base/robot to <device>" (or "go to", "navigate to", "drive to") →
+        {{"action":"move","channel":"robot","target":"<device alias, e.g. VPS>","description":"..."}}
+      Use the DEVICE ALIAS from the Device Map as "target"; the runtime resolves it to that device's
+      kiosk_id and calls the AGV goto API with that kiosk_id. Reserved target "home" returns to base.
+    • "Check the state/status of the AGV|arm" →
+        {{"action":"check_state","channel":"validation","target":"agv"|"arm","expected_state":"idle"}}
+      Reads the base/arm status API; omit expected_state to just record it, or set it (e.g. "idle") to assert.
+    • "Wait N seconds" → {{"action":"wait","channel":"robot","seconds":<N>,"description":"..."}}
+  These base/wait/state steps involve NO screen and NO screenshot — do NOT add px/py/element_id/
+  screen_id to them, and do NOT add a screen "verify" for a pure AGV movement.
+
 KIOSK APP MAP (screens and elements with exact pixel coordinates):
 {element_inventory}
 
@@ -675,6 +738,17 @@ THE APP MAP ABOVE IS THE COMPLETE AND ONLY SOURCE OF TRUTH FOR THIS APP — READ
   differ: some start at a login screen, others open directly onto a menu/home — always match THIS map.
 - If a raw step genuinely needs a screen or element that is ABSENT from the map, emit a single
   {{"action": "vision_required", "description": "<remaining goal>"}} step and stop — never fabricate ids.
+
+CROSS-KIOSK / MULTI-APP TESTS (important):
+- The app map may contain screens from MORE THAN ONE kiosk (each screen belongs to a device in the
+  Device Map). An end-to-end test can move between devices — e.g. "load a card at VPS, then buy at
+  RPS, then return to VPS". Plan the WHOLE journey: emit steps for EACH device in the order the raw
+  steps describe, and set every step's "device" to the alias whose app that screen belongs to.
+- When the flow moves to another device, the robot/browser switches to that device automatically
+  based on the "device" tag — you do NOT emit a navigation step for the move itself; just tag the
+  next screen's steps with the new device. Continue emitting real screen_id/element_id/px/py from
+  that device's screens in the map.
+- Only fall back to vision_required for a device/flow whose screens are genuinely NOT in the map.
 
 TEST CASE TO PLAN:
 ID: {test_id}
@@ -716,9 +790,24 @@ YOUR TASKS:
 4. For every step: set "device" to the alias of the target device from the device map above
    (e.g. "TVM", "MPOS"). For web/db/validation steps not tied to a physical device, omit "device".
 5. For "robot" tap steps: look up the screen_id and element from the app map; use the exact px/py.
-6. For "robot" type steps: use credential placeholders {{valid_email}}, {{valid_password}} for login
-   fields — but ONLY when the app map actually contains a login/sign-in screen with such fields. If
-   the app has no login screen, there are no login steps and no credential placeholders.
+6. For "robot" type steps: ALWAYS include a non-empty "value" — the exact text to enter, taken
+   verbatim from the raw step (an amount like "4000", a name, a code). NEVER emit a type step with a
+   missing or empty value (that types nothing and the step silently does nothing). Use credential
+   placeholders {{valid_email}}, {{valid_password}} for login fields — but ONLY when the app map
+   actually contains a login/sign-in screen with such fields. If the app has no login screen, there
+   are no login steps and no credential placeholders.
+6b. RUNTIME-GENERATED VALUES (e.g. "enter the SAME card number issued at VPS"): the value does not
+   exist until an earlier step produces it, so it cannot be hard-coded. Emit a "capture" step right
+   after the value first appears on screen, then reference it in the later type step's value as
+   {{{{captured.NAME}}}}:
+     {{"action": "capture", "channel": "robot", "device": "<alias>", "screen_id": "<screen>",
+       "element_id": "<the element that DISPLAYS the value, from the app map>",
+       "capture_as": "card_number", "description": "Capture the issued card number"}}
+     ...later...
+     {{"action": "type", "channel": "robot", "device": "<other alias>", "screen_id": "<screen>",
+       "element_id": "<input>", "px": <int>, "py": <int>, "value": "{{{{captured.card_number}}}}"}}
+   Only use a capture step when the displaying element exists in the app map; if it does not, emit
+   vision_required for that portion instead of guessing.
 7. Identify required_config — data the tester MUST provide before the test:
    - Include email + password ONLY if the app map has a login/sign-in screen; otherwise omit them.
    - Include card_number ONLY if a specific pre-existing card is needed by the steps.
@@ -792,10 +881,11 @@ def get_tc_plan(req: TcPlanRequest, db: Session = Depends(get_db)):
     app_map = None
     if Path(settings.app_map_path).exists():
         app_map = app_map_store.load(settings.app_map_path)
-    # Scope to THIS test's kiosk so Claude only ever sees the target app's screens (a VPS test must
-    # never be planned against RPS's login screen).  Same choke point the runner uses — so the
-    # cache key (version_hash of the scoped map) matches between UI plan generation and execution.
-    app_map, _kiosk_id = _scope_map_for_test(db, app_map, req.test_id, req.steps_raw or "")
+    # Scope to THIS test's kiosk(s) so Claude only ever sees the target app(s)' screens: a VPS test
+    # is never planned against RPS's login screen, and a cross-kiosk E2E test sees BOTH apps it
+    # touches.  Same choke point the runner uses — so the cache key (version_hash of the scoped map)
+    # matches between UI plan generation and execution.
+    app_map, _kiosk_ids = _scope_map_for_test(db, app_map, req.test_id, req.steps_raw or "")
     map_version = app_map_store.version_hash(app_map)
 
     # Return cached plan unless force=True.
@@ -1383,19 +1473,25 @@ def _execute_run(run_id: str, req: RunRequest):
                 f"in {src}. Available: {avail}"
             )
 
-        # Resolve which kiosk each selected test targets — the single join key used across the
-        # lifecycle — and STAMP it onto every test case.  parse_steps reads tc["kiosk_id"] to scope
-        # the app_map to the right app before planning, so this makes planning correct per test even
-        # in a mixed multi-kiosk run and even for suites uploaded before the device map existed.
+        # Resolve which kiosk(s) each selected test targets and STAMP them onto every test case.
+        # parse_steps reads tc["kiosk_ids"] to scope the app_map to the right app(s) before planning:
+        #   • single-kiosk test  → one id  → scope to that app
+        #   • cross-kiosk E2E    → several → scope to the UNION so BOTH apps' screens are plannable
+        # tc["kiosk_id"] (primary/first) drives the initial browser URL. Correct even in mixed runs
+        # and for suites uploaded before the device map existed.
         for tc in test_cases:
-            tc["kiosk_id"] = _infer_kiosk_id(tc.get("test_id", ""), tc.get("steps_raw", ""), db)
+            ids = _infer_kiosk_ids(tc.get("test_id", ""), tc.get("steps_raw", ""), db)
+            tc["kiosk_ids"] = ids
+            tc["kiosk_id"]  = ids[0] if ids else "K-01"
 
-        # Run-level kiosk set (for the run label + which URL to open): explicit caller value wins,
-        # else the distinct set resolved above.
+        # Run-level kiosk set (for the run label + which URL to open first): explicit caller value
+        # wins, else the union across all selected tests (primary kiosk of each, plus any extras).
         if run.kiosk_id:
             kiosk_ids = [k.strip() for k in run.kiosk_id.split(",") if k.strip()]
         else:
-            kiosk_ids = list(dict.fromkeys(tc["kiosk_id"] for tc in test_cases if tc.get("kiosk_id")))
+            kiosk_ids = list(dict.fromkeys(
+                kid for tc in test_cases for kid in (tc.get("kiosk_ids") or [tc.get("kiosk_id")]) if kid
+            ))
             run.kiosk_id = ",".join(kiosk_ids) if kiosk_ids else "K-01"
             db.commit()
 
