@@ -493,6 +493,67 @@ Raw test cases now drive the AGV (mobile base), not just the arm/touchscreen. Ex
   broken images, no crash. All backends: real fires the base/state APIs; playwright/demo simulate an
   idle base (no-op fallbacks added to `stubs.py`) so the same plan runs (validates structure) in dev.
 
+### Cross-kiosk E2E round-trip fixed live (`TC-E2E-001`, 2026-07-10)
+
+A live Playwright re-run of `TC-E2E-001` (load at VPS → buy at RPS → verify balance back at VPS)
+surfaced four compounding, generic defects on the cross-kiosk path. All are fixed in
+`test_runner/nodes/run_vision_step.py` and **verified live end-to-end** (playwright + Claude API — a
+full green 25-step PASS: load $4000 → capture card → RPS purchase `$756.67 paid with card 9993` →
+back to VPS → reduced balance + PURCHASE at KIOSK-ID-2 newest-first). No VPS/RPS-specific code — the
+fixes apply to every app and every backend.
+
+- ✅ **The browser didn't follow the robot across kiosks → `verify` saw the wrong app.** Originally
+  reported as `move: AGV → RPS` failing `Wrong screen: expected 'login', got
+  'smart_card_kiosk_station'`. Root cause was broader than the `move` action: the browser app-switch
+  was driven by an ad-hoc device-tag check that mishandled EVERY plan shape the LLM emits — explicit
+  `move` actions (switch lived only in the device-routing block, skipped for `move`), bare `kiosk_id`
+  targets (`"kiosk-2"` instead of alias `"RPS"` → device_map miss), and an untagged `verify login`
+  placed BEFORE the first RPS-tagged interaction step (lazy switch hadn't fired yet). Fix — one
+  **ground-truth-driven** router: before each step, resolve the kiosk it targets and switch the
+  browser if different from the current one. The target kiosk comes from (a) the step's device/target
+  tag, or (b) for a `verify`, the **kiosk that owns its `expected_screen`** (app_map screens carry
+  `app_id`=kiosk_id) — so a `verify` for the next app switches even when untagged and out of order.
+  The shared `_switch_browser_to` helper does the playwright URL nav (no-op on real); the `move`
+  handler and the router both call it. `_load_device_map` now indexes devices by **both alias and
+  kiosk_id**, so a target given in either form resolves. Backers: `current_kiosk` tracks the shown
+  kiosk_id; `home`/`wait`/`check_state` never trigger a switch.
+- ✅ **`capture` read an empty field → the issued card number never carried to RPS.** The plan's
+  capture pointed at `card_number_input` (the empty *Check-Balance* input) because the issued number
+  is shown in a **transient result box** (`[data-testid="station-card-loaded"]` → "Card Number: 9013")
+  the App Explorer never charted, so the direct read returned `''` and RPS payment failed ("Card 1234
+  not issued" — Tier-3 had invented a number). Fix: `capture` now has a **Claude-vision fallback** —
+  when the direct element read is empty (or a label-noisy blob, per `_looks_like_value`), it
+  screenshots the current screen and asks Claude to read the named value (`_capture_value_via_vision`),
+  returning just the raw token. Generic: capture is inherently a runtime read, so one LLM call is the
+  only way to carry an app-generated value forward. Confirmed live: `capture card_number → vision read
+  '4934'`, and the RPS purchase then completed with the real card.
+- ✅ **A mid-plan `vision_required` stalled the cross-kiosk return trip.** `_execute_structured_plan`
+  used to RETURN at the first `vision_required` and hand the ENTIRE remaining plan to Tier-3 resume —
+  which cannot perform the later structured `move` back to VPS, so after completing the RPS purchase it
+  wandered on RPS (order_result → cart → payment…) and never verified the VPS balance. Fix: a
+  `vision_required` is now handled **inline** (`_run_inline_vision`) — a bounded vision segment clears
+  just that uncharted patch (stops as soon as the screen advances, so it can't drift into a second
+  transaction), then structured execution **resumes** and runs the `move: AGV → VPS` + balance-check
+  steps normally. Only if the segment makes no progress does it fall through to the outer Tier-3
+  resume (unchanged safety net). A stall on the LAST plan step (a pure verify sub-task whose screen
+  doesn't change by design) is NOT treated as failure — nothing remains to resume, so we keep the
+  segment's own results and let the conclusive-verdict node judge, avoiding a redundant end-of-plan
+  Tier-3 pass. Captured runtime values are also threaded into Tier-3 (`_run_tier3_continue(...,
+  captured=…)`) so any `{{captured.*}}` in the resume path resolves to the real value, not a hallucination.
+- ✅ **Test-data typo made the verdict non-deterministic.** `TC-E2E-001` step 1 loads **$4000** but its
+  expected-result text asserted a "**$400** minus order total" balance — an internal contradiction (a
+  $400 card can't buy the $756.67 phone). The arithmetic-checking conclusive-verdict node flip-flopped
+  PASS/FAIL across identical runs on it. Corrected the expected text in the DB (`$400`→`$4000`), after
+  which the balance ($3,243.33 = 4000−756.67) verifies deterministically. **This edited the user's test
+  case data** — flag it; other suites may carry the same typo.
+- The plan itself was regenerated via the `/tc-plan` path (force) — the Tier-2 re-planner sometimes
+  emits a leaner plan that drops the `capture`/return-trip, whereas `_TC_PLAN_PROMPT` produces the full
+  round-trip. **User: regenerate the `TC-E2E-001` plan in Test Intake, then re-run from the Studio** to
+  confirm in the live monitor (capture vision-read + inline-vision resume both need the browser + Claude
+  API). The card-number capture depends on the VPS "Smart Card Loaded" result box being on screen after
+  *Use Mock Card*; if a future app hides it, capture degrades gracefully to an empty value → the step
+  fails into Tier-3 rather than crashing.
+
 ### Studio / infrastructure (sibling `kiosk-test-studio`)
 
 - ✅ **`fetch` had no timeout** — dashboard hung on "Loading…", Reset froze uncancellably, readiness

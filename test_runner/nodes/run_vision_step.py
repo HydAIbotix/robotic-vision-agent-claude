@@ -47,11 +47,24 @@ def _load_device_map() -> dict[str, dict]:
             out: dict[str, dict] = {}
             for d in db.query(_models.DeviceConfig).all():
                 kc = kiosks.get(d.kiosk_id) if d.kiosk_id else None
-                out[d.alias] = {
+                cfg = {
                     "pos_x": d.pos_x, "pos_y": d.pos_y, "pos_theta": d.pos_theta,
                     "kiosk_id": d.kiosk_id or "",
                     "url": (kc.url if kc else "") or "",
                 }
+                out[d.alias] = cfg
+                # Also index by kiosk_id: a re-planned move/device tag sometimes carries the bare
+                # kiosk_id ("kiosk-2") instead of the device alias ("RPS") — LLM re-planning isn't
+                # deterministic between the two forms. Indexing both makes the cross-app browser
+                # switch resolve either way (device_map.get(...) is used unchanged by the move
+                # handler and the device-routing block). Alias wins if it collides with an id.
+                if d.kiosk_id and d.kiosk_id not in out:
+                    out[d.kiosk_id] = cfg
+            # Kiosks that have a URL but no device row — still switchable by bare kiosk_id.
+            for kid, kc in kiosks.items():
+                if kid not in out and (getattr(kc, "url", "") or ""):
+                    out[kid] = {"pos_x": 0.0, "pos_y": 0.0, "pos_theta": 0.0,
+                                "kiosk_id": kid, "url": kc.url or ""}
             return out
         finally:
             db.close()
@@ -59,7 +72,133 @@ def _load_device_map() -> dict[str, dict]:
         return {}
 
 
-def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", test_id: str = "", app_map: dict = None) -> tuple[list[dict], str]:
+def _looks_like_value(val: str) -> bool:
+    """True when a captured string is already a clean, reusable token (a card number, code,
+    id, amount) rather than empty or a label-noisy blob. Multi-line / long / label-containing
+    text (e.g. "Smart Card Loaded  Card Number: 9013  Balance: …") → prefer the vision read,
+    which isolates the raw value."""
+    v = (val or "").strip()
+    if not v:
+        return False
+    if "\n" in v or len(v) > 32 or ":" in v:
+        return False
+    return True
+
+
+def _capture_value_via_vision(image_path: str, name: str, description: str) -> str:
+    """Read a single runtime value (e.g. an issued card number) from the current screen via
+    Claude. Used when the plan's capture element is empty/mischarted — the value the test must
+    reuse lives in a transient result element the explorer never charted. Returns ONLY the raw
+    value (digits/code/id), or '' on any failure. Best-effort, one fast-LLM call."""
+    if not image_path:
+        return ""
+    import base64, json
+    from langchain_core.messages import HumanMessage
+    from vision_agent.llm import get_fast_llm
+    from vision_agent.storage import get_storage
+    try:
+        b64 = base64.standard_b64encode(get_storage().load(image_path)).decode()
+        prompt = (
+            f"A test needs to capture the value named '{name}' from this screen so it can be "
+            f"reused in a later step.\nContext: {description or name}\n\n"
+            f"Find that value on screen and return ONLY the raw value itself — just the "
+            f"number/code/id/text with NO label, prefix, or surrounding words (e.g. return "
+            f"'9013', not 'Card Number: 9013'). If it is genuinely not visible, return empty.\n"
+            f'Return ONLY valid JSON: {{ "value": "<raw value or empty>" }}'
+        )
+        llm = get_fast_llm()
+        msg = HumanMessage(content=[
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64},
+             "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": prompt},
+        ])
+        raw = llm.invoke([msg]).content.strip()
+        if "```" in raw:
+            raw = raw.split("```")[1].lstrip("json").strip()
+        return str(json.loads(raw).get("value", "")).strip()
+    except Exception as e:
+        print(f"    [capture] vision read error: {e}")
+        return ""
+
+
+def _run_inline_vision(desc: str, captured: dict, credentials: dict, scenario: str,
+                       app_map: dict, run_id: str, test_id: str, step_index: int) -> tuple[list[dict], bool]:
+    """Run a BOUNDED Claude-vision segment for a single vision_required step, then hand control
+    back to the structured executor.
+
+    A vision_required step marks an UNCHARTED patch in the middle of an otherwise structured plan
+    (e.g. the RPS payment screen has no card-number field in the app map). The old behaviour handed
+    the ENTIRE remaining plan to Tier-3 — which then couldn't perform the later structured `move`
+    back to the other kiosk, so a cross-kiosk E2E stalled on the wrong app after the purchase. This
+    runs vision ONLY long enough to clear the uncharted patch (until the screen advances or stalls),
+    then returns so the structured `move`/`verify`/balance-check steps run normally.
+
+    Returns (segment_step_results, made_progress). made_progress=False → caller fails the step and
+    falls through to the outer Tier-3 resume (the existing safety net)."""
+    from vision_agent.agent import create_agent
+    from vision_agent.state import VisionAgentState
+
+    _sc = (credentials or {}).get(scenario) or (credentials or {}).get("valid") or {}
+    if _sc.get("email") or _sc.get("password"):
+        cred_hint = (f"\n\nOnly if a login is unavoidable, use these EXACT configured credentials — "
+                     f"never invent:\n  email: {_sc.get('email','')}\n  password: {_sc.get('password','')}")
+    else:
+        cred_hint = "\n\nDo NOT attempt to log in."
+    cap_hint = ""
+    if captured:
+        _cv = "\n".join(f"  {k} = {v}" for k, v in captured.items() if str(v).strip())
+        if _cv:
+            cap_hint = ("\n\nUse these EXACT values captured earlier in this test when a field needs "
+                        "one (e.g. re-entering an issued card number); never invent one:\n" + _cv)
+    task = (
+        f"Sub-task on the CURRENT screen: {desc}\n\n"
+        f"Identify buttons and fields from what you ACTUALLY SEE in the screenshot. Accomplish ONLY "
+        f"this sub-task on the app currently shown, then stop. Do NOT navigate back to login, do NOT "
+        f"restart the test, and do NOT begin a second/unrelated transaction." + cap_hint + cred_hint
+    )
+
+    def _dom() -> str:
+        try:
+            return robot.get_dom_screen_id() or ""
+        except Exception:
+            return ""
+
+    agent = create_agent()
+    seg_steps: list[dict] = []
+    made_progress = False
+    MAX = 3
+    for _it in range(MAX):
+        before = _dom()
+        cap = str(Path(settings.screenshots_dir) / f"inline_vis_{test_id}_{step_index}_{_it}_{int(time.time())}.png")
+        Path(settings.screenshots_dir).mkdir(parents=True, exist_ok=True)
+        img = robot.capture_screen(cap)["image_path"]
+        print(f"    [VISION-INLINE] iter {_it+1}/{MAX} — on '{before or '?'}', running vision for sub-task")
+        initial: VisionAgentState = {
+            "task_description": task, "image_path": img, "screen_analysis": None,
+            "planned_steps": [], "current_step_idx": 0, "step_results": [], "retry_count": 0,
+            "screen_history": [], "decision_tree": {}, "outcome": "running", "summary": "",
+            "error_message": None,
+        }
+        res = agent.invoke(initial)
+        for s in (res.get("step_results") or []):
+            seg_steps.append(s)
+            if run_id:
+                broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id,
+                                          "test_id": test_id, "step_index": step_index, **s})
+        after = _dom()
+        # Stop as soon as the screen advances (uncharted patch cleared) — prevents the vision agent
+        # from wandering into a second transaction while the structured `move` waits to run.
+        if res.get("outcome") == "success" or (after and after != before):
+            made_progress = True
+            print(f"    [VISION-INLINE] progressed '{before or '?'}' → '{after or '?'}' — resuming structured plan")
+            break
+        if after == before:
+            print(f"    [VISION-INLINE] no screen change (still '{after or '?'}') — ending segment")
+            break
+    return seg_steps, made_progress
+
+
+def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", test_id: str = "", app_map: dict = None, start_kiosk: str = "") -> tuple[list[dict], str, dict]:
     """
     Execute every step in the structured plan using stored pixel coordinates.
 
@@ -72,9 +211,30 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
     step_results: list[dict] = []
     scenario = plan.get("credential_scenario", "valid")
     device_map  = _load_device_map()
-    current_dev: str | None = None
+    # Browser starts on the run's primary kiosk (run_vision_step ran reset_to_entry on its URL), so
+    # seed current_kiosk with it — a single-kiosk run then never fires a redundant first-step switch,
+    # and a cross-kiosk run only switches when a step targets the OTHER app.
+    current_kiosk: str = start_kiosk or ""   # kiosk_id the browser is currently showing
     last_screenshot: str = ""  # updated after every step; used by subsequent verify steps
     captured: dict[str, str] = {}   # runtime values captured mid-test (e.g. issued card number)
+
+    def _kid_of_dev(dev: str) -> str:
+        """A device alias ('RPS') OR a bare kiosk_id ('kiosk-2') → its kiosk_id. device_map is
+        indexed by BOTH forms (see _load_device_map), so this resolves either; an unknown key is
+        assumed to already be a kiosk_id."""
+        if not dev:
+            return ""
+        c = device_map.get(dev)
+        return (c.get("kiosk_id") if c else "") or dev
+
+    def _kid_of_screen(sid: str) -> str:
+        """The kiosk_id that OWNS an app_map screen (screens are tagged app_id=kiosk_id). Lets a
+        `verify` switch to the app that owns its expected_screen even when the plan didn't tag the
+        verify with a device and placed it before the first tagged interaction step."""
+        if not sid:
+            return ""
+        sc = ((app_map or {}).get("screens") or {}).get(sid) or {}
+        return sc.get("app_id") or sc.get("kiosk_id") or ""
 
     def _sub_captured(val: str) -> str:
         """Substitute {{captured.NAME}} placeholders with values captured earlier in THIS test
@@ -111,6 +271,30 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             print(f"         [screenshot capture failed: {exc}]")
             return ""
 
+    def _switch_browser_to(dev_cfg: dict, dev_alias: str, kid: str) -> None:
+        """Playwright: point the browser at this device's app URL so ITS screens load.
+        A physical robot just faces the device it drove to, so this is a no-op on the real
+        backend. Used by BOTH the cross-kiosk device-routing hop (screen-interaction steps
+        tagged with a different device) AND the explicit AGV `move` action — an AGV move to a
+        device means the robot now faces that device's screen, so the browser must follow it
+        (without this, `move: AGV → RPS` drove the simulated base but left the browser on VPS,
+        and the next verify saw the wrong app's screen). Raises on a navigation error so the
+        caller records a graceful failed step → Tier-3."""
+        if settings.robot_backend != "playwright":
+            return
+        dev_url = (dev_cfg.get("url") or "").strip()
+        if not dev_url:
+            print(f"    [CROSS-KIOSK] ⚠ device '{dev_alias}' (kiosk '{kid}') has no URL configured "
+                  f"— cannot switch apps; its screens will not load. Set its URL via "
+                  f"App Explorer/Configuration.")
+            return
+        svc = (getattr(settings, "card_service_url", "") or "").strip()
+        if svc:
+            dev_url += ("&" if "?" in dev_url else "?") + f"cardServiceUrl={svc}"
+        print(f"    [CROSS-KIOSK] Navigating browser to {dev_url}")
+        robot.navigate_to_url(dev_url)
+        time.sleep(0.8)
+
     # ── Robot-API telemetry → live monitor ────────────────────────────────────
     # Every real-robot REST call is recorded (endpoint, cmd_id, status, latency, request/response
     # time). Flush the new ones to the live monitor so a user watching a run sees each robot API
@@ -142,46 +326,37 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
         _flush_robot_events()   # surface the previous step's robot API calls
         action = step.get("action", "")
 
-        # ── device routing — move robot / switch app before first step on each new device ──
-        # This is the CROSS-KIOSK hop for SCREEN-interaction steps (e.g. VPS → RPS → VPS). Any
-        # failure here (real-robot move timeout, or a browser navigation error) is recorded as a
-        # failed step so the run follows the normal failure path (Tier-3, then fail) instead of
-        # aborting silently — which is what the defect-intelligence node flagged for the E2E flow.
-        # Skipped for explicit AGV actions (move/wait/check_state): those manage their own base
-        # movement and don't interact with a device screen, so auto-switching would double-move.
-        step_dev = step.get("device")
-        if step_dev and step_dev != current_dev and action not in ("move", "navigate", "move_base", "wait", "check_state", "state"):
-            dev_cfg = device_map.get(step_dev)
-            if dev_cfg:
-                _kid = dev_cfg.get("kiosk_id") or "?"
-                print(f"    [CROSS-KIOSK] Switch device '{current_dev or '—'}' → '{step_dev}' (kiosk '{_kid}')")
-                try:
-                    print(f"    [ROBOT] Moving to '{step_dev}' @ ({dev_cfg['pos_x']}, {dev_cfg['pos_y']}, {dev_cfg['pos_theta']}°)")
-                    robot.move_to_position(dev_cfg["pos_x"], dev_cfg["pos_y"], dev_cfg["pos_theta"])
-                    time.sleep(0.8)  # allow robot/camera to settle
-                    # Playwright: switch the browser to this device's app URL so the correct app's
-                    # screens are shown. (A physical robot just faces the device it drove to, so the
-                    # nav is a no-op there.) URL blank → single-app run, nothing to switch.
-                    dev_url = dev_cfg.get("url") or ""
-                    if settings.robot_backend == "playwright":
-                        if dev_url:
-                            svc = (getattr(settings, "card_service_url", "") or "").strip()
-                            if svc:
-                                dev_url += ("&" if "?" in dev_url else "?") + f"cardServiceUrl={svc}"
-                            print(f"    [CROSS-KIOSK] Navigating browser to {dev_url}")
-                            robot.navigate_to_url(dev_url)
-                            time.sleep(0.8)
-                        else:
-                            print(f"    [CROSS-KIOSK] ⚠ device '{step_dev}' (kiosk '{_kid}') has no URL configured "
-                                  f"— cannot switch apps; RPS/second-app screens will not load. Set its URL via "
-                                  f"App Explorer/Configuration.")
-                except Exception as exc:
-                    _robot_fail(i, f"switch to device {step_dev}", exc)
-                    return step_results, "failed"
-            else:
-                print(f"    [CROSS-KIOSK] ⚠ device '{step_dev}' not in device map — cannot move/switch; "
-                      f"steps for it may target the wrong app")
-            current_dev = step_dev
+        # ── cross-kiosk routing — put the browser on the app THIS step targets ──────────────
+        # Ground-truth driven, so it survives every plan shape the LLM emits (explicit device tag,
+        # bare kiosk_id, or an untagged `verify` for the next app):
+        #   • a device/target tag  → that device's kiosk
+        #   • a `verify`           → the kiosk that OWNS its expected_screen (app_map app_id)
+        # so even a `verify login` placed BEFORE the first RPS-tagged interaction step still
+        # switches to RPS first. Skipped for explicit AGV actions (move/wait/check_state) — the
+        # move handler drives the base itself, and wait/check_state don't touch a device screen.
+        # Any failure here is recorded as a failed step → normal Tier-3/fail path (never a silent abort).
+        if action not in ("move", "navigate", "move_base", "wait", "check_state", "state"):
+            _tag = step.get("device") or step.get("target")
+            target_kid = _kid_of_dev(_tag) if _tag else (
+                _kid_of_screen(step.get("expected_screen", "")) if action == "verify" else "")
+            if target_kid and target_kid != current_kiosk:
+                dev_cfg = device_map.get(target_kid) or {}
+                if dev_cfg:
+                    print(f"    [CROSS-KIOSK] Switch kiosk '{current_kiosk or '—'}' → '{target_kid}'")
+                    try:
+                        print(f"    [ROBOT] Moving to kiosk '{target_kid}' @ "
+                              f"({dev_cfg.get('pos_x',0)}, {dev_cfg.get('pos_y',0)}, {dev_cfg.get('pos_theta',0)}°)")
+                        robot.move_to_position(dev_cfg.get("pos_x", 0), dev_cfg.get("pos_y", 0), dev_cfg.get("pos_theta", 0))
+                        time.sleep(0.8)  # allow robot/camera to settle
+                        # Playwright: point the browser at this kiosk's app URL. (No-op on real.)
+                        _switch_browser_to(dev_cfg, target_kid, target_kid)
+                    except Exception as exc:
+                        _robot_fail(i, f"switch to kiosk {target_kid}", exc)
+                        return step_results, "failed", captured
+                    current_kiosk = target_kid
+                else:
+                    print(f"    [CROSS-KIOSK] ⚠ no device/URL for kiosk '{target_kid}' — cannot switch; "
+                          f"its screens will not load (align the Device Map / kiosk URL).")
         action = step.get("action", "")
 
         # ── verify ────────────────────────────────────────────────────────────
@@ -299,7 +474,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 "step_index": i, **sr,
             })
             if not success:
-                return step_results, "failed"
+                return step_results, "failed", captured
             continue
 
         # ── tap ───────────────────────────────────────────────────────────────
@@ -323,7 +498,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 step_results.append(sr)
                 if run_id:
                     broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
-                return step_results, "failed"
+                return step_results, "failed", captured
 
             print(f"    {i:>2}. tap   {eid!r} @ ({px},{py})  [{sid}]")
             try:
@@ -331,7 +506,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             except Exception as exc:
                 # e.g. real-robot API timeout (robot_response_timeout_s) — fail gracefully → Tier-3.
                 _robot_fail(i, f"tap: {eid} @ ({px},{py})", exc)
-                return step_results, "failed"
+                return step_results, "failed", captured
             time.sleep(0.5)
             # Fresh post-tap image for the next verify step.
             #   playwright → cheap browser screenshot; also saved as step evidence (UI).
@@ -380,7 +555,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                       "observation": f"Type value still contains an uncaptured placeholder: {value!r}"}
                 step_results.append(sr)
                 if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
-                return step_results, "failed"
+                return step_results, "failed", captured
             # Focus the target field FIRST when the plan supplies its coordinates. type_text() types
             # into whatever is currently focused and its clear (Ctrl+A) selects text in the focused
             # element — with NOTHING focused, Ctrl+A selects the whole PAGE and the value goes nowhere
@@ -400,7 +575,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 robot.type_text(value, clear_first=True)
             except Exception as exc:
                 _robot_fail(i, f"type: {value[:30]}", exc)
-                return step_results, "failed"
+                return step_results, "failed", captured
             time.sleep(0.3)
             after_shot = ""
             if settings.robot_backend == "playwright":
@@ -417,6 +592,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
         # e.g. the card number issued at VPS, entered later at RPS via {{captured.card_number}}.
         if action == "capture":
             name = step.get("capture_as") or step.get("element_id") or "value"
+            desc = step.get("description", "")
             eid  = step.get("element_id", "")
             sid  = step.get("screen_id", "")
             px   = step.get("px", 0); py = step.get("py", 0)
@@ -436,6 +612,22 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             except Exception as exc:
                 print(f"    {i:>2}. capture {name!r} — read failed: {exc}")
             val = (val or "").strip()
+            # Vision fallback: the value a test needs to reuse (an issued card number, a
+            # confirmation code) is often shown in a TRANSIENT result element the App Explorer
+            # never charted — so the plan's element_id points at the wrong/empty field and the
+            # direct read comes back blank (or as a label-noisy blob like "Card Number: 9013").
+            # When that happens, screenshot the CURRENT screen and let Claude read the named
+            # value. Generic for every app: capture is inherently a runtime read, so one LLM call
+            # here is the ONLY way to carry an app-generated value forward. Also fires when the
+            # direct read returned text but the requested numeric/id token isn't cleanly isolated.
+            if not val or not _looks_like_value(val):
+                shot = last_screenshot
+                if settings.robot_backend == "playwright":
+                    shot = _cap("capture", i) or last_screenshot
+                vis = _capture_value_via_vision(shot, name, desc)
+                if vis:
+                    print(f"    {i:>2}. capture {name!r} — direct read {val!r} → vision read {vis!r}")
+                    val = vis
             captured[name] = val
             print(f"    {i:>2}. capture {name!r} = {val!r}  [{'ok' if val else 'EMPTY → later {{captured}} will fail → Tier-3'}]")
             sr = {"step": f"capture: {name}", "success": True, "method": "capture",
@@ -452,16 +644,23 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
         if action in ("move", "navigate", "move_base"):
             target_alias = (step.get("target") or step.get("device") or "").strip()
             is_home = target_alias.lower() in ("home", "base", "dock")
-            # Resolve alias → kiosk_id for the API target (home passes through verbatim).
+            # Resolve alias OR bare kiosk_id → kiosk_id for the API target (home passes verbatim).
             dev_cfg = device_map.get(target_alias) or {}
             target = "home" if is_home else (dev_cfg.get("kiosk_id") or target_alias)
             print(f"    {i:>2}. move  AGV → {target_alias or target!r} (robot target='{target}')")
             try:
                 res = robot.navigate_to_kiosk(target) if hasattr(robot, "navigate_to_kiosk") else {"simulated": True}
+                # Playwright: the AGV move means the robot now faces THIS device's screen — switch
+                # the browser to its app URL so its screens load (a physical robot just faces the
+                # device it drove to → no-op there). "home" is not a device, so nothing to switch.
+                # Mark current_kiosk so the following cross-kiosk routing block doesn't switch again.
+                if not is_home and target_alias:
+                    _switch_browser_to(dev_cfg, target_alias, target)
+                    current_kiosk = target or _kid_of_dev(target_alias)
             except Exception as exc:
                 _flush_robot_events()
                 _robot_fail(i, f"move: AGV → {target_alias or target}", exc)
-                return step_results, "failed"
+                return step_results, "failed", captured
             _flush_robot_events()
             note = f"AGV moved to {target}" + (" (simulated)" if (res or {}).get("simulated") else "")
             sr = {"step": f"move: AGV → {target_alias or target}", "success": True, "method": "robot_base",
@@ -501,7 +700,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             except Exception as exc:
                 _flush_robot_events()
                 _robot_fail(i, f"check_state: {target}", exc)
-                return step_results, "failed"
+                return step_results, "failed", captured
             _flush_robot_events()
             actual = str((st or {}).get("state", "")).lower()
             ok = True if not expected else (expected in actual or actual in expected)
@@ -512,29 +711,37 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             step_results.append(sr)
             if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
             if not ok:
-                return step_results, "failed"
+                return step_results, "failed", captured
             continue
 
         # ── vision_required sentinel — planner found an uncharted screen ──────
+        # Handle it INLINE: run a bounded vision segment for just this step's objective, then
+        # CONTINUE the structured plan (so a later cross-kiosk `move`/`verify` still runs). Only if
+        # the segment makes no progress do we fall through to the outer Tier-3 resume safety net.
         if action == "vision_required":
-            desc = step.get("description", "complete remaining test steps")
-            print(f"    {i:>2}. [VISION REQUIRED] {desc}")
-            sr = {
-                "step": f"vision_required: {desc}",
-                "success": None,
-                "method": "vision_required",
-                "description": desc,
-            }
-            step_results.append(sr)
-            if run_id:
-                broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
-            return step_results, "vision_required"
+            desc = _sub_captured(step.get("description", "complete the current sub-task"))
+            print(f"    {i:>2}. [VISION REQUIRED — inline] {desc}")
+            seg_steps, seg_ok = _run_inline_vision(
+                desc, captured, credentials, scenario, app_map, run_id, test_id, i,
+            )
+            step_results.extend(seg_steps)
+            # Only bail to the outer Tier-3 resume when the segment stalled AND there are still
+            # structured steps we failed to reach (e.g. a cross-kiosk move back). For a stall on the
+            # LAST plan step (typically a pure verify sub-task whose screen doesn't change by design)
+            # there's nothing left to resume — keep the segment's own step results and let the
+            # conclusive-verdict node judge, instead of firing a redundant end-of-plan Tier-3 pass.
+            is_last = i >= len(plan.get("steps") or [])
+            if not seg_ok and not is_last:
+                print(f"    {i:>2}. [VISION REQUIRED] segment stalled with structured steps remaining "
+                      f"→ handing off to outer Tier-3 resume")
+                return step_results, "failed", captured
+            continue
 
         # ── unknown ───────────────────────────────────────────────────────────
         print(f"    {i:>2}. [UNKNOWN action={action!r}] — skipped")
 
     _flush_robot_events()   # surface the final step's robot API calls
-    return step_results, "passed"
+    return step_results, "passed", captured
 
 
 # ── Demo mode: pre-built screenshot sequence (legacy) ────────────────────────
@@ -645,6 +852,7 @@ def _run_tier3_continue(
     tc: dict,
     completed_steps: list[dict],
     start_step_idx: int,
+    captured: dict | None = None,
 ) -> dict:
     """
     Resume execution from wherever the browser is NOW using Claude vision.
@@ -721,6 +929,38 @@ def _run_tier3_continue(
         f"caused it to fail."
     )
     task_description += cred_hint
+
+    # ── Captured runtime values — carry them into Tier-3 ──────────────────────
+    # A value read earlier in THIS test (e.g. the card number issued at VPS) lives only in the
+    # Tier-1/2 executor's `captured` dict. Without threading it here, Tier-3 would see the literal
+    # "{{captured.card_number}}" (or nothing) and invent a number — exactly the E2E failure where
+    # it typed a bogus '1234' at RPS. Hand Claude the real values AND the remaining planned-step
+    # descriptions (placeholders resolved) so it knows the specific sub-goal (e.g. "enter card
+    # 9013"). Generic: any {{captured.*}} the plan defined is substituted from live values.
+    captured = captured or {}
+    def _sub_cap(text: str) -> str:
+        for _n, _v in captured.items():
+            text = text.replace(f"{{{{captured.{_n}}}}}", str(_v))
+        return text
+    if captured:
+        _cv = "\n".join(f"  {k} = {v}" for k, v in captured.items() if str(v).strip())
+        if _cv:
+            task_description += (
+                "\n\nValues captured earlier in THIS test — when a remaining step needs one of "
+                "these (e.g. re-entering an issued card number), use the EXACT value below; never "
+                "invent or guess one:\n" + _cv
+            )
+    # Remaining planned steps give Claude the specific intent for the uncharted tail of the flow.
+    _remaining = plan_steps_all[start_step_idx:]
+    _rem_lines = [
+        f"  - {_sub_cap(s.get('description') or s.get('action',''))}"
+        for s in _remaining if (s.get("description") or s.get("action"))
+    ]
+    if _rem_lines:
+        task_description += (
+            "\n\nRemaining intended steps (guidance — identify the real on-screen elements "
+            "yourself; values already resolved):\n" + "\n".join(_rem_lines)
+        )
 
     # ── Objective screen: the last verify target in the plan (e.g. "order_result") ──
     # Used to know when the multi-screen flow is actually complete.
@@ -830,9 +1070,10 @@ def run_vision_step(state: TestRunnerState) -> dict:
         robot.reset_to_entry()
         time.sleep(1.2)
 
-        step_results, outcome = _execute_structured_plan(
+        step_results, outcome, captured = _execute_structured_plan(
             structured_plan, credentials,
             run_id=run_id, test_id=tc["test_id"], app_map=app_map,
+            start_kiosk=tc.get("kiosk_id", ""),
         )
         passed = sum(1 for r in step_results if r["success"])
 
@@ -857,7 +1098,7 @@ def run_vision_step(state: TestRunnerState) -> dict:
                 f"(method={last_sr.get('method', '?')}) — reason: {_why!r}"
             )
             print(f"  [RUN] → handing off to TIER-3 (vision agent), resuming from the CURRENT screen (no reset)")
-            t3_result = _run_tier3_continue(state, tc, completed, failed_idx)
+            t3_result = _run_tier3_continue(state, tc, completed, failed_idx, captured=captured)
 
             t3_steps   = t3_result.get("step_results") or []
             t3_outcome = t3_result.get("outcome", "failed")
