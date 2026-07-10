@@ -554,6 +554,44 @@ fixes apply to every app and every backend.
   *Use Mock Card*; if a future app hides it, capture degrades gracefully to an empty value → the step
   fails into Tier-3 rather than crashing.
 
+### E2E step-19 speed, multi-kiosk suite isolation, number-format tolerance (2026-07-10)
+
+Three follow-ups from a clean live re-run of `TC-E2E-001` and a mixed suite. All in
+`test_runner/nodes/run_vision_step.py` + `vision_agent/nodes/validate_pipeline.py`, verified live,
+and applied identically for playwright AND real-robot modes.
+
+- ✅ **Issue #1 — the inline `vision_required` step (enter captured card + pay) stalled ~100 s.** It
+  invoked the FULL VisionAgent (analyze→plan→execute→validate per step, re-analyzing before each tap
+  → ~6 slow Opus calls) even though it already HAD the data. Fix: a **fast single-call path**
+  (`_inline_vision_fast`) — ONE Claude-vision call returns the concrete actions ("type <captured
+  value> into that field, tap the pay button"), executed directly via `robot.tap()/type_text()`. Uses
+  the SAME coordinate convention as `analyze`/`execute` (`_norm_to_px` on the captured image →
+  `robot.tap`, which the real backend scales viewport→camera), so it is correct on both backends. The
+  full agent remains the fallback (playwright: only if the screen didn't advance). Confirmed live:
+  `[VISION-FAST] 2 action(s) from 1 vision call → advanced payment → order_result`, TC-E2E-001 still a
+  full 25-step PASS — step 19 dropped from ~6 LLM calls to 1.
+- ✅ **Real-robot dynamic-value capture uses the /screen/click frame.** The `capture` step's vision
+  read now, on the real backend, REUSES the post-tap camera frame the `/screen/click` response already
+  returned (`last_screenshot`) — no extra `/capture` arm cycle — falling back to a fresh camera capture;
+  playwright still takes a fresh browser screenshot. So the just-issued card number is read from what
+  the robot's camera actually saw, then reused at RPS and back at VPS. (Coordinate handling for the fast
+  path is identical to the existing real-robot VisionAgent path; still unverified vs physical hardware.)
+- ✅ **Issue #2 — a mixed suite ran the 2nd test on the 1st test's app.** Selecting `TC-RPS-001` +
+  `TC-VPS-001`: RPS passed, then VPS "launched RPS again and logged in". Root cause: `settings.kiosk_url`
+  is set ONCE per run to the primary kiosk, and `reset_to_entry()` between tests reused it. Fix: new
+  `_position_for_test(tc)` runs before each test's reset — playwright points the browser at THAT test's
+  kiosk URL (reset then clears storage + lands on the right app); real robot drives the AGV to that
+  test's kiosk device (parity). Confirmed live: `TC-RPS-001` (login→products on RPS) then `TC-VPS-001`
+  (ValuePass station on VPS) both PASS, each on its own kiosk.
+- ✅ **Issue #3 — number-format tolerance (5000 vs 5,000).** Confirmed already handled by
+  `_value_matches` (strips whitespace/commas; now also currency `$€£₹`) — the mixed run's VPS verify
+  matched `$3,000.00`. Added `_is_format_only_diff` + a **human-review flag**: when a value matches only
+  after ignoring formatting (normalized/numeric equality, so `3000`==`$3,000.00` but `5000`≠`50000`),
+  the verify PASSES and the step carries `human_review: true` + a note ("value correct — confirm the
+  formatting difference is acceptable"), surfaced to the live monitor.
+- **Verification:** TC-E2E-001 PASS (fast path), TC-RPS-001 + TC-VPS-001 mixed suite both PASS on the
+  correct kiosks. Real-robot code paths are consistent but need hardware to confirm.
+
 ### Studio / infrastructure (sibling `kiosk-test-studio`)
 
 - ✅ **`fetch` had no timeout** — dashboard hung on "Loading…", Reset froze uncancellably, readiness

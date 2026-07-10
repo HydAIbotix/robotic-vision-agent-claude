@@ -61,6 +61,7 @@ def run_validate_pipeline(
         note (str)                 — extra diagnostic detail
     """
     backend = backend or settings.robot_backend
+    fmt_note: str = ""   # set when a value matches only after ignoring number formatting (5000 vs 5,000)
 
     # ── Node 1: Screen Identity ───────────────────────────────────────────────
     screen_match: bool | None = None
@@ -149,6 +150,11 @@ def run_validate_pipeline(
         if anchored is not None:
             if _value_matches(expected_text, anchored):
                 text_match = True
+                if _is_format_only_diff(expected_text, anchored):
+                    fmt_note = (f"Value matches after ignoring number formatting: expected "
+                                f"'{expected_text}', screen shows '{anchored}'. The overall value is "
+                                f"correct — human review: confirm the formatting difference is acceptable.")
+                    print(f"  [VALIDATE] {fmt_note}")
             else:
                 return {
                     "success":       False,
@@ -212,6 +218,8 @@ def run_validate_pipeline(
         parts.append(screen_note)
     if text_match:
         parts.append(f"text '{expected_text}' found")
+    if fmt_note:
+        parts.append(fmt_note)
     return {
         "success":       True,
         "screen_match":  screen_match,
@@ -219,7 +227,8 @@ def run_validate_pipeline(
         "method":        "pipeline",
         "actual_screen": actual_screen,
         "observation":   "; ".join(parts) or "validation passed",
-        "note":          "",
+        "note":          fmt_note,
+        "human_review":  bool(fmt_note),
     }
 
 
@@ -302,15 +311,39 @@ def _find_element(app_map: dict, screen_id: str, element_id: str) -> dict | None
     return None
 
 
+def _norm_value(s: str) -> str:
+    """Normalise an on-screen value for comparison: drop whitespace, thousands separators, and
+    currency symbols; lowercase. Keeps the decimal point (756.67 ≠ 75667). So '5000', '5,000',
+    '$5,000', and '5 000' all normalise to the same token — a pure number-FORMAT difference."""
+    return re.sub(r"[\s,$€£₹]", "", s or "").lower()
+
+
 def _value_matches(expected: str, observed: str) -> bool:
-    """Loose equality for on-screen values: ignore whitespace/commas/case and allow the
+    """Loose equality for on-screen values: ignore whitespace/commas/currency/case and allow the
     expected token to be contained in a longer field text (e.g. 'Total: $856.67')."""
-    def norm(s: str) -> str:
-        return re.sub(r"[\s,]", "", s or "").lower()
-    e, o = norm(expected), norm(observed)
+    e, o = _norm_value(expected), _norm_value(observed)
     if not e or not o:
         return False
     return e in o or o in e
+
+
+def _is_format_only_diff(expected: str, observed: str) -> bool:
+    """True when two values are EQUAL after stripping formatting but differ raw — e.g. expected
+    '5000' vs an on-screen '5,000'/'$5,000'. The underlying value is identical; only the number
+    format differs, so the step PASSES but flags a human review. Uses normalized EQUALITY (not
+    containment) so a genuinely different value like '5000' vs '50000' is NOT treated as a format
+    difference (that stays a plain content match/mismatch, never a false 'format-only' note)."""
+    if (expected or "").strip() == (observed or "").strip():
+        return False   # identical raw → nothing to review
+    e, o = _norm_value(expected), _norm_value(observed)
+    if not e or not o:
+        return False
+    if e == o:
+        return True    # same value, separators/currency stripped (5000 vs 5,000)
+    try:               # numeric equality catches trailing zeros: 3000 == 3000.00
+        return abs(float(e) - float(o)) < 1e-9
+    except (ValueError, TypeError):
+        return False
 
 
 def _ocr_element_text(image_path: str, el: dict) -> str | None:

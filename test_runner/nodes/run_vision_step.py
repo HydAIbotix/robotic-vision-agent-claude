@@ -72,6 +72,35 @@ def _load_device_map() -> dict[str, dict]:
         return {}
 
 
+def _position_for_test(tc: dict) -> None:
+    """Ensure the robot/browser is at THIS test's kiosk before it runs.
+
+    A suite can mix independent tests that run on DIFFERENT kiosks (e.g. an RPS test then a VPS
+    test). Per-run setup positions only the FIRST kiosk, so without per-test positioning the 2nd test
+    runs on the 1st's app/device — observed live in playwright: a VPS test launched RPS and logged in.
+      • playwright → point the browser at the test's kiosk URL (reset_to_entry then lands there;
+        it also clears localStorage/sessionStorage so no prior login carries over). settings.kiosk_url
+        is set once per run to the primary kiosk, so this per-test override is what fixes the mix.
+      • real robot → drive the AGV to the test's kiosk device (same parity as playwright's app switch).
+      • demo       → no-op.
+    No-op when the kiosk can't be resolved."""
+    kid = tc.get("kiosk_id", "")
+    if not kid:
+        return
+    if settings.robot_backend == "playwright":
+        url = (_load_device_map().get(kid) or {}).get("url", "")
+        if url and url != settings.kiosk_url:
+            print(f"  [RUN] Per-test kiosk '{kid}' → {url}  (was {settings.kiosk_url})")
+            settings.kiosk_url = url
+    elif settings.robot_backend == "real":
+        try:
+            if hasattr(robot, "navigate_to_kiosk"):
+                print(f"  [RUN] Per-test: driving AGV to kiosk '{kid}' before the test")
+                robot.navigate_to_kiosk(kid)
+        except Exception as exc:
+            print(f"  [RUN] Per-test AGV move to '{kid}' failed (continuing): {exc}")
+
+
 def _looks_like_value(val: str) -> bool:
     """True when a captured string is already a clean, reusable token (a card number, code,
     id, amount) rather than empty or a label-noisy blob. Multi-line / long / label-containing
@@ -121,6 +150,123 @@ def _capture_value_via_vision(image_path: str, name: str, description: str) -> s
         return ""
 
 
+def _inline_vision_fast(desc: str, captured: dict, run_id: str, test_id: str,
+                        step_index: int) -> tuple[list[dict], bool]:
+    """FAST inline path: ONE Claude-vision call returns the concrete UI actions to complete the
+    sub-task (type the known value(s) into their field, tap the confirm/pay button), then execute
+    them directly. This replaces the full VisionAgent (analyze→plan→execute→validate per step, with
+    a re-analyze+re-plan before every tap — ~6 slow Opus calls ≈ 100 s) for the common case where we
+    already HAVE the data and just need to enter it and submit (the observed E2E step-19 stall).
+
+    Backend-agnostic: coordinates come back in the screenshot's pixel space and go straight to
+    robot.tap()/type_text() — the SAME convention analyze/execute already use, so it is correct for
+    playwright (browser screenshot) AND the real robot (the /screen/click camera frame). Returns
+    (step_results, advanced). advanced=False → caller falls back to the full VisionAgent."""
+    import base64, io, json
+    from PIL import Image
+    from langchain_core.messages import HumanMessage
+    from vision_agent.llm import get_fast_llm
+    from vision_agent.storage import get_storage
+    from vision_agent.nodes.analyze import _norm_to_px
+
+    Path(settings.screenshots_dir).mkdir(parents=True, exist_ok=True)
+    cap = str(Path(settings.screenshots_dir) / f"inline_fast_{test_id}_{step_index}_{int(time.time())}.png")
+    try:
+        img_path = robot.capture_screen(cap)["image_path"]
+    except Exception:
+        return [], False
+
+    def _dom() -> str:
+        try:
+            return robot.get_dom_screen_id() or ""
+        except Exception:
+            return ""
+    before = _dom()
+
+    try:
+        image_bytes = get_storage().load(img_path)
+        img_w, img_h = Image.open(io.BytesIO(image_bytes)).size
+        b64 = base64.standard_b64encode(image_bytes).decode()
+        vals = "\n".join(f"  {k} = {v}" for k, v in (captured or {}).items() if str(v).strip())
+        vals_block = ("\nValues to enter (use EXACTLY, never invent):\n" + vals) if vals else ""
+        prompt = (
+            "Complete this sub-task on the kiosk screen shown in the screenshot.\n"
+            f"Sub-task: {desc}{vals_block}\n\n"
+            "Return the concrete UI actions to complete it, IN ORDER, as JSON:\n"
+            '{ "actions": [ {"kind":"type","label":"<field>","center":[x,y],"value":"<text>"}, '
+            '{"kind":"tap","label":"<button>","center":[x,y]} ] }\n'
+            "Rules:\n"
+            "- center = the element's location in THIS screenshot (pixels, or 0-1 normalized).\n"
+            "- Typically: type the value into its input field, then tap the confirm/pay/complete button.\n"
+            "- Use the EXACT value(s) provided above; never invent a value.\n"
+            '- If the field/button needed for the sub-task is NOT visible, return {"actions": []}.\n'
+            "Return ONLY the JSON."
+        )
+        llm = get_fast_llm()
+        msg = HumanMessage(content=[
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64},
+             "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": prompt},
+        ])
+        raw = llm.invoke([msg]).content.strip()
+        if "```" in raw:
+            raw = raw.split("```")[1].lstrip("json").strip()
+        actions = (json.loads(raw) or {}).get("actions") or []
+    except Exception as e:
+        print(f"    [VISION-FAST] error → full agent fallback: {e}")
+        return [], False
+
+    if not actions:
+        print("    [VISION-FAST] no actions returned → full agent fallback")
+        return [], False
+
+    print(f"    [VISION-FAST] {len(actions)} action(s) from 1 vision call (fast path)")
+    steps: list[dict] = []
+    for a in actions:
+        kind = (a.get("kind") or "").lower()
+        center = a.get("center") or [0, 0]
+        try:
+            px, py = _norm_to_px([center[0], center[1]], img_w, img_h)
+        except Exception:
+            px, py = 0, 0
+        label = a.get("label", "")
+        try:
+            if kind == "type":
+                value = str(a.get("value", ""))
+                if px and py:
+                    robot.tap(px, py); time.sleep(0.3)   # focus the field first
+                robot.type_text(value, clear_first=True); time.sleep(0.3)
+                sr = {"step": f"type: {value[:30]} ({label})", "success": True, "method": "vision_fast",
+                      "screenshot_after": ""}
+            elif kind == "tap":
+                robot.tap(px, py); time.sleep(0.6)
+                sr = {"step": f"tap: {label} @ ({px},{py})", "success": True, "method": "vision_fast",
+                      "screenshot_after": ""}
+            else:
+                continue
+        except Exception as exc:
+            sr = {"step": f"{kind}: {label}", "success": False, "method": "vision_fast",
+                  "observation": f"{type(exc).__name__}: {exc}"}
+            steps.append(sr)
+            if run_id:
+                broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id,
+                                          "test_id": test_id, "step_index": step_index, **sr})
+            return steps, False
+        steps.append(sr)
+        if run_id:
+            broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id,
+                                      "test_id": test_id, "step_index": step_index, **sr})
+
+    time.sleep(0.8)
+    after = _dom()
+    # playwright: confirm the screen advanced. real/demo (no DOM): trust execution — the downstream
+    # structured verify (e.g. VPS balance check) is the safety net if the submit didn't take.
+    advanced = (bool(after) and after != before) or (settings.robot_backend != "playwright")
+    print(f"    [VISION-FAST] {('advanced ' + (before or '?') + ' → ' + (after or '?')) if after else 'executed'}"
+          f" — {'done' if advanced else 'no screen change → full agent fallback'}")
+    return steps, advanced
+
+
 def _run_inline_vision(desc: str, captured: dict, credentials: dict, scenario: str,
                        app_map: dict, run_id: str, test_id: str, step_index: int) -> tuple[list[dict], bool]:
     """Run a BOUNDED Claude-vision segment for a single vision_required step, then hand control
@@ -163,8 +309,18 @@ def _run_inline_vision(desc: str, captured: dict, credentials: dict, scenario: s
         except Exception:
             return ""
 
-    agent = create_agent()
     seg_steps: list[dict] = []
+
+    # ── FAST PATH: one vision call → type known value(s) + submit ──────────────
+    # For the common "enter the captured value and complete the order" sub-task this is ~1 LLM call
+    # instead of the full agent's ~6, fixing the observed multi-second stall on E2E step 19. Falls
+    # back to the full agent only when it can't finish (playwright: screen didn't advance).
+    fast_steps, fast_advanced = _inline_vision_fast(desc, captured, run_id, test_id, step_index)
+    seg_steps.extend(fast_steps)
+    if fast_advanced:
+        return seg_steps, True
+
+    agent = create_agent()
     made_progress = False
     MAX = 3
     for _it in range(MAX):
@@ -468,6 +624,11 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 "observation": observation,
                 "screenshot_after": _vshot,
             }
+            # Pass but flag for human review when the value matched only after ignoring number
+            # formatting (e.g. expected 5000, screen shows 5,000) — value correct, format differs.
+            if vr.get("human_review"):
+                sr["human_review"] = True
+                sr["note"] = vr.get("note", "")
             step_results.append(sr)
             if run_id: broadcaster.emit(run_id, {
                 "event": "step_result", "run_id": run_id, "test_id": test_id,
@@ -621,9 +782,15 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             # here is the ONLY way to carry an app-generated value forward. Also fires when the
             # direct read returned text but the requested numeric/id token isn't cleanly isolated.
             if not val or not _looks_like_value(val):
-                shot = last_screenshot
+                # Read the value from the current screen image via Claude.
+                #   • real robot → REUSE the post-tap /screen/click camera frame the robot API already
+                #     returned (it's in last_screenshot, and shows the just-issued value) per the robot
+                #     API design — no extra /capture arm cycle; fall back to a fresh camera capture.
+                #   • playwright → take a fresh cheap browser screenshot (always current).
                 if settings.robot_backend == "playwright":
                     shot = _cap("capture", i) or last_screenshot
+                else:
+                    shot = last_screenshot or _cap("capture", i)
                 vis = _capture_value_via_vision(shot, name, desc)
                 if vis:
                     print(f"    {i:>2}. capture {name!r} — direct read {val!r} → vision read {vis!r}")
@@ -817,6 +984,7 @@ def _run_tier3(state: TestRunnerState, tc: dict) -> dict:
         _cred_hint = "\n\nNo login credentials are configured — do NOT attempt to log in."
 
     if settings.robot_backend == "playwright":
+        _position_for_test(tc)
         robot.reset_to_entry()
         save_path  = str(Path(settings.screenshots_dir) / f"start_{tc['test_id']}_{int(time.time())}.png")
         Path(settings.screenshots_dir).mkdir(parents=True, exist_ok=True)
@@ -1065,8 +1233,10 @@ def run_vision_step(state: TestRunnerState) -> dict:
         print(f"  [RUN] TIER-1/2 EXECUTION [{backend}] — running {len(structured_plan.get('steps') or [])} "
               f"stored-coordinate steps from the app map (0 LLM calls)")
 
-        # Reset to app entry and wait for the SPA / camera to settle before
-        # the first verify step.
+        # Point the browser at THIS test's kiosk, then reset to app entry and wait for the SPA /
+        # camera to settle. Per-test URL is essential for a mixed suite (RPS test then VPS test);
+        # reset_to_entry also clears localStorage/sessionStorage so no prior login carries over.
+        _position_for_test(tc)
         robot.reset_to_entry()
         time.sleep(1.2)
 
