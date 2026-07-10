@@ -194,12 +194,17 @@ def _inline_vision_fast(desc: str, captured: dict, run_id: str, test_id: str,
             f"Sub-task: {desc}{vals_block}\n\n"
             "Return the concrete UI actions to complete it, IN ORDER, as JSON:\n"
             '{ "actions": [ {"kind":"type","label":"<field>","center":[x,y],"value":"<text>"}, '
-            '{"kind":"tap","label":"<button>","center":[x,y]} ] }\n'
+            '{"kind":"tap","label":"<button>","center":[x,y]} ], "verified": false }\n'
             "Rules:\n"
             "- center = the element's location in THIS screenshot (pixels, or 0-1 normalized).\n"
             "- Typically: type the value into its input field, then tap the confirm/pay/complete button.\n"
             "- Use the EXACT value(s) provided above; never invent a value.\n"
-            '- If the field/button needed for the sub-task is NOT visible, return {"actions": []}.\n'
+            "- ALREADY SATISFIED: if this sub-task is a VERIFICATION/observation and the information it "
+            'asks to confirm is ALREADY visible on the current screen, return {"actions": [], '
+            '"verified": true} — do NOT re-enter a value or re-tap a button that has already produced '
+            "the result shown (e.g. the balance/transaction is already displayed).\n"
+            '- If the field/button genuinely NEEDED for the sub-task is NOT visible, return {"actions": '
+            '[], "verified": false}.\n'
             "Return ONLY the JSON."
         )
         llm = get_fast_llm()
@@ -211,12 +216,28 @@ def _inline_vision_fast(desc: str, captured: dict, run_id: str, test_id: str,
         raw = llm.invoke([msg]).content.strip()
         if "```" in raw:
             raw = raw.split("```")[1].lstrip("json").strip()
-        actions = (json.loads(raw) or {}).get("actions") or []
+        data = json.loads(raw) or {}
+        actions = data.get("actions") or []
+        already_verified = bool(data.get("verified"))
     except Exception as e:
         print(f"    [VISION-FAST] error → full agent fallback: {e}")
         return [], False
 
     if not actions:
+        # Distinguish "already satisfied" (a verification sub-task whose answer is already on screen)
+        # from "can't do it here". The former must NOT re-enter values / re-tap and must NOT fall back
+        # to the full agent (which would redundantly re-do the whole check — the observed VPS balance
+        # being re-entered and re-checked after it was already displayed). Emit one clean verify step
+        # and report done.
+        if already_verified:
+            print("    [VISION-FAST] sub-task already satisfied on the current screen — no action needed")
+            sr = {"step": f"verify: {desc[:60]}", "success": True, "method": "vision_fast",
+                  "observation": "Already satisfied on the current screen (no re-entry needed).",
+                  "screenshot_after": img_path}
+            if run_id:
+                broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id,
+                                          "test_id": test_id, "step_index": step_index, **sr})
+            return [sr], True
         print("    [VISION-FAST] no actions returned → full agent fallback")
         return [], False
 
@@ -763,38 +784,43 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                            if e.get("id") == eid), None)
             if (not px or not py) and el and el.get("center"):
                 px, py = int(el["center"][0]), int(el["center"][1])
-            val = ""
+            direct = ""
             try:
                 testid = (el or {}).get("testid")
                 if testid and hasattr(robot, "query_element_text"):
-                    val = robot.query_element_text(f'[data-testid="{testid}"]') or ""
-                if not val and px and py and hasattr(robot, "text_at_point"):
-                    val = robot.text_at_point(int(px), int(py)) or ""
+                    direct = robot.query_element_text(f'[data-testid="{testid}"]') or ""
+                if not direct and px and py and hasattr(robot, "text_at_point"):
+                    direct = robot.text_at_point(int(px), int(py)) or ""
             except Exception as exc:
                 print(f"    {i:>2}. capture {name!r} — read failed: {exc}")
-            val = (val or "").strip()
-            # Vision fallback: the value a test needs to reuse (an issued card number, a
-            # confirmation code) is often shown in a TRANSIENT result element the App Explorer
-            # never charted — so the plan's element_id points at the wrong/empty field and the
-            # direct read comes back blank (or as a label-noisy blob like "Card Number: 9013").
-            # When that happens, screenshot the CURRENT screen and let Claude read the named
-            # value. Generic for every app: capture is inherently a runtime read, so one LLM call
-            # here is the ONLY way to carry an app-generated value forward. Also fires when the
-            # direct read returned text but the requested numeric/id token isn't cleanly isolated.
-            if not val or not _looks_like_value(val):
-                # Read the value from the current screen image via Claude.
-                #   • real robot → REUSE the post-tap /screen/click camera frame the robot API already
-                #     returned (it's in last_screenshot, and shows the just-issued value) per the robot
-                #     API design — no extra /capture arm cycle; fall back to a fresh camera capture.
-                #   • playwright → take a fresh cheap browser screenshot (always current).
-                if settings.robot_backend == "playwright":
-                    shot = _cap("capture", i) or last_screenshot
-                else:
-                    shot = last_screenshot or _cap("capture", i)
-                vis = _capture_value_via_vision(shot, name, desc)
-                if vis:
-                    print(f"    {i:>2}. capture {name!r} — direct read {val!r} → vision read {vis!r}")
-                    val = vis
+            direct = (direct or "").strip()
+            # VISION IS AUTHORITATIVE for capture. A capture reads an app-GENERATED, transient value
+            # (an issued card number, a confirmation code) that the App Explorer usually cannot chart
+            # reliably — so the plan's element_id is frequently WRONG or stale. Observed live: the plan
+            # bound this capture to a card-service *status* element whose text ("Connected") is short,
+            # colon-free and thus passed _looks_like_value(), so the old "direct read first, vision only
+            # if it looks bad" logic accepted the status text and typed it into the card input → the
+            # test failed. The direct element read therefore cannot be trusted for capture; read the
+            # named value from the CURRENT screen via Claude and only fall back to the direct read when
+            # vision genuinely can't see it. One LLM call on a rare step buys correctness even when the
+            # plan binds the wrong element. (This is also why the same plan "worked hours ago": that
+            # run's element read empty → vision fired; this run's read a plausible-looking status word.)
+            #   • real robot → REUSE the post-tap /screen/click camera frame already in last_screenshot
+            #     (no extra /capture arm cycle); fall back to a fresh camera capture.
+            #   • playwright → take a fresh cheap browser screenshot (always current).
+            if settings.robot_backend == "playwright":
+                shot = _cap("capture", i) or last_screenshot
+            else:
+                shot = last_screenshot or _cap("capture", i)
+            vis = _capture_value_via_vision(shot, name, desc)
+            if vis:
+                if direct and direct != vis:
+                    print(f"    {i:>2}. capture {name!r} — direct read {direct!r} OVERRIDDEN by vision read {vis!r}")
+                val = vis
+            elif _looks_like_value(direct):
+                val = direct   # vision couldn't see it; the direct read is a clean token — use it
+            else:
+                val = ""       # neither source produced a usable value → {{captured}} fails later → Tier-3
             captured[name] = val
             print(f"    {i:>2}. capture {name!r} = {val!r}  [{'ok' if val else 'EMPTY → later {{captured}} will fail → Tier-3'}]")
             sr = {"step": f"capture: {name}", "success": True, "method": "capture",

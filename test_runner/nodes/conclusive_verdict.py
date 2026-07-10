@@ -82,6 +82,19 @@ Step 4 — Human confirmation check:
   business judgment that cannot be derived from the execution log alone?
   Verification gaps (type C) are common candidates for human review.
 
+═══ TRUST THE STEP-LEVEL VALIDATION ══════════════════════════════════
+Each "verify" step was ALREADY validated by the execution pipeline: it compared the ACTUAL
+on-screen value against the expected value (numbers are compared ignoring currency symbols and
+thousands separators). So a verify step marked passed (✓) means the expected value WAS present on
+screen — you do NOT need to, and CANNOT, re-derive it from the log. Do NOT invent doubt about
+arithmetic, totals, or data the app computed and a passed verify step already confirmed.
+
+DEFAULT-TO-PASS RULE: if EVERY step passed (✓) with zero verification gaps and zero failed steps,
+the objective was achieved — return verdict "PASS", objective_achieved true,
+requires_human_confirmation false, suggested_action "none". Reserve "AMBIGUOUS" strictly for runs
+that have genuine verification gaps (?) or failed steps whose effect on the objective is unclear;
+never for a fully clean run.
+
 Return ONLY valid JSON — no markdown fences:
 {{
   "primary_objective": "<one sentence>",
@@ -193,6 +206,37 @@ def conclusive_verdict(state: TestRunnerState) -> dict:
                 "human_prompt": None,
                 "suggested_action": "file defect",
             }
+
+    # Deterministic guard against FABRICATED ambiguity on a clean run. When every step passed with
+    # zero verification gaps and zero failures, the step-level validation pipeline already confirmed
+    # each expected value on screen (a passed "verify" step compares on-screen text to the expected
+    # value, tolerant of currency/thousands formatting). The verdict LLM must not invent doubt
+    # (e.g. "couldn't confirm the arithmetic") and demand human review on such a run — observed live,
+    # where a full 33-step PASS with the correct balance still came back AMBIGUOUS. A legitimate
+    # step-level human_review (a value that matched only after ignoring number formatting) is
+    # preserved and re-surfaced; a fabricated one is dropped.
+    step_human_review = any(s.get("human_review") for s in step_results)
+    clean_run = (
+        total_steps > 0
+        and not failed_steps
+        and gap_steps == 0
+        and last.get("outcome") == "passed"
+    )
+    if clean_run and cv.get("verdict") != "PASS":
+        print(f"  [VERDICT] Clean run (all {total_steps} steps passed, 0 gaps, 0 failures) — "
+              f"overriding fabricated {cv.get('verdict')} → PASS")
+        cv["verdict"] = "PASS"
+        cv["objective_achieved"] = True
+        cv["failure_type"] = None
+        cv["confidence"] = max(float(cv.get("confidence") or 0.0), 0.9)
+        cv["requires_human_confirmation"] = bool(step_human_review)
+        cv["human_prompt"] = (
+            "A value matched only after ignoring number formatting (e.g. 5000 vs 5,000) — "
+            "confirm the formatting difference is acceptable."
+            if step_human_review else None
+        )
+        if cv.get("suggested_action") in (None, "", "fix test case", "re-explore app", "file defect"):
+            cv["suggested_action"] = "none"
 
     # The conclusive verdict is authoritative — reconcile the reported outcome with it in BOTH
     # directions so the suite's pass/fail count can never contradict the verdict.

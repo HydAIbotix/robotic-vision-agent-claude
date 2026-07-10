@@ -592,6 +592,52 @@ and applied identically for playwright AND real-robot modes.
 - **Verification:** TC-E2E-001 PASS (fast path), TC-RPS-001 + TC-VPS-001 mixed suite both PASS on the
   correct kiosks. Real-robot code paths are consistent but need hardware to confirm.
 
+### Capture robustness + no false human-review on a clean run (`TC-E2E-001`, 2026-07-11)
+
+A live re-run of `TC-E2E-001` surfaced two more generic defects (both in `test_runner/nodes/`,
+verified live end-to-end — a clean 28-step PASS, and applied identically for playwright AND real
+robot). No VPS/RPS-specific code.
+
+- ✅ **A wrong `element_id` in the plan poisoned the `capture` step → the card number never carried
+  to RPS.** The `TC-E2E-001` plan bound `capture card_number` to `card_service_connected_status` (a
+  card-*service status* element), whose text ("Connected") is short and colon-free, so the old
+  `capture` logic ("direct element read first; use Claude vision only if the read is empty or a
+  label-noisy blob") accepted `_looks_like_value("Connected") == True` and typed the status word into
+  the mock-card input → the RPS payment failed. This also explains the user's "it worked hours ago
+  with the same plan" — that earlier run's element read *empty*, so the vision fallback fired and got
+  the real number; this run's element read a plausible-looking status word, so vision was skipped.
+  Fix (`run_vision_step._execute_structured_plan`, `capture` handler): **Claude vision is now the
+  AUTHORITATIVE source for `capture`.** A capture reads an app-GENERATED, transient value (issued card
+  number, confirmation code) the App Explorer usually can't chart reliably, so the plan's element_id
+  is inherently untrustworthy — read the named value from the CURRENT screen via one fast-LLM call and
+  fall back to the direct element read ONLY when vision genuinely can't see it. One LLM call on a rare
+  step makes a wrong/stale element_id harmless. Real robot REUSES the post-tap `/screen/click` camera
+  frame (`last_screenshot`, no extra `/capture` arm cycle); playwright takes a fresh browser shot.
+  Confirmed live: `capture: card_number card_number='8816'` despite the bad element_id, then `8816`
+  entered at RPS and re-checked back at VPS. (The stale plan is left as-is — the fix makes it correct;
+  regenerate via Test Intake only if you want a cleaner element_id.)
+- ✅ **A trailing `vision_required` verify re-entered the card number and re-checked the balance, then
+  the conclusive verdict falsely demanded human review — on an all-correct run.** Two compounding
+  issues in one symptom (`suite_1783687301`: after the structured balance-check verify PASSED, steps
+  28-33 re-typed the card number, re-tapped Check Balance, and ran the full VisionAgent; the verdict
+  then came back AMBIGUOUS "the log does not confirm the arithmetic" with `requires_human_confirmation`).
+  Fixes:
+  - **Inline vision recognises "already satisfied"** (`_inline_vision_fast`): the fast-path prompt now
+    returns `{"actions": [], "verified": true}` when a VERIFICATION sub-task's answer is ALREADY
+    visible on screen (balance/transaction already displayed). The handler emits ONE clean verify step
+    and reports done — no re-entry, no re-tap, and NO fall-through to the slow full agent (which used
+    to redundantly repeat the whole check). `{"actions": [], "verified": false}` still means "can't do
+    it here → full-agent fallback", so genuine uncharted patches are unaffected. Run dropped 33 → 28
+    steps; step 28 is now `verify … Already satisfied on the current screen (no re-entry needed)`.
+  - **No fabricated ambiguity on a clean run** (`conclusive_verdict`): the prompt now states the
+    step-level pipeline ALREADY compared each `verify` step's on-screen value to the expected value
+    (tolerant of currency/thousands formatting), so a passed verify means the value was confirmed —
+    the verdict LLM must not re-derive arithmetic or invent doubt, and a run with zero gaps + zero
+    failures defaults to PASS. A deterministic guard also overrides any non-PASS verdict to PASS when
+    every step passed with zero gaps/failures (a legitimate step-level `human_review` format-only flag
+    is preserved and re-surfaced; a fabricated one is dropped). Confirmed live: `verdict PASS`,
+    `requires_human_confirmation False`, no human prompt.
+
 ### Studio / infrastructure (sibling `kiosk-test-studio`)
 
 - ✅ **`fetch` had no timeout** — dashboard hung on "Loading…", Reset froze uncancellably, readiness
