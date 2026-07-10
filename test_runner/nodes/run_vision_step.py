@@ -280,12 +280,23 @@ def _inline_vision_fast(desc: str, captured: dict, run_id: str, test_id: str,
 
     time.sleep(0.8)
     after = _dom()
-    # playwright: confirm the screen advanced. real/demo (no DOM): trust execution — the downstream
-    # structured verify (e.g. VPS balance check) is the safety net if the submit didn't take.
-    advanced = (bool(after) and after != before) or (settings.robot_backend != "playwright")
-    print(f"    [VISION-FAST] {('advanced ' + (before or '?') + ' → ' + (after or '?')) if after else 'executed'}"
-          f" — {'done' if advanced else 'no screen change → full agent fallback'}")
-    return steps, advanced
+    # The fast path executed the vision-directed actions for THIS sub-task (enter the value(s) +
+    # submit). That clears the uncharted patch, so HAND CONTROL BACK to the structured plan — its own
+    # verify/move steps validate the result and continue the journey, crucially the cross-app
+    # `move`/`verify` return trip to the other kiosk. Do NOT gate "done" on a forward screen
+    # transition: a valid terminal result that stays in place (e.g. a payment DECLINE shows an error
+    # banner on the SAME screen — no DOM change) is not a failure, and forcing a multi-iteration
+    # full-agent retry here makes the agent WANDER off the result screen and never let the structured
+    # return trip run (observed: TC-E2E-002 drifted onto RPS "Loyalty Rewards" and never switched back
+    # to VPS). If the actions genuinely didn't take, the next STRUCTURED verify fails and the existing
+    # Tier-3 resume is the safety net — but the cross-app steps always get their turn. The full-agent
+    # fallback is now reserved for when the fast path produced NO actions (handled above).
+    if after and before and after != before:
+        print(f"    [VISION-FAST] advanced {before} → {after} — resuming structured plan")
+    else:
+        print(f"    [VISION-FAST] actions executed on '{after or before or '?'}' (in-place result, "
+              f"e.g. approved/declined) — resuming structured plan")
+    return steps, True
 
 
 def _run_inline_vision(desc: str, captured: dict, credentials: dict, scenario: str,

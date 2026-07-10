@@ -638,6 +638,41 @@ robot). No VPS/RPS-specific code.
     is preserved and re-surfaced; a fabricated one is dropped). Confirmed live: `verdict PASS`,
     `requires_human_confirmation False`, no human prompt.
 
+### Inline vision must return control so the cross-app return trip always runs (`TC-E2E-002`, 2026-07-11)
+
+`TC-E2E-002` (a card with INSUFFICIENT balance is declined at RPS, then balance re-checked unchanged
+at VPS) reached the decline correctly but then failed the last half: every VPS balance verification
+"landed on a Loyalty Rewards page", the return trip to VPS never happened, and the conclusive verdict
+went AMBIGUOUS/human-review. Root cause was NOT the cross-app switch (which is solid and ground-truth
+driven) — it was that the `vision_required` RPS-payment segment never returned control to the
+structured plan, so the subsequent structured `verify (VPS)` / balance-check steps (which trigger the
+switch back to VPS) never ran.
+
+- ✅ **Generic fix — the inline-vision fast path hands control back after executing its actions,
+  instead of gating on a forward screen transition** (`run_vision_step._inline_vision_fast`). The old
+  logic treated the sub-task as "done" only if the DOM screen ADVANCED (else it fell into a
+  3-iteration full VisionAgent). That is wrong for a valid TERMINAL result that stays in place: an
+  APPROVED payment advances (`payment → order_result`, so `TC-E2E-001` worked), but a DECLINED payment
+  shows an error banner on the SAME `payment` screen — no DOM change → the full agent kicked in and
+  WANDERED off the result screen (onto RPS "Loyalty Rewards"), consuming the rest of the run so the
+  structured return trip to VPS never executed. Now: once the fast path executes its vision-directed
+  actions (enter value(s) + submit) without error, the uncharted patch is cleared → it returns
+  `advanced=True` and the STRUCTURED plan resumes. Its own `verify` steps validate the result and its
+  cross-app `verify`/`move` steps drive the return trip — the cross-app switch ALWAYS gets its turn.
+  The full-agent fallback is now reserved for when the fast path could produce NO actions at all; if
+  the actions genuinely didn't take, the next structured verify fails and the existing Tier-3 resume
+  is the safety net. This is not a per-test patch: it fixes the general contract that a `vision_required`
+  segment clears one uncharted patch and returns, for EVERY app and outcome (approved/declined/error).
+- **Backend parity:** identical for playwright and real robot — the fast path already sends
+  screenshot-space coordinates straight to `robot.tap()/type_text()` (real robot scales
+  viewport→camera and reuses the `/screen/click` frame), and the return-control change is
+  backend-agnostic. Real robot still needs hardware to confirm.
+- **Verified live (playwright + Claude):** `TC-E2E-002` now a clean 24-step PASS — decline confirmed
+  in place at RPS (step 20), browser switched back to VPS (step 21), balance still `$75` unchanged
+  (step 24), verdict PASS with no human review. `TC-E2E-001` re-run as a regression check still PASSES
+  (26 steps) — the approved-payment `advanced payment → order_result` path and the "already satisfied"
+  verify both intact.
+
 ### Studio / infrastructure (sibling `kiosk-test-studio`)
 
 - ✅ **`fetch` had no timeout** — dashboard hung on "Loading…", Reset froze uncancellably, readiness
