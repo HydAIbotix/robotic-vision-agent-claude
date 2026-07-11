@@ -808,6 +808,29 @@ YOUR TASKS:
        "element_id": "<input>", "px": <int>, "py": <int>, "value": "{{{{captured.card_number}}}}"}}
    Only use a capture step when the displaying element exists in the app map; if it does not, emit
    vision_required for that portion instead of guessing.
+6c. CONSUMING A CAPTURED / SPECIFIC VALUE — CRITICAL, applies to EVERY reuse, EACH time it occurs:
+   When a step says to USE / PAY WITH / RE-ENTER the SAME value produced earlier (the same card,
+   code, id, reference) you MUST actually ENTER that specific value — a "type" step with
+   {{{{captured.NAME}}}} into the field that receives it, THEN the completion tap. This is REQUIRED
+   even when the screen has a plausibly-related completion button already in the map
+   (e.g. "Use Mock Card", "Apply", "Start Card Reader Session", "Confirm"). Those buttons complete
+   with a GENERIC or blank value, NOT the specific captured one — tapping such a button WITHOUT first
+   entering {{{{captured.NAME}}}} does NOT satisfy "use the SAME card" and will make later checks
+   (e.g. a balance that must reflect this exact card) wrong. NEVER substitute a charted completion
+   button for entering the specific captured value.
+   - If the INPUT that must receive the captured value is NOT charted on that screen (the screen only
+     has completion / card-reader buttons, no input element), emit a SINGLE
+     {{"action": "vision_required", "device": "<alias>", "screen_id": "<screen>",
+       "description": "Enter {{{{captured.NAME}}}} into the payment/card field and complete the
+       payment using that SAME captured value"}} — live vision enters it at run time. Do NOT tap a
+     completion button in its place.
+   - MULTIPLE reuses (e.g. buy two items, paying for EACH with the same captured card): the captured
+     value must be entered AGAIN for every payment — emit a separate {{{{captured.NAME}}}} entry (or a
+     separate vision_required) per payment. One button-tap can never stand in for a value that must be
+     typed each time.
+   - After entering the captured value and completing a payment, add a "verify" of the RESULT (the
+     order-confirmation / result / updated screen) before moving on, so a payment that silently did
+     not complete is caught immediately instead of desyncing the next step.
 7. Identify required_config — data the tester MUST provide before the test:
    - Include email + password ONLY if the app map has a login/sign-in screen; otherwise omit them.
    - Include card_number ONLY if a specific pre-existing card is needed by the steps.
@@ -956,6 +979,19 @@ def get_tc_plan(req: TcPlanRequest, db: Session = Depends(get_db)):
             "type":  (c.get("type") or "text"),
         })
     plan["required_config"] = _norm_cfg
+
+    # Deterministic net (shared with the runner): a completion tap meant to REUSE a value captured
+    # earlier (e.g. "pay with the SAME issued card") that never enters the value AND whose screen has
+    # no charted input for it → rewrite to vision_required so live vision enters {{captured.NAME}} and
+    # completes. Fixes plans that bound a plausible-but-wrong charted button (e.g. "Use Mock Card")
+    # instead of entering the specific captured value. Idempotent; no-op on correctly-planned reuse.
+    try:
+        from test_runner.plan_normalize import normalize_captured_reuse
+        plan, _reuse_notes = normalize_captured_reuse(plan, app_map)
+        for _n in _reuse_notes:
+            print(f"  [TC-PLAN] captured-value reuse fix: {_n}")
+    except Exception as _exc:
+        print(f"  [TC-PLAN] captured-value normalisation skipped: {_exc}")
 
     # Stamp and save using the shared plan_cache (same file the test runner reads)
     plan["generated_at"] = datetime.utcnow().isoformat() + "Z"

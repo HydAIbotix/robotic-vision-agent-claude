@@ -123,6 +123,25 @@ reference it later as {{{{captured.NAME}}}}:
 Only use capture when the displaying element is in the inventory; otherwise emit vision_required.
 The {{{{captured.NAME}}}} token is the ONE allowed exception to the "no placeholder tokens" rule below.
 
+CONSUMING A CAPTURED / SPECIFIC VALUE — this is where plans go wrong; read carefully:
+When a step says to USE / PAY WITH / RE-ENTER the SAME value captured earlier (the same card, code,
+id), you MUST actually ENTER that specific value: a "type" step with {{{{captured.NAME}}}} into the
+field that receives it, THEN the completion tap. Do this EVEN IF the screen already has a plausible
+completion button in the inventory (e.g. "Use Mock Card", "Apply", "Start Card Reader Session",
+"Confirm"). Such a button completes with a GENERIC/blank value, NOT the specific captured one — so
+tapping it WITHOUT first entering {{{{captured.NAME}}}} does NOT satisfy "use the SAME card" and
+breaks later checks (e.g. a balance that must reflect THIS card). Never substitute a charted
+completion button for entering the specific captured value.
+  • If the INPUT that must receive the value is NOT in the inventory for that screen (only completion/
+    reader buttons are), emit ONE {{"action":"vision_required","device":"<alias>","screen_id":"<screen>",
+    "description":"Enter {{{{captured.NAME}}}} into the payment/card field and complete using that SAME
+    captured value"}} — the runtime enters it with live vision. Do NOT tap a completion button instead.
+  • MULTIPLE reuses (e.g. two purchases each paid with the same captured card): enter the captured
+    value AGAIN for EACH payment — a separate {{{{captured.NAME}}}} entry (or vision_required) per
+    payment. One button tap can never stand in for a value that must be typed every time.
+  • After completing each such payment, add a verify of the RESULT (confirmation/updated screen) before
+    continuing, so a payment that silently did nothing is caught immediately rather than desyncing.
+
 ━━━ AGV / MOBILE-BASE ACTIONS (no screen involved) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Some steps drive the robot's mobile base rather than touching a screen. Map them to:
   • "Move the AGV/base to <device>" / "go to <device>" / "return to home" →

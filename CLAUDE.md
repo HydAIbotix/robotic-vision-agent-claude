@@ -62,7 +62,7 @@ app_explorer/            Phase 1 — autonomous crawler (LangGraph)
 app_map/
   store.py               AppMap load/save, MULTI-APP merge/remove, element_inventory_for_prompt, version_hash
 test_runner/             Phase 2 — test execution (LangGraph)
-  agent.py state.py prompts.py plan_cache.py broadcaster.py
+  agent.py state.py prompts.py plan_cache.py plan_normalize.py broadcaster.py
   nodes/                 load_test_case · parse_steps (3-tier planner) · run_vision_step · run_backend_step · conclusive_verdict · finalize_tests
   reader/excel_reader.py
 defect_agent/            Auto defect intelligence (LangGraph): evaluate → defect_intelligence → publish
@@ -722,6 +722,65 @@ identically for playwright AND real robot. No RPS/VPS-specific code.
   reuses the `/screen/click` camera frame). Real robot still needs hardware to confirm.
 - **User: re-run `TC-E2E-001` from the Studio** to confirm live (the intermittent card-entry failure
   should be gone; a wrong first submit now self-corrects and re-submits before concluding).
+
+### Reusing a captured value (same card) never bypassed by a charted button (`TC-E2E-003`, 2026-07-11)
+
+`TC-E2E-003` buys TWO products in one RPS session, paying for EACH with the SAME card issued at VPS,
+then checks the reduced balance back at VPS. It FAILED: the first payment never happened, the run
+drifted into the second product, then desynced (`verify payment … expected 'payment', got 'cart'`)
+and Tier-3 got stuck tapping "Use Mock Card" which does nothing without a card number. Root cause
+(confirmed generic, not a bad element id):
+
+- The RPS `payment` screen is only **partially charted** — the App Explorer captured its completion
+  buttons (`use_mock_card_button`, `start_card_reader_session_button`) but NOT the card-number INPUT
+  (it's transient/uncharted, which is exactly why `TC-E2E-001` needed a `vision_required` there). Both
+  planner prompts (`_TC_PLAN_PROMPT`, `PLAN_FROM_MAP`) already say "capture the value, reuse it via
+  `{{captured.NAME}}`, use vision_required if the element isn't charted" — but a *plausible-looking*
+  charted button tricked the LLM: it mapped "pay with the SAME card" to a single `tap
+  use_mock_card_button` and **never entered `{{captured.card_number}}`** for EITHER payment. An app_map
+  tap always "passes" at the executor, so the un-completed first payment went undetected and the flow
+  desynced. (`TC-E2E-001` only worked because at plan time that screen wasn't charted, so it got the
+  vision_required; re-exploration charting the button made the planner regress.)
+
+Fixed in two layers — generic (any reused runtime value, not just cards) and identical for playwright
+AND real robot (it only edits the plan / drives the existing inline-vision path):
+
+- ✅ **Deterministic net — `test_runner/plan_normalize.py` `normalize_captured_reuse(plan, app_map)`.**
+  Rewrites a completion/submit `tap` that is meant to REUSE a value captured earlier into a
+  `vision_required` step that enters `{{captured.NAME}}` and completes, but ONLY when (a) a `capture`
+  actually preceded the tap, (b) the step's description signals BOTH reuse ("same"/"issued"/"reuse"/
+  "that card|code"/"captured"/a capture name) AND completion ("pay"/"mock card"/"complete"/…), (c) the
+  value is NOT already entered on that screen by a `{{captured.*}}` type step, and (d) the screen has
+  NO charted input element to receive it (so entering it genuinely needs vision). Idempotent and
+  conservative — it leaves correctly-planned reuse (value typed on the screen, or an input charted)
+  untouched, and never fires without a preceding capture (so a FIRST use like "use the mock card to
+  load $600" is unaffected). Wired into ALL plan paths so cached AND fresh plans are covered:
+  `POST /tc-plan` (before caching), `parse_steps` Tier-2 (after generation), and `parse_steps` Tier-1
+  (on cache HIT — so an OLD wrong cached plan is corrected at run time without a forced regenerate).
+  The converted step keeps its `device`/`screen_id` (so cross-kiosk routing still switches apps) and
+  drops the misbound `element_id`/`px`/`py`.
+- ✅ **Prompt hardening — new "CONSUMING A CAPTURED / SPECIFIC VALUE" rule in BOTH planners**
+  (`_TC_PLAN_PROMPT` rule 6c, `PLAN_FROM_MAP`): reusing a specific captured value MUST be an explicit
+  `{{captured.NAME}}` entry (or a `vision_required` when its input isn't charted) — NEVER a generic
+  charted completion button (Use Mock Card / Apply / Start Card Reader / Confirm), which pays with a
+  generic/blank value and breaks the balance check; the value must be entered AGAIN for EACH payment
+  in a multi-payment flow; and add a verify of the RESULT after each payment so a silent no-op is
+  caught immediately instead of desyncing the next step.
+- **Why it fixes it + regression safety:** the converted `vision_required` payment runs through the
+  same inline-vision fast path hardened earlier today (enter-before-submit guard + stale-error
+  tolerance), so it focuses the RPS card field, types the captured number, submits, and hands control
+  back — for EACH payment. The captured value is resolved before it reaches vision (`_sub_captured` on
+  the description + the `captured` dict passed through), so vision gets `4272`, not the placeholder.
+- **Tests (all pass, no live browser/API needed):** `normalize_captured_reuse` — 19 checks incl. the
+  REAL `TC-E2E-003` plan + real `app_map` (exactly the two `use_mock_card_button` payment taps convert;
+  VPS load, capture, and balance-check untouched; idempotent; conservative when an input is charted or
+  the value is already typed; works for a non-card value too). Executor integration — 6 checks: the
+  converted plan flows through `_execute_structured_plan`, capture populates `card_number=4272`, and
+  BOTH payments invoke inline vision with the RESOLVED number. The earlier inline-fast suite (16) still
+  passes (no regression). The stale `TC-E2E-003_b2e8a64c5d.json` plan was deleted.
+- **User: regenerate the `TC-E2E-003` plan** (Test Intake → force) and re-run from the Studio to
+  confirm live (both payments now enter the captured card; needs the browser + Claude API). Any other
+  test that reuses runtime data across steps (same code/id/reference) benefits from the same net.
 
 ### Studio / infrastructure (sibling `kiosk-test-studio`)
 

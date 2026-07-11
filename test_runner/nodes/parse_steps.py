@@ -22,8 +22,22 @@ from langchain_core.messages import HumanMessage
 from vision_agent.llm import get_llm, invoke_json
 from app_map import store as app_map_store
 from test_runner import plan_cache
+from test_runner.plan_normalize import normalize_captured_reuse
 from test_runner.state import TestRunnerState
 from test_runner.prompts import PLAN_FROM_MAP, PARSE_TEST_CASE
+
+
+def _apply_captured_reuse_norm(plan: dict, app_map: dict | None, where: str) -> dict:
+    """Deterministic net: rewrite reuse-of-captured-value completion taps that bypass the value
+    into vision_required (see plan_normalize). Idempotent — safe to run on generated AND cached
+    plans. Logs each conversion so a developer can see it in the run output."""
+    try:
+        plan, notes = normalize_captured_reuse(plan, app_map)
+        for n in notes:
+            print(f"  [PLAN] ⚠ captured-value reuse fix ({where}): {n}")
+    except Exception as exc:   # never let a normalisation bug break planning
+        print(f"  [PLAN] captured-value normalisation skipped ({where}): {exc}")
+    return plan
 
 
 def _resolve(value: str, credential_scenario: str, credentials: dict) -> str:
@@ -131,6 +145,10 @@ def parse_steps(state: TestRunnerState) -> dict:
     if cached and plan_cache.is_valid(cached, app_map):
         n = len(cached.get("steps") or [])
         print(f"  [PLAN] TIER-1 (plan cache): HIT — reusing cached {n}-step plan (0 LLM calls)")
+        # Apply the captured-reuse net even on a cache HIT so an OLD cached plan that bypassed a
+        # reused value (e.g. paid with a charted mock-card button instead of entering the issued
+        # card) is corrected at run time without forcing a regenerate. Idempotent on good plans.
+        cached = _apply_captured_reuse_norm(cached, app_map, "cache")
         _print_plan(cached)
         return {
             "structured_plan":   cached,
@@ -158,6 +176,10 @@ def parse_steps(state: TestRunnerState) -> dict:
                     _n_converted += 1
             if _n_converted:
                 print(f"  [PLAN] ⚠ {_n_converted} empty-element tap(s) converted → vision_required (Tier-3 will handle them)")
+
+            # Deterministic net: a reuse-of-captured-value completion tap that never enters the value
+            # (and whose screen has no charted input for it) → vision_required so live vision enters it.
+            plan = _apply_captured_reuse_norm(plan, app_map, "tier2")
 
             n = len(plan.get("steps") or [])
             print(f"  [PLAN] TIER-2: SUCCESS — produced {n}-step plan (cached for reuse)")
