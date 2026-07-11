@@ -158,10 +158,23 @@ def _inline_vision_fast(desc: str, captured: dict, run_id: str, test_id: str,
     a re-analyze+re-plan before every tap — ~6 slow Opus calls ≈ 100 s) for the common case where we
     already HAVE the data and just need to enter it and submit (the observed E2E step-19 stall).
 
-    Backend-agnostic: coordinates come back in the screenshot's pixel space and go straight to
-    robot.tap()/type_text() — the SAME convention analyze/execute already use, so it is correct for
-    playwright (browser screenshot) AND the real robot (the /screen/click camera frame). Returns
-    (step_results, advanced). advanced=False → caller falls back to the full VisionAgent."""
+    Two hard-won safeties (both backend-agnostic — playwright browser screenshot AND the real robot
+    /screen/click camera frame, coordinates go straight to robot.tap()/type_text() via _norm_to_px):
+
+      1. ENTER-BEFORE-SUBMIT GUARD.  A "type" action only focuses+enters when it has a valid field
+         center; a controlled (React) input silently drops text typed into an UNFOCUSED field. If the
+         vision model returns a "type" with no/zero center — or skips the type and returns only the
+         submit tap — the value never lands, yet the submit still fires and the app shows "enter a
+         value". So we NEVER tap the submit button unless the required value actually got entered;
+         if it didn't, we re-plan the ENTRY once (asking for the field center + value) before submitting.
+
+      2. STALE-ERROR TOLERANCE.  Some apps keep a prior attempt's error banner on screen until the
+         corrected input is re-submitted. A pre-existing error is therefore NOT proof of failure — we
+         enter the correct value and tap submit anyway, then judge by the RESULT after the submit
+         (handed to the structured verify step). We never re-enter a value and just watch a stale error
+         without clicking submit.
+
+    Returns (step_results, advanced). advanced=False → caller falls back to the full VisionAgent."""
     import base64, io, json
     from PIL import Image
     from langchain_core.messages import HumanMessage
@@ -169,134 +182,203 @@ def _inline_vision_fast(desc: str, captured: dict, run_id: str, test_id: str,
     from vision_agent.storage import get_storage
     from vision_agent.nodes.analyze import _norm_to_px
 
-    Path(settings.screenshots_dir).mkdir(parents=True, exist_ok=True)
-    cap = str(Path(settings.screenshots_dir) / f"inline_fast_{test_id}_{step_index}_{int(time.time())}.png")
-    try:
-        img_path = robot.capture_screen(cap)["image_path"]
-    except Exception:
-        return [], False
-
     def _dom() -> str:
         try:
             return robot.get_dom_screen_id() or ""
         except Exception:
             return ""
-    before = _dom()
 
-    try:
-        image_bytes = get_storage().load(img_path)
-        img_w, img_h = Image.open(io.BytesIO(image_bytes)).size
-        b64 = base64.standard_b64encode(image_bytes).decode()
-        vals = "\n".join(f"  {k} = {v}" for k, v in (captured or {}).items() if str(v).strip())
-        vals_block = ("\nValues to enter (use EXACTLY, never invent):\n" + vals) if vals else ""
-        prompt = (
-            "Complete this sub-task on the kiosk screen shown in the screenshot.\n"
-            f"Sub-task: {desc}{vals_block}\n\n"
-            "Return the concrete UI actions to complete it, IN ORDER, as JSON:\n"
-            '{ "actions": [ {"kind":"type","label":"<field>","center":[x,y],"value":"<text>"}, '
-            '{"kind":"tap","label":"<button>","center":[x,y]} ], "verified": false }\n'
-            "Rules:\n"
-            "- center = the element's location in THIS screenshot (pixels, or 0-1 normalized).\n"
-            "- Typically: type the value into its input field, then tap the confirm/pay/complete button.\n"
-            "- Use the EXACT value(s) provided above; never invent a value.\n"
-            "- ALREADY SATISFIED: if this sub-task is a VERIFICATION/observation and the information it "
-            'asks to confirm is ALREADY visible on the current screen, return {"actions": [], '
-            '"verified": true} — do NOT re-enter a value or re-tap a button that has already produced '
-            "the result shown (e.g. the balance/transaction is already displayed).\n"
-            '- If the field/button genuinely NEEDED for the sub-task is NOT visible, return {"actions": '
-            '[], "verified": false}.\n'
-            "Return ONLY the JSON."
-        )
-        llm = get_fast_llm()
-        msg = HumanMessage(content=[
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64},
-             "cache_control": {"type": "ephemeral"}},
-            {"type": "text", "text": prompt},
-        ])
-        raw = llm.invoke([msg]).content.strip()
-        if "```" in raw:
-            raw = raw.split("```")[1].lstrip("json").strip()
-        data = json.loads(raw) or {}
-        actions = data.get("actions") or []
-        already_verified = bool(data.get("verified"))
-    except Exception as e:
-        print(f"    [VISION-FAST] error → full agent fallback: {e}")
-        return [], False
-
-    if not actions:
-        # Distinguish "already satisfied" (a verification sub-task whose answer is already on screen)
-        # from "can't do it here". The former must NOT re-enter values / re-tap and must NOT fall back
-        # to the full agent (which would redundantly re-do the whole check — the observed VPS balance
-        # being re-entered and re-checked after it was already displayed). Emit one clean verify step
-        # and report done.
-        if already_verified:
-            print("    [VISION-FAST] sub-task already satisfied on the current screen — no action needed")
-            sr = {"step": f"verify: {desc[:60]}", "success": True, "method": "vision_fast",
-                  "observation": "Already satisfied on the current screen (no re-entry needed).",
-                  "screenshot_after": img_path}
-            if run_id:
-                broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id,
-                                          "test_id": test_id, "step_index": step_index, **sr})
-            return [sr], True
-        print("    [VISION-FAST] no actions returned → full agent fallback")
-        return [], False
-
-    print(f"    [VISION-FAST] {len(actions)} action(s) from 1 vision call (fast path)")
-    steps: list[dict] = []
-    for a in actions:
-        kind = (a.get("kind") or "").lower()
-        center = a.get("center") or [0, 0]
-        try:
-            px, py = _norm_to_px([center[0], center[1]], img_w, img_h)
-        except Exception:
-            px, py = 0, 0
-        label = a.get("label", "")
-        try:
-            if kind == "type":
-                value = str(a.get("value", ""))
-                if px and py:
-                    robot.tap(px, py); time.sleep(0.3)   # focus the field first
-                robot.type_text(value, clear_first=True); time.sleep(0.3)
-                sr = {"step": f"type: {value[:30]} ({label})", "success": True, "method": "vision_fast",
-                      "screenshot_after": ""}
-            elif kind == "tap":
-                robot.tap(px, py); time.sleep(0.6)
-                sr = {"step": f"tap: {label} @ ({px},{py})", "success": True, "method": "vision_fast",
-                      "screenshot_after": ""}
-            else:
-                continue
-        except Exception as exc:
-            sr = {"step": f"{kind}: {label}", "success": False, "method": "vision_fast",
-                  "observation": f"{type(exc).__name__}: {exc}"}
-            steps.append(sr)
-            if run_id:
-                broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id,
-                                          "test_id": test_id, "step_index": step_index, **sr})
-            return steps, False
-        steps.append(sr)
+    def _emit(sr: dict) -> None:
         if run_id:
             broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id,
                                       "test_id": test_id, "step_index": step_index, **sr})
 
-    time.sleep(0.8)
-    after = _dom()
-    # The fast path executed the vision-directed actions for THIS sub-task (enter the value(s) +
-    # submit). That clears the uncharted patch, so HAND CONTROL BACK to the structured plan — its own
-    # verify/move steps validate the result and continue the journey, crucially the cross-app
-    # `move`/`verify` return trip to the other kiosk. Do NOT gate "done" on a forward screen
-    # transition: a valid terminal result that stays in place (e.g. a payment DECLINE shows an error
-    # banner on the SAME screen — no DOM change) is not a failure, and forcing a multi-iteration
-    # full-agent retry here makes the agent WANDER off the result screen and never let the structured
-    # return trip run (observed: TC-E2E-002 drifted onto RPS "Loyalty Rewards" and never switched back
-    # to VPS). If the actions genuinely didn't take, the next STRUCTURED verify fails and the existing
-    # Tier-3 resume is the safety net — but the cross-app steps always get their turn. The full-agent
-    # fallback is now reserved for when the fast path produced NO actions (handled above).
-    if after and before and after != before:
-        print(f"    [VISION-FAST] advanced {before} → {after} — resuming structured plan")
-    else:
-        print(f"    [VISION-FAST] actions executed on '{after or before or '?'}' (in-place result, "
-              f"e.g. approved/declined) — resuming structured plan")
-    return steps, True
+    provided_vals = {k: str(v) for k, v in (captured or {}).items() if str(v).strip()}
+    desc_l = (desc or "").lower()
+    # Does this sub-task involve ENTERING a value? True if the description asks to enter/type/fill and
+    # we hold a captured value for it, or (decided per-attempt) if the model itself returns a type.
+    desc_wants_entry = any(w in desc_l for w in ("enter", "type", "input", "fill", "re-enter", "reenter"))
+    llm = get_fast_llm()
+    all_steps: list[dict] = []
+    correction_note = ""
+
+    for attempt in range(1, 3):   # at most 2 vision attempts (re-plan the entry once)
+        Path(settings.screenshots_dir).mkdir(parents=True, exist_ok=True)
+        cap = str(Path(settings.screenshots_dir)
+                  / f"inline_fast_{test_id}_{step_index}_{attempt}_{int(time.time())}.png")
+        try:
+            img_path = robot.capture_screen(cap)["image_path"]
+        except Exception:
+            return all_steps, False
+        before = _dom()
+
+        try:
+            image_bytes = get_storage().load(img_path)
+            img_w, img_h = Image.open(io.BytesIO(image_bytes)).size
+            b64 = base64.standard_b64encode(image_bytes).decode()
+            vals = "\n".join(f"  {k} = {v}" for k, v in provided_vals.items())
+            vals_block = ("\nValues to enter (use EXACTLY, never invent):\n" + vals) if vals else ""
+            retry_block = (f"\nIMPORTANT — RETRY: {correction_note}\n") if correction_note else ""
+            prompt = (
+                "Complete this sub-task on the kiosk screen shown in the screenshot.\n"
+                f"Sub-task: {desc}{vals_block}{retry_block}\n\n"
+                "Return the concrete UI actions to complete it, IN ORDER, as JSON:\n"
+                '{ "actions": [ {"kind":"type","label":"<field>","center":[x,y],"value":"<text>"}, '
+                '{"kind":"tap","label":"<button>","center":[x,y]} ], "verified": false }\n'
+                "Rules:\n"
+                "- center = the element's location in THIS screenshot (pixels, or 0-1 normalized). For "
+                "EVERY \"type\" action you MUST give the input field's center so it can be focused before "
+                "typing — text typed into an unfocused field is silently lost.\n"
+                "- To enter a value: emit a \"type\" action (field center AND the value) FOLLOWED BY the "
+                "\"tap\" on the confirm/pay/submit button. NEVER return a submit tap without the preceding "
+                "type that fills the required value.\n"
+                "- Use the EXACT value(s) provided above; never invent a value.\n"
+                "- STALE ERROR: an error/warning already visible may be LEFT OVER from a PREVIOUS failed "
+                "attempt (some apps keep it until the corrected value is re-submitted). Do NOT treat a "
+                "pre-existing error as failure and do NOT stop at it — enter the correct value and tap "
+                "submit; the result is re-checked AFTER the submit.\n"
+                "- ALREADY SATISFIED: if this sub-task is a VERIFICATION/observation and the information it "
+                'asks to confirm is ALREADY visible on the current screen, return {"actions": [], '
+                '"verified": true} — do NOT re-enter a value or re-tap a button that has already produced '
+                "the result shown (e.g. the balance/transaction is already displayed).\n"
+                '- If the field/button genuinely NEEDED for the sub-task is NOT visible, return {"actions": '
+                '[], "verified": false}.\n'
+                "Return ONLY the JSON."
+            )
+            msg = HumanMessage(content=[
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64},
+                 "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": prompt},
+            ])
+            raw = llm.invoke([msg]).content.strip()
+            if "```" in raw:
+                raw = raw.split("```")[1].lstrip("json").strip()
+            data = json.loads(raw) or {}
+            actions = data.get("actions") or []
+            already_verified = bool(data.get("verified"))
+        except Exception as e:
+            print(f"    [VISION-FAST] error → full agent fallback: {e}")
+            return all_steps, False
+
+        if not actions:
+            # Distinguish "already satisfied" (a verification sub-task whose answer is already on screen)
+            # from "can't do it here". The former must NOT re-enter values / re-tap and must NOT fall back
+            # to the full agent (which would redundantly re-do the whole check — the observed VPS balance
+            # being re-entered and re-checked after it was already displayed). Emit one clean verify step
+            # and report done.
+            if already_verified:
+                print("    [VISION-FAST] sub-task already satisfied on the current screen — no action needed")
+                sr = {"step": f"verify: {desc[:60]}", "success": True, "method": "vision_fast",
+                      "observation": "Already satisfied on the current screen (no re-entry needed).",
+                      "screenshot_after": img_path}
+                all_steps.append(sr); _emit(sr)
+                return all_steps, True
+            print("    [VISION-FAST] no actions returned → full agent fallback")
+            return all_steps, False
+
+        type_actions   = [a for a in actions if (a.get("kind") or "").lower() == "type"]
+        submit_actions = [a for a in actions if (a.get("kind") or "").lower() == "tap"]
+        # An entry is REQUIRED if the model emitted a type, OR the sub-task text asks to enter a value
+        # we actually hold. This catches the failure where the model skips the type and returns only
+        # the submit tap (→ "clicked Pay without entering the card number").
+        needs_value = bool(type_actions) or (bool(provided_vals) and desc_wants_entry)
+        print(f"    [VISION-FAST] attempt {attempt}: {len(type_actions)} type + {len(submit_actions)} "
+              f"tap action(s){' [entry required]' if needs_value else ''}")
+
+        # ── 1) execute the type action(s), tracking whether the value actually LANDED ──────────────
+        entered_ok = not needs_value          # nothing to enter → guard is satisfied
+        entry_problem = "" if type_actions else "no type action was returned to enter the required value"
+        batch: list[dict] = []
+        entry_failed_hard = False
+        for a in type_actions:
+            value  = str(a.get("value", ""))
+            center = a.get("center") or [0, 0]
+            try:
+                px, py = _norm_to_px([center[0], center[1]], img_w, img_h)
+            except Exception:
+                px, py = 0, 0
+            label = a.get("label", "")
+            if not value.strip():
+                entry_problem = f"the type action for {label!r} had an empty value"
+                continue
+            if not (px and py):
+                # No coordinates → we cannot reliably FOCUS the field, so the text would be dropped.
+                # Do not type blindly; record the problem so the entry gets re-planned with a center.
+                entry_problem = f"the type action for {label!r} had no field coordinates to focus"
+                continue
+            try:
+                robot.tap(px, py); time.sleep(0.3)                    # focus the field first
+                robot.type_text(value, clear_first=True); time.sleep(0.3)
+            except Exception as exc:
+                sr = {"step": f"type: {value[:30]} ({label})", "success": False, "method": "vision_fast",
+                      "observation": f"{type(exc).__name__}: {exc}"}
+                batch.append(sr); entry_failed_hard = True
+                break
+            entered_ok = True
+            batch.append({"step": f"type: {value[:30]} ({label})", "success": True,
+                          "method": "vision_fast", "screenshot_after": ""})
+
+        for sr in batch:
+            all_steps.append(sr); _emit(sr)
+        if entry_failed_hard:
+            return all_steps, False
+
+        # ── 2) ENTER-BEFORE-SUBMIT GUARD ───────────────────────────────────────────────────────────
+        # Never tap the submit button when the required value did not actually get entered. This is
+        # the generic root-cause fix for "clicked Pay without entering the card number": submitting
+        # an empty/unfocused field just yields the app's "enter a value" error. Re-plan the ENTRY once
+        # (attempt 2), telling the model its entry didn't land and any on-screen error is stale.
+        if needs_value and not entered_ok:
+            print(f"    [VISION-FAST] entry did not land ({entry_problem or 'value not entered'}) "
+                  f"— NOT tapping submit")
+            if attempt == 1:
+                correction_note = (
+                    f"Your previous attempt did NOT enter the value into the field "
+                    f"({entry_problem or 'the field was not focused'}), so the value is still missing and "
+                    f"any error message on screen is STALE from that failed attempt. Return a \"type\" "
+                    f"action WITH the field's pixel center AND the exact value, then the submit-button tap."
+                )
+                continue
+            print("    [VISION-FAST] entry still did not land on retry → full agent fallback")
+            return all_steps, False
+
+        # ── 3) value entered (or none needed) → execute the submit tap(s) ──────────────────────────
+        for a in submit_actions:
+            center = a.get("center") or [0, 0]
+            try:
+                px, py = _norm_to_px([center[0], center[1]], img_w, img_h)
+            except Exception:
+                px, py = 0, 0
+            label = a.get("label", "")
+            try:
+                robot.tap(px, py); time.sleep(0.6)
+            except Exception as exc:
+                sr = {"step": f"tap: {label}", "success": False, "method": "vision_fast",
+                      "observation": f"{type(exc).__name__}: {exc}"}
+                all_steps.append(sr); _emit(sr)
+                return all_steps, False
+            sr = {"step": f"tap: {label} @ ({px},{py})", "success": True, "method": "vision_fast",
+                  "screenshot_after": ""}
+            all_steps.append(sr); _emit(sr)
+
+        time.sleep(0.8)
+        after = _dom()
+        # We entered the required value AND clicked submit. Whether the result is success (screen
+        # advanced) or an in-place decline/error, the STRUCTURED verify step compares the result to
+        # the EXPECTED outcome and concludes — i.e. it checks the result AFTER the click. So HAND
+        # CONTROL BACK either way. Do NOT gate "done" on a forward transition: a valid terminal result
+        # that stays in place (e.g. a payment DECLINE shows an error on the SAME screen) is not a
+        # failure, and forcing a full-agent retry here makes the agent WANDER off the result screen and
+        # never let the structured cross-app return trip run (observed: TC-E2E-002 drifted onto RPS
+        # "Loyalty Rewards" and never switched back to VPS).
+        if after and before and after != before:
+            print(f"    [VISION-FAST] advanced {before} → {after} — resuming structured plan")
+        else:
+            print(f"    [VISION-FAST] entered value + submitted on '{after or before or '?'}' "
+                  f"(in-place result, e.g. approved/declined) — resuming structured plan")
+        return all_steps, True
+
+    return all_steps, False
 
 
 def _run_inline_vision(desc: str, captured: dict, credentials: dict, scenario: str,

@@ -673,6 +673,56 @@ switch back to VPS) never ran.
   (26 steps) — the approved-payment `advanced payment → order_result` path and the "already satisfied"
   verify both intact.
 
+### Enter-before-submit + stale-error intelligence on the inline-vision path (`TC-E2E-001`, 2026-07-11)
+
+A repeated live re-run of `TC-E2E-001` intermittently FAILED at the RPS payment sub-task (a single
+`vision_required` step: "enter the card number issued at VPS ({{captured.card_number}}) and complete
+the order" — the payment screen has no card-input element charted, so it is handled inline by the
+fast vision path). Two compounding, generic defects — both fixed in `run_vision_step._inline_vision_fast`
++ the `PLAN_STEPS`/`VALIDATE_STEP` prompts, unit-tested across 6 scenarios (16/16 checks), and applied
+identically for playwright AND real robot. No RPS/VPS-specific code.
+
+- ✅ **Clicked Pay WITHOUT entering the card number (random).** Root cause was generic, not a bad
+  element id: the fast path's `type` handler only focuses the field `if px and py`, and a controlled
+  (React) input silently DROPS text typed into an UNFOCUSED field. When the fast vision call returned
+  a `type` with a missing/`[0,0]` center — or skipped the `type` entirely and returned only the Pay
+  `tap` — the value never landed, yet the submit tap still fired, so RPS showed "enter a card number".
+  This is why it failed only *sometimes* (depended on whether that run's vision reply carried a valid
+  field center). Fix: an **ENTER-BEFORE-SUBMIT GUARD** — the fast path now tracks whether the required
+  value actually LANDED (a `type` with a non-empty value AND a valid field center that was focused),
+  and NEVER taps the submit/pay/confirm button unless it did. If entry didn't land it re-plans the
+  ENTRY once (a 2nd vision call told "your entry didn't land; return the field's pixel center + the
+  value, then the submit tap"), then submits. "Entry required" is inferred from the model emitting a
+  `type` OR the sub-task text asking to enter/type/fill a value we actually hold (`captured`), so a
+  model that skips the type is still caught. If the 2nd attempt still can't enter, it hands off to the
+  full VisionAgent (unchanged safety net).
+- ✅ **Stale error made the solution give up / re-enter without ever clicking submit.** RPS keeps a
+  prior attempt's error banner on screen until a corrected value is re-submitted — so after a bad
+  submit, the agent saw the SAME error even after entering the correct card, concluded "RPS rejects
+  every card", and (in the full-agent path) kept re-entering the value WITHOUT tapping Pay, watching
+  the stale banner. Confirmed by testing RPS manually: entering the correct card and clicking Pay
+  succeeds even with the old error still visible. Fix — **stale-error tolerance**, three places:
+  (a) the fast-path prompt now states an already-visible error may be LEFT OVER from a previous failed
+  attempt — enter the correct value and tap submit anyway; the result is re-checked AFTER the submit;
+  (b) `VALIDATE_STEP` no longer fails a `type` merely because an error/toast is visible (it is often
+  stale), and adds a STALE-ERROR RULE: a submit is judged by the RESULT produced AFTER the tap, not by
+  a pre-existing error; (c) `PLAN_STEPS` gained a STALE-ERROR RECOVERY rule: when re-entering a
+  corrected value, tap the field → type → tap submit → THEN verify; never re-enter and stop at the old
+  error without submitting; conclude failure only if the error remains AFTER the corrected submit.
+- **Division of labour (why this is generic and regression-safe):** the fast path guarantees the value
+  is actually entered, then ALWAYS clicks submit, then HANDS CONTROL BACK to the structured plan — the
+  structured `verify` step compares the on-screen result to the EXPECTED outcome and concludes (i.e. it
+  "checks the result after clicking"). So a legitimate in-place DECLINE (`TC-E2E-002`, correct card /
+  insufficient funds, no DOM change) is unaffected — the fast path enters+submits once and returns; the
+  verify judges decline-vs-success. An approved payment (DOM advances) is unaffected. Only OUR failure
+  to enter the value triggers the re-plan. Unit tests cover: happy path, model-skips-type, zero-coord
+  type, in-place decline (no wrong retry), already-satisfied verify, and no-actions→full-agent fallback.
+- **Backend parity:** the guard is coordinate/value-based (backend-agnostic); the fast path already
+  sends screenshot-space coords to `robot.tap()/type_text()` (real robot scales viewport→camera and
+  reuses the `/screen/click` camera frame). Real robot still needs hardware to confirm.
+- **User: re-run `TC-E2E-001` from the Studio** to confirm live (the intermittent card-entry failure
+  should be gone; a wrong first submit now self-corrects and re-submits before concluding).
+
 ### Studio / infrastructure (sibling `kiosk-test-studio`)
 
 - ✅ **`fetch` had no timeout** — dashboard hung on "Loading…", Reset froze uncancellably, readiness

@@ -91,6 +91,13 @@ STRICT RULES:
    - Submit/confirm with empty required fields → fill the fields first.
    Plan the prerequisite steps first, then the gated action. Do not repeat a step that just
    failed without first changing the state that made it fail.
+   STALE ERROR RECOVERY: if a form shows an error that looks left over from a previous attempt
+   (e.g. "enter a card number" / "invalid value") and you are re-entering a corrected value, the
+   recovery is: tap the field, type the correct value, THEN tap the submit/pay/confirm button, and
+   only after that verify the result. An error banner that predates your corrected input is often
+   STALE — some apps clear it only once the corrected value is submitted. Never re-enter a value and
+   then stop at the still-visible old error WITHOUT tapping submit again; and only conclude failure
+   if the error remains AFTER you submit the corrected value.
 6. CREDENTIALS (login / sign-in):
    - Use ONLY the exact email and password given in the Task above. They come from the test
      configuration. NEVER invent, guess, or reuse a placeholder/example email or password.
@@ -115,8 +122,17 @@ Examine the current screenshot (taken immediately after the action).
 Guidance by action type:
 - tap (navigation): did the screen transition to the expected next screen?
 - tap (non-navigation, e.g. quantity +/-): did the UI update as expected?
-- type: assume success unless an error message or unexpected popup is visible
+- type: assume the text was entered. Do NOT report failure merely because an error/toast is
+  visible — such a message is often STALE, left over from a PREVIOUS failed attempt (some apps keep
+  the previous error on screen until the corrected value is re-submitted). Only fail a type if the
+  field visibly rejected THIS input (e.g. the characters did not appear in the field).
 - verify: is the specified text or element present?
+
+STALE-ERROR RULE (important): an error message that was ALREADY on screen before this action is not
+evidence that this action failed. For a submit/confirm/pay tap, judge success by the RESULT produced
+AFTER the tap (screen advanced, success/confirmation shown, or the SAME error persists) — not by an
+error that predates it. If a required value was just corrected and re-submitted, only conclude failure
+when the error remains AFTER that submit.
 
 Return ONLY valid JSON:
 {{
