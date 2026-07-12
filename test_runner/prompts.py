@@ -133,12 +133,22 @@ tapping it WITHOUT first entering {{{{captured.NAME}}}} does NOT satisfy "use th
 breaks later checks (e.g. a balance that must reflect THIS card). Never substitute a charted
 completion button for entering the specific captured value.
   • If the INPUT that must receive the value is NOT in the inventory for that screen (only completion/
-    reader buttons are), emit ONE {{"action":"vision_required","device":"<alias>","screen_id":"<screen>",
-    "description":"Enter {{{{captured.NAME}}}} into the payment/card field and complete using that SAME
-    captured value"}} — the runtime enters it with live vision. Do NOT tap a completion button instead.
-  • MULTIPLE reuses (e.g. two purchases each paid with the same captured card): enter the captured
-    value AGAIN for EACH payment — a separate {{{{captured.NAME}}}} entry (or vision_required) per
-    payment. One button tap can never stand in for a value that must be typed every time.
+    reader buttons are), emit exactly TWO steps IN THIS ORDER — TAP the completion button FIRST (it
+    starts the mock-card flow / reveals the field), THEN enter the value and complete:
+      1. {{"action":"tap","channel":"robot","device":"<alias>","screen_id":"<screen>",
+          "element_id":"<the charted completion button, e.g. use_mock_card_button>","px":<int>,
+          "py":<int>,"description":"Start the mock-card payment (reveals the card field)"}}
+      2. {{"action":"vision_required","device":"<alias>","screen_id":"<screen>",
+          "description":"Enter {{{{captured.NAME}}}} into the card field that appears and
+          complete/confirm the payment with that SAME captured value"}}   (live vision enters it)
+    SINGLE canonical shape — deterministic method tap FIRST, then live vision enters the value and
+    confirms (matches the proven TC-E2E-001 order). Do NOT emit a lone vision_required that both selects
+    the method AND enters (live vision then has to pick the method button itself and can tap the WRONG
+    or a SECOND button). Do NOT reverse the order — entering the card before tapping the completion
+    button does not start the mock-card flow.
+  • MULTIPLE reuses (e.g. two purchases each paid with the same captured card): repeat BOTH steps (tap
+    the completion button, then enter {{{{captured.NAME}}}} and confirm) for EACH payment — a captured
+    value must be entered again every time; one button tap can never stand in for it.
   • After completing each such payment, add a verify of the RESULT (confirmation/updated screen) before
     continuing, so a payment that silently did nothing is caught immediately rather than desyncing.
 
@@ -183,11 +193,17 @@ Hard rules:
   a non-empty "value" — never emit an empty value.
 - device: in a MULTI-APP inventory (screens tagged with app/kiosk), set "device" on every robot step
   to that screen's app alias so cross-kiosk hops switch apps. In a single-app map, omit it.
-- verify steps: MUST include expected_screen (a screen_id from the inventory). When the test
-  explicitly checks a specific value (order total, error text, transaction id), add expected_text
-  with the exact expected string AND value_element_id set to the inventory id of the element on
-  expected_screen that DISPLAYS that value (match by the field the step names — e.g. an order
-  total → the element whose label/note identifies it as the total). Set value_element_id only
+- verify steps: MUST include expected_screen (a screen_id from the inventory). Set it to the screen
+  the tester will ACTUALLY see when the step's outcome is TRUE — the RESULT screen, not the screen the
+  preceding action was started on. E.g. a "first order completed / payment succeeded" check happens on
+  the ORDER-RESULT / confirmation screen, NOT on 'payment'; a "signed in" check is on 'products', not
+  'login'. If the exact result screen isn't in the inventory (e.g. it follows an uncharted completion),
+  pick the closest charted screen AND write a precise `description` of the outcome — the runtime
+  validates the described OUTCOME and tolerates a stale expected_screen, but a wrong description will
+  mislead it. When the test explicitly checks a specific value (order total, error text, transaction
+  id), add expected_text with the exact expected string AND value_element_id set to the inventory id of
+  the element on expected_screen that DISPLAYS that value (match by the field the step names — e.g. an
+  order total → the element whose label/note identifies it as the total). Set value_element_id only
   when such an element exists in the inventory; otherwise omit it (validation falls back to vision).
 - type steps: substitute the ACTUAL value; never leave a placeholder token — EXCEPT {{{{captured.NAME}}}}
   for a value captured earlier by a "capture" step (see RUNTIME-CAPTURED VALUES above).

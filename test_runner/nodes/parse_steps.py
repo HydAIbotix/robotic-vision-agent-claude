@@ -28,9 +28,11 @@ from test_runner.prompts import PLAN_FROM_MAP, PARSE_TEST_CASE
 
 
 def _apply_captured_reuse_norm(plan: dict, app_map: dict | None, where: str) -> dict:
-    """Deterministic net: rewrite reuse-of-captured-value completion taps that bypass the value
-    into vision_required (see plan_normalize). Idempotent — safe to run on generated AND cached
-    plans. Logs each conversion so a developer can see it in the run output."""
+    """Deterministic net: canonicalise reuse-of-captured-value payments to [deterministic completion
+    tap] + [enter+complete vision] (tap the charted completion button FIRST, then live-vision enters
+    the captured value and confirms — matches the proven TC-E2E-001 order). See plan_normalize.
+    Idempotent — safe to run on generated AND cached plans (also FLIPS a prior wrong-order plan).
+    Logs each canonicalisation so a developer can see it in the run output."""
     try:
         plan, notes = normalize_captured_reuse(plan, app_map)
         for n in notes:

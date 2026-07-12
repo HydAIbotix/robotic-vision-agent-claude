@@ -782,6 +782,134 @@ AND real robot (it only edits the plan / drives the existing inline-vision path)
   confirm live (both payments now enter the captured card; needs the browser + Claude API). Any other
   test that reuses runtime data across steps (same code/id/reference) benefits from the same net.
 
+### Reuse-payment consistency: canonical [deterministic completion tap] + [enter+complete vision] (`TC-E2E-003`, 2026-07-12)
+
+Two iterations on the SAME symptom (TC-E2E-003 first RPS payment). Both are captured because the first
+attempt's DESIGN was wrong and the second corrected it — do not reintroduce the first.
+
+**Iteration A (WRONG — do not repeat): "enter-only vision, then tap".** After the prior day's fix,
+TC-E2E-003 still failed: a LONE `vision_required(enter + complete)` on the partially-charted RPS
+`payment` screen forced LIVE VISION to choose the completion button, and `_inline_vision_fast` executed
+EVERY tap the model returned (`for a in submit_actions:`), tapping BOTH `use_mock_card_button` AND
+`start_card_reader_session_button`. The first fix split entry from completion into `[vision_required
+entry_only]` (type the card, tap NOTHING) + `[tap use_mock_card_button]`. **This FAILED live** — it
+FALSELY PASSED without ever completing the payment. Reason: on the real RPS app **"Use Mock Card" must
+be tapped BEFORE the card number is entered** (it starts the mock-card flow / reveals the field);
+entering the card first and tapping after does NOT complete the order. The order was backwards.
+
+**Iteration B (CORRECT — matches the proven-live TC-E2E-001 order).** The canonical shape for EVERY
+reuse-of-a-captured-value payment on a screen with a charted completion button but NO charted input is
+now, IN THIS ORDER:
+  1. `tap <charted completion button>` — deterministic method selection (e.g. tap "Use Mock Card"),
+     which starts the mock-card flow / reveals the card field. Tapped from the app-map element/coords,
+     so live vision never has to choose between two method buttons → the double method-button tap is
+     impossible.
+  2. `vision_required` (enter + complete) — live vision types `{{captured.NAME}}` into the field that
+     now appears and confirms the payment.
+This is exactly TC-E2E-001's proven-working structure. Generic (any reused runtime value); identical
+for playwright AND real robot (only edits the plan / drives the existing inline path); no VPS/RPS code.
+
+- ✅ **`test_runner/plan_normalize.py` is authoritative** — `normalize_captured_reuse` converges ANY
+  variant to `[tap B]` + `[vision enter+complete]`: a lone `vision_required(enter+complete)` (inserts
+  the tap BEFORE it), a lone reuse completion `tap` (adds the vision AFTER it), the pair in either
+  order, AND the prior wrong-order `[vision][tap]` (FLIPS it). It absorbs an adjacent completion tap in
+  either position so the re-emitted order is always tap→vision. `_find_completion_element` scores the
+  charted completion button (`mock card`/`complete`/`pay`/`confirm`…) and EXCLUDES pure await-input
+  controls (reader/session/"tap your card") — so it never picks `start_card_reader_session_button`
+  (@766,660); it picks `use_mock_card_button` (@766,718). Fires ONLY when a capture preceded the step,
+  the description signals reuse AND completion, the value isn't already typed on that screen, the screen
+  has NO charted input, AND a charted completion button exists. Steps it produces carry an internal
+  `reuse_norm` marker so a second pass is inert (idempotent). Wired (unchanged) into all plan paths —
+  `POST /tc-plan`, Tier-2 generation, and **Tier-1 cache HIT** — so the CURRENT wrong-order cached
+  `TC-E2E-003` plan is FLIPPED to the correct order on load, without a forced regenerate.
+- ✅ **`_inline_vision_fast` reverted to its prior-session state** — the Iteration-A `entry_only` mode
+  was removed entirely (it was a wrong-model artifact). The step-2 vision runs the normal
+  enter+complete fast path (with the existing enter-before-submit guard + stale-error tolerance): after
+  the deterministic Use-Mock-Card tap, it only has to type the card into the revealed field and tap the
+  form's confirm — it never sees `start_card_reader_session_button`, so no double method-tap.
+- ✅ **Both planner prompts steer to the tap-first canonical** (`_TC_PLAN_PROMPT` rule 6c in
+  `api/main.py`; the CONSUMING section in `PLAN_FROM_MAP`): when the input isn't charted, TAP the
+  charted completion button FIRST, THEN emit a `vision_required` to enter `{{captured.NAME}}` and
+  confirm — never a lone vision that both selects the method and enters, and never the reverse order.
+  Repeat BOTH steps for each payment in a multi-payment flow. The normalizer enforces it regardless.
+- **No-regression design:** the cached `TC-E2E-001` plan is LEFT UNTOUCHED — its reuse `vision_required`
+  carries no `screen_id`, so no completion button is discoverable and the normalizer skips it (verified
+  by test), AND its own preceding `tap use_mock_card_button` already gives it the canonical order.
+  The user confirmed TC-E2E-001 still PASSES live after these changes.
+- **Tests (all pass, no live browser/API):** `plan_normalize` — 34 checks incl. the REAL current
+  wrong-order `TC-E2E-003` plan + real `app_map` (both RPS payments FLIP `[vision][tap]` → `[tap
+  use_mock_card_button @766,718][enter+complete vision]`; no `entry_only` remains; VPS load/capture/
+  balance-check untouched; idempotent; conservative when an input is charted or only an await-button
+  exists; the completion finder rejects `start_card_reader_session_button`; the REAL `TC-E2E-001` plan
+  is left byte-identical; a lone vision inserts the tap before, a lone tap adds the vision after — a
+  generic `ref_code` too). `inline_fast` — 16 checks (prior-session enter-before-submit/stale-error
+  suite, unchanged, entry_only removed). Executor integration — 11 checks: the wrong-order plan is
+  flipped, then flows through `_execute_structured_plan` so capture populates `card_number=4272` and
+  for BOTH payments the deterministic `use_mock_card_button` (766,718) tap fires IMMEDIATELY BEFORE the
+  vision call (event order `tap→vision, tap→vision`), the vision gets the RESOLVED value, and
+  `start_card_reader_session_button` (766,660) is NEVER tapped. Pre-existing `test_vision_agent.py`
+  live-Claude flakiness (2 screen-classification tests, full-VisionAgent path, untouched) is unrelated.
+- **User: re-run `TC-E2E-003` from the Studio** to confirm live (needs the browser + Claude API).
+  Runtime normalization flips the current cached plan to the correct order on load, so a plain re-run
+  works even without regenerating; regenerate (Test Intake → force) only to refresh the frontend copy /
+  get a clean cached plan. TC-E2E-001 already confirmed still passing.
+
+### Verify tolerates a stale `expected_screen` — intent rescue (`TC-E2E-003`, 2026-07-12)
+
+With the tap-first payment fix in place, TC-E2E-003's first RPS payment now COMPLETES — but the run
+then FAILED on the very next step: `verify "First order completed successfully paying with the same
+captured card"` had `expected_screen: "payment"`, yet a successful payment had already advanced the
+app to `order_result`. The screen shown DID match the step's described outcome, but the executor
+hard-failed on the screen-id mismatch (`expected 'payment', got 'order_result'`) and desynced into a
+Tier-3 resume that wandered (it started checking a later VPS step).
+
+**Root cause:** a `verify` step's real intent is its DESCRIPTION; `expected_screen` is a plan-time
+GUESS. The planner guessed 'payment' because the payment→`order_result` transition is UNCHARTED — the
+mock-card completion is done by live vision, so the App Explorer never recorded that transition, and
+the planner has no `order_result` target to point at. So **the plan alone cannot be relied on to get
+`expected_screen` right here** — execution must tolerate a stale one. Separately, `run_validate_pipeline`
+short-circuits to a hard `screen_id` failure on any definitive screen mismatch; its Claude-vision node
+(which judges the DESCRIPTION) only runs when the screen check is INCONCLUSIVE, never on a mismatch.
+
+**Fix (the user's option 3 — execution intelligence as the robust net + a plan-side nudge). Generic;
+identical for playwright AND real robot; no VPS/RPS-specific code.**
+- ✅ **Intent rescue in the `verify` handler** (`run_vision_step.py`): AFTER the existing nav-settle
+  retries, when a verify's ONLY failure is a `screen_id` mismatch AND it carries NO `expected_text`,
+  capture a FRESH screenshot and ask a strict Claude judge, new `verify_intent_satisfied` in
+  `validate_pipeline.py`, whether the CURRENT screen satisfies the step's DESCRIBED outcome. If yes →
+  the verify PASSES (`method: "intent_vision"`, observation records that the planned `expected_screen`
+  was stale) and the structured plan CONTINUES normally (so the next `products_nav` + second purchase
+  run, instead of desyncing to Tier-3). The judge is STRICT — a genuinely wrong screen (nav failed,
+  an error/decline, an unrelated screen) does NOT satisfy a specific description, so real failures
+  still fail. Backend-agnostic: judges a screenshot both the playwright browser and the real-robot
+  camera produce.
+- ✅ **Scoped to avoid regressions.** The rescue fires ONLY on `success is False AND method ==
+  "screen_id" AND not expected_text`: a screen MATCH passes normally (no rescue, no extra LLM call); a
+  value assertion (`expected_text`/`expected_value`) that fails is a real failure and is NEVER rescued;
+  a verification-GAP (unknown screen) path is unchanged. Runs after the nav-settle retries, so a
+  transient mid-navigation screen isn't mistaken for the result. Costs ONE extra LLM call only on a
+  persistent screen mismatch (a rare, already-failing path).
+- ✅ **Plan-side nudge (defense-in-depth)** — both planners (`_TC_PLAN_PROMPT` in `api/main.py`,
+  `PLAN_FROM_MAP` verify rule) now say: set a verify's `expected_screen` to the RESULT screen the
+  tester actually sees when the outcome is true (the order-result/confirmation screen, NOT the
+  'payment' screen the action started on); if the exact result screen isn't charted, pick the closest
+  charted screen and write a precise `description` — the runtime validates the described outcome and
+  tolerates a stale `expected_screen`. This reduces wrong guesses going forward; the runtime rescue is
+  the guarantee.
+- **Tests (all pass, no live browser/API):** new `test_intent_rescue` — 12 checks: (1) stale
+  `expected_screen 'payment'` on `order_result` with intent satisfied → verify PASSES `intent_vision`
+  and the plan does not desync; (2) genuinely-wrong screen (intent not satisfied) → still FAILS,
+  `method` stays `screen_id` (no over-pass); (3) a screen MATCH passes normally and the intent judge
+  is NEVER called (no regression / no added cost); (4) a verify WITH `expected_text` + screen mismatch
+  does NOT invoke the rescue (a value assertion stays a real failure). The prior suites still pass
+  (`plan_normalize` 34, `inline_fast` 16, `exec_integration` 11). Pre-existing `test_vision_agent.py`
+  live-Claude flakiness (2 tests, unrelated) unchanged.
+- **User: re-run `TC-E2E-003` from the Studio** to confirm live — the first-order verify should now
+  pass on the result screen and the run should proceed to the second purchase and the final VPS
+  balance check (needs the browser + Claude API). Regenerating the plan (Test Intake → force) will also
+  give a cleaner `expected_screen` on the result verifies, but is not required — the runtime rescue
+  handles the current cached plan.
+
 ### Studio / infrastructure (sibling `kiosk-test-studio`)
 
 - ✅ **`fetch` had no timeout** — dashboard hung on "Loading…", Reset froze uncancellably, readiness

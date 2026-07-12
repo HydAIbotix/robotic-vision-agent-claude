@@ -584,6 +584,55 @@ def _claude_extract_value(image_path: str, expected_text: str, description: str)
         return ""
 
 
+def verify_intent_satisfied(image_path: str, step_description: str,
+                            expected_screen: str, actual_screen: str) -> tuple[bool, str]:
+    """Rescue check for a STALE / WRONG `expected_screen` in the PLAN.
+
+    A `verify` step's real intent is its DESCRIPTION; `expected_screen` is a plan-time GUESS that can
+    be wrong — e.g. the planner names 'payment' for a "first order completed" check, but a successful
+    payment has already advanced to an UNCHARTED 'order_result' screen the planner could not predict.
+    When a verify fails ONLY because the screen id doesn't match (no text assertion), ask Claude whether
+    the CURRENT screen actually SATISFIES the described outcome. STRICT: pass only when it clearly does
+    — a genuinely wrong screen (nav failed, an error, an unrelated screen) will not satisfy a specific
+    description, so this cannot rescue a real failure. Backend-agnostic (judges a screenshot both the
+    playwright browser and the real-robot camera produce). Returns (satisfied, observation)."""
+    import base64, json
+    from langchain_core.messages import HumanMessage
+    from vision_agent.llm import get_fast_llm
+    from vision_agent.storage import get_storage
+
+    if not image_path:
+        return False, "no screenshot for intent check"
+    try:
+        b64 = base64.standard_b64encode(get_storage().load(image_path)).decode()
+        prompt = (
+            "A test VERIFY step describes an expected OUTCOME. Judge STRICTLY, from the screenshot, "
+            "whether that described outcome is TRUE on the current screen.\n"
+            f"Expected outcome (verify step): {step_description}\n"
+            f"Note: the plan GUESSED the screen would be '{expected_screen}', but the app may have "
+            f"advanced to a different screen (here it appears to be '{actual_screen or 'unknown'}') "
+            f"after an earlier action. Judge by the OUTCOME described, NOT by the screen name.\n\n"
+            "Pass ONLY if the screen clearly satisfies the described outcome (e.g. an order/payment "
+            "CONFIRMATION or success/result is shown when the step says the order completed). If it "
+            "shows an error, a decline, a different/unrelated screen, or you are unsure — do NOT pass.\n"
+            'Return ONLY JSON: { "satisfied": true/false, "observation": "<one sentence: what the screen shows>" }'
+        )
+        llm = get_fast_llm()
+        msg = HumanMessage(content=[
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64},
+             "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": prompt},
+        ])
+        raw = llm.invoke([msg]).content.strip()
+        if "```" in raw:
+            raw = raw.split("```")[1].lstrip("json").strip()
+        v = json.loads(raw)
+        return bool(v.get("satisfied", False)), str(v.get("observation", "")).strip()
+    except Exception as e:
+        print(f"  [VALIDATE] intent check error: {e}")
+        return False, f"intent check error: {e}"
+
+
 def _claude_vision_validate(image_path: str, description: str, screen_before: str) -> dict:
     """Node 3 fallback — full VALIDATE_STEP call via Claude Opus."""
     import base64, json

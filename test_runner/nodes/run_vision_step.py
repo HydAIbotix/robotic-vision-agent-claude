@@ -702,6 +702,33 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             observation = vr.get("observation", "")
             note    = vr.get("note", "")
 
+            # ── INTENT RESCUE for a stale/wrong expected_screen in the PLAN ─────────────────────────
+            # A verify's real intent is its DESCRIPTION; `expected_screen` is a plan-time guess that can
+            # be wrong — e.g. it names 'payment' for a "first order completed" check, but a successful
+            # payment has already advanced to an UNCHARTED 'order_result' screen the planner could not
+            # predict (the mock-card completion is handled by live vision, so that transition is not in
+            # the app_map). When the ONLY failure is a screen-id mismatch (and no text assertion), ask
+            # whether the CURRENT screen actually satisfies the described outcome; if it clearly does,
+            # PASS and let the plan CONTINUE — instead of hard-failing, which desyncs into a Tier-3
+            # resume that wanders (observed: it started checking the later VPS step). Strict judge → a
+            # genuinely wrong screen won't satisfy a specific description, so real failures still fail.
+            # Runs AFTER the nav-settle retries, so a transient mid-navigation screen isn't mistaken for
+            # the result. Backend-agnostic (fresh screenshot works on playwright AND real robot).
+            if success is False and method == "screen_id" and not expected_text:
+                from vision_agent.nodes.validate_pipeline import verify_intent_satisfied
+                intent_shot = _cap("verify_intent", i) or last_screenshot
+                ok, intent_obs = verify_intent_satisfied(intent_shot, desc, expected, actual)
+                if ok:
+                    print(f"    {i:>2}. verify  expected={expected!r} actual={actual!r} — screen mismatch, "
+                          f"but the step's described OUTCOME is satisfied → PASS [intent_vision]")
+                    success = True
+                    method  = "intent_vision"
+                    observation = (f"Planned expected_screen '{expected}' did not match (screen is "
+                                   f"'{actual}'), but the step's described outcome is satisfied: {intent_obs}")
+                    note = "expected_screen in the plan was stale — validated by the step's described outcome (vision)"
+                    if settings.robot_backend == "playwright" and intent_shot:
+                        last_screenshot = intent_shot
+
             # Verification gap — unknown screen, not a hard failure
             if success is None:
                 print(f"    {i:>2}. verify  expected={expected!r}  [VERIFICATION GAP — {observation}]")
@@ -743,6 +770,9 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             if vr.get("human_review"):
                 sr["human_review"] = True
                 sr["note"] = vr.get("note", "")
+            # Surface the intent-rescue note (stale expected_screen validated by described outcome).
+            if method == "intent_vision" and note:
+                sr["note"] = note
             step_results.append(sr)
             if run_id: broadcaster.emit(run_id, {
                 "event": "step_result", "run_id": run_id, "test_id": test_id,

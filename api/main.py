@@ -819,18 +819,32 @@ YOUR TASKS:
    (e.g. a balance that must reflect this exact card) wrong. NEVER substitute a charted completion
    button for entering the specific captured value.
    - If the INPUT that must receive the captured value is NOT charted on that screen (the screen only
-     has completion / card-reader buttons, no input element), emit a SINGLE
-     {{"action": "vision_required", "device": "<alias>", "screen_id": "<screen>",
-       "description": "Enter {{{{captured.NAME}}}} into the payment/card field and complete the
-       payment using that SAME captured value"}} — live vision enters it at run time. Do NOT tap a
-     completion button in its place.
-   - MULTIPLE reuses (e.g. buy two items, paying for EACH with the same captured card): the captured
-     value must be entered AGAIN for every payment — emit a separate {{{{captured.NAME}}}} entry (or a
-     separate vision_required) per payment. One button-tap can never stand in for a value that must be
-     typed each time.
+     has completion / card-reader buttons, no input element), emit exactly TWO steps IN THIS ORDER —
+     TAP the completion button FIRST (it starts the mock-card flow / reveals the field), THEN enter
+     the captured value and complete:
+       1. {{"action": "tap", "channel": "robot", "device": "<alias>", "screen_id": "<screen>",
+            "element_id": "<the charted completion button, e.g. use_mock_card_button>", "px": <int>,
+            "py": <int>, "description": "Start the mock-card payment (reveals the card field)"}}
+       2. {{"action": "vision_required", "device": "<alias>", "screen_id": "<screen>",
+            "description": "Enter {{{{captured.NAME}}}} into the card field that appears and
+            complete/confirm the payment with that SAME captured value"}}
+     This ONE canonical shape (deterministic method tap FIRST, then live vision enters the value and
+     confirms) matches the proven-working TC-E2E-001 order and makes similar tests behave identically.
+     Do NOT emit a LONE vision_required that both selects the method AND enters — live vision then has
+     to choose the method button itself and can tap the WRONG or a SECOND button (e.g. both "Use Mock
+     Card" and "Start Card Reader Session"), silently failing the payment. Do NOT reverse the order
+     (entering the card BEFORE tapping the completion button does not start the mock-card flow).
+   - MULTIPLE reuses (e.g. buy two items, paying for EACH with the same captured card): repeat BOTH
+     steps (tap the completion button, then enter {{{{captured.NAME}}}} and confirm) for every payment.
+     The captured value must be entered again each time; one button-tap can never stand in for it.
    - After entering the captured value and completing a payment, add a "verify" of the RESULT (the
      order-confirmation / result / updated screen) before moving on, so a payment that silently did
-     not complete is caught immediately instead of desyncing the next step.
+     not complete is caught immediately instead of desyncing the next step. Set that verify's
+     "expected_screen" to the RESULT screen the tester will actually see once the order completes (the
+     order-result / confirmation screen), NOT "payment" (the payment was already made). If the exact
+     result screen isn't in the app map (a successful mock-card completion often advances to an
+     uncharted screen), pick the closest charted screen AND write a precise "description" of the
+     outcome — the runtime validates the described OUTCOME and tolerates a stale expected_screen.
 7. Identify required_config — data the tester MUST provide before the test:
    - Include email + password ONLY if the app map has a login/sign-in screen; otherwise omit them.
    - Include card_number ONLY if a specific pre-existing card is needed by the steps.
