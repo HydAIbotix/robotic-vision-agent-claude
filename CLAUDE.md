@@ -472,7 +472,8 @@ Raw test cases now drive the AGV (mobile base), not just the arm/touchscreen. Ex
   `target: VPS`). The test-id is only a *fallback* input to `_infer_kiosk_ids` (which decides which app
   maps to load for planning); it never overrides what the steps say. At runtime the device ALIAS is
   resolved to its **kiosk_id from the Device Map** and that kiosk_id is the target passed to the robot
-  API (`VPS` → `kiosk-1` → `/base/goto {kiosk_id: "kiosk-1"}`).
+  API (`VPS` → `kiosk-1` → `/base/goto {target: "kiosk-1"}`; the request field is `target`, not
+  `kiosk_id` — see the 2026-07-13 hardware-fix section below).
 - ✅ **New plan actions for base ops** (both `_TC_PLAN_PROMPT` and `PLAN_FROM_MAP` + the executor):
   `move` (AGV goto a device alias or reserved `home`), `check_state` (assert `/base/state` or
   `/arm/state`, optional `expected_state`), `wait` (bounded sleep). These carry NO screen_id/px/py and
@@ -492,6 +493,97 @@ Raw test cases now drive the AGV (mobile base), not just the arm/touchscreen. Ex
   already renders nothing for an empty path, and `_cap` returns `""` on any capture failure — no
   broken images, no crash. All backends: real fires the base/state APIs; playwright/demo simulate an
   idle base (no-op fallbacks added to `stubs.py`) so the same plan runs (validates structure) in dev.
+
+### FIRST real-AGV run: `/base/goto` needs `target`, not `kiosk_id` (`TC-AGV-001`, 2026-07-13)
+
+The first execution of the `real` backend against physical hardware. `TC-AGV-001` ("Move the AGV to
+Kiosk-1") FAILED at step 1 with **HTTP 422 Unprocessable Entity** from
+`POST http://<agv>:8000/api/v1/base/goto`. Root cause: the real AGV controller drives to **named
+positions** from its pre-built map (`kiosk-1`, `kiosk-2`, `home`) and its `/base/goto` schema
+requires a **`target`** field holding that name — but our client sent `{"kiosk_id": …}`, so the
+required `target` was missing → 422. (The alias→kiosk_id resolution in the runner was already
+correct: `VPS`→`kiosk-1` via the Device Map; only the request field name was wrong.) The follow-on
+`/capture` connect-timeout in the same log is a *downstream* symptom — after the move step failed the
+run tried to screenshot the arm camera at a different IP; fixing the goto removes the trigger.
+
+- ✅ **`/base/goto` now sends `target`** (`vision_agent/robot/real_robot.py`), in BOTH callers:
+  - `navigate_to_kiosk(kiosk_id)` → `{"target": kiosk_id, "cmd_id": …}` (the AGV `move` action path;
+    `"home"` passes verbatim as the target).
+  - `move_to_position(x, y, θ, target=None)` → when `target` is given (the cross-kiosk destination
+    kiosk_id), sends `{"target": target, "cmd_id": …}`; with no target it FALLS BACK to the raw pose
+    `{"x", "y", "theta", "cmd_id"}` for a controller that navigates by coordinates. Signature gained
+    the optional `target` kwarg; `stubs.py` mirrors it (simulated no-op) for backend parity, and the
+    runner's cross-kiosk switch now passes `target=target_kid` (x/y/theta ride along only as fallback).
+  We send exactly `target` (+ `cmd_id` for poll correlation) — `kiosk_id` is REPLACED, not added, so a
+  strict schema can't 422 on a stray field. The Device-Map `pos_x/pos_y/pos_theta` config is retained
+  purely as that raw-pose fallback (the robotics team's named map is the primary path).
+- **Scope of the fix — only the navigation API changed.** The other real-robot APIs that carry
+  `kiosk_id` (`/screen/click` in `tap`/`type_text`/`swipe`, `/card/tap`) identify *which kiosk's
+  touchscreen the arm is servicing* — that is genuinely a `kiosk_id`, not a drive-to `target`, and
+  none of them returned 422. Left unchanged; revisit only if a hardware run shows an arm/card API also
+  rejecting `kiosk_id`. `/base/abort`, `/base/state`, `/base/pose` carry no target (cmd_id / GET only).
+- **Backend parity + no regression:** target-driven for real; simulated no-op for playwright/demo (the
+  browser URL switch still handles cross-kiosk app changes there). Unit-tested (11/11) that
+  `navigate_to_kiosk`/`move_to_position` emit `target` (and the pose fallback when no target); the
+  prior suites still pass (`plan_normalize` 34, `inline_fast` 16, `exec_integration` 11, `intent_rescue`
+  12). **Unverified beyond the 422 fix** — the user must re-run `TC-AGV-001` on the real AGV; the next
+  thing to watch is the poll loop (`/base/state` must echo `state:"idle"` and the same `cmd_id`) and
+  then `/capture` reachability from the arm controller IP. **→ this prediction was borne out: see the
+  next section — the base reports `ready` (not `idle`) and doesn't echo our `cmd_id`.**
+
+### Real-AGV run #2: base reports `ready` (not `idle`), + live status tracking (`TC-AGV-001`, 2026-07-13)
+
+With the `target` fix in, the AGV **physically moved home → kiosk-1**, but the run still FAILED:
+`TimeoutError: Robot /base/state timed out after 60.0s (last state: 'ready')`, and there was NO log
+for ~2 minutes while it drove (silent wait), then a downstream `/capture` connect-timeout. Three
+distinct issues — all fixed in `real_robot.py` + `run_vision_step.py`, unit-tested (17/17), applied
+consistently across backends. NB: the user's first hypothesis was a wrong URL (arm vs AGV), but the
+log is decisive that it was NOT — `/base/state` returned `'ready'` for 60s, so it *was* reaching the
+AGV (had it hit the unreachable arm at `.105` it would have raised a ConnectTimeout on the first poll,
+exactly like `/capture` did). Root cause was the arrival contract, not routing.
+
+- ✅ **The base signals arrival with `state:"ready"`, not the arm's `"idle"` — and doesn't echo our
+  `cmd_id`.** The old `_poll` waited for `state=="idle" AND cmd_id==ours`, so a `ready` base never
+  satisfied it → 60s timeout even though it had arrived. New dedicated **`_poll_base(cmd_id,
+  timeout_s, initial_state)`**: arrival = any of `_BASE_READY_STATES` = {`ready`, `idle`, `arrived`,
+  `done`, `reached`}; `state:"error"` fails fast; the **`state` field is authoritative** (no `cmd_id`
+  gate, since the AGV's `/base/state` returns a placeholder cmd_id). The fast arm `_poll` (sub-second
+  taps, real `idle` + real `cmd_id` echo) is unchanged. `check_state` also treats base `ready`≡`idle`
+  (a test asserting the AGV is "idle" is satisfied by "ready"/"arrived"), so a "wait till the AGV is
+  idle at the kiosk" step passes on `ready`. Once `ready`, the next step runs IMMEDIATELY (no implicit
+  wait) unless the test explicitly asks to wait — a `wait` step handles the explicit case.
+- ✅ **Real-time AGV status tracker (no more silent 2-minute wait).** `/base/goto` returns an
+  immediate `{"state":"moving"}` — used for the first status tick — then `_poll_base` polls
+  `/base/state` every **`settings.base_poll_interval_s` (2.0s, configurable)** and pushes a live tick
+  each interval showing `state` + `nav_feedback.distance_remaining` + `nav2_state`
+  (`[ROBOT AGV] 13:15:57.xxx /base/state … — state='moving', 0.68m remaining, nav2=ACTIVE`). Delivery
+  is a **push sink**: the runner registers `robot.set_event_sink(cb)` and the sink emits `log` events
+  to the live monitor DURING the blocking move (the old pull-based `_flush_robot_events` only ran
+  *between* steps, so nothing showed while the base drove). Status ticks are **live-only** (pushed,
+  not stored in the `_events` ring-buffer) so the post-step pull-flush never double-emits them; HTTP
+  call records still flow through `_events`/`get_events` as before. `stubs.py` gets a no-op
+  `set_event_sink` for parity.
+- ✅ **User-friendly timestamps + visible controller routing in telemetry** (issue #2). Every
+  `[ROBOT API]`/`[ROBOT AGV]` line and event now carries `request_time`/`response_time` as local
+  **`hh:mm:ss.mmm`** (e.g. `13:15:56.925 → 13:15:57.032`) alongside the raw epochs, plus a
+  **`controller`** field = the host that served the call (`192.168.0.101:8000` for AGV vs
+  `192.168.0.105:8000` for arm). This makes the AGV-vs-arm URL routing directly verifiable from the
+  monitor — addressing the user's URL concern by *showing* which controller each call hit. Routing
+  itself is unchanged and already strict (`_base_for`: `/base/*` → `agv_api_base()`, everything else →
+  `arm_api_base()`); a new `_get_quiet` is used inside the poll so 30+ raw `GET /base/state` lines
+  don't spam the monitor (one consolidated status tick per interval instead).
+- **Config:** new `settings.base_poll_interval_s` (2.0s) — how often to poll the base while it drives;
+  separate from the fast `robot_poll_interval_s` (0.5s) used for arm taps and from
+  `robot_response_timeout_s` (per-HTTP-call timeout) and `base_move_timeout_s` (overall move deadline,
+  60s).
+- **Backend parity + no regression:** real drives/polls the physical base; playwright/demo simulate an
+  idle base and no-op the sink. Unit-tested (17/17): goto+state route strictly to the AGV URL, poll
+  returns on `ready` (no timeout), live ticks carry state/distance/hh:mm:ss.mmm/controller, error
+  fails fast, and STATUS ticks stay out of the ring-buffer (no double-emit). Prior suites unchanged
+  (`base_goto_target` 11, `plan_normalize` 34, `inline_fast` 16, `exec_integration` 11, `intent_rescue`
+  12). **User: re-run `TC-AGV-001`** (home → kiosk-1 → back home) — the return-home leg should now
+  complete (`ready` detected) with live distance-remaining status throughout, and the `/capture`
+  timeout should be gone since the move no longer fails.
 
 ### Cross-kiosk E2E round-trip fixed live (`TC-E2E-001`, 2026-07-10)
 

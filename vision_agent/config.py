@@ -100,6 +100,10 @@ class Settings(BaseSettings):
     arm_move_timeout_s: float = 30.0
     card_op_timeout_s: float = 30.0
     robot_poll_interval_s: float = 0.5
+    # How often to poll /base/state while the AGV is driving to a kiosk. The base move is slow
+    # (seconds→tens of seconds), so a 2s cadence gives readable live status without hammering the
+    # controller. Separate from the fast arm poll (robot_poll_interval_s) which times sub-second taps.
+    base_poll_interval_s: float = 2.0
     # Max time to wait for a SINGLE robot REST call to respond (HTTP request timeout). The physical
     # arm/AGV can be slow to answer; if a command gets no response within this window we abort and
     # fail the step gracefully (see run_vision_step's try/except → Tier-3/fail path). Kept small and

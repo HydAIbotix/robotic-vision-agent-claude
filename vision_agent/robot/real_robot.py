@@ -39,6 +39,15 @@ _current_kiosk_id: str = ""
 _events: list[dict] = []
 _MAX_EVENTS = 500
 
+# Optional real-time event sink. The test runner registers a callback (set_event_sink) so robot
+# telemetry AND long-poll status ticks reach the live monitor AS THEY HAPPEN, not only after the
+# (potentially long) blocking call returns. None in playwright/demo or when no runner is attached.
+_event_sink = None
+
+# AGV base terminal states: the mobile base reports "ready" (arrived/settled at a kiosk) rather than
+# the arm's "idle". Treat these as "the base has arrived and is holding position".
+_BASE_READY_STATES = frozenset({"ready", "idle", "arrived", "done", "reached"})
+
 # Monotonic command counter → human-readable command ids (cmd-1-goto-VPS, cmd-2-arm-click, …).
 # Reset at the start of each run by reset_command_seq() so ids read 1..N per run.
 _cmd_seq = 0
@@ -80,25 +89,93 @@ def _new_cmd_id(label: str = "cmd") -> str:
     return f"cmd-{_cmd_seq}-{safe}"
 
 
+def set_event_sink(sink) -> None:
+    """Register (or clear with None) a callback the runner uses to stream robot telemetry / AGV
+    status to the live monitor in real time. Signature: sink(event: dict) -> None. Optional — the
+    ring-buffer + get_events() polling still works when no sink is attached."""
+    global _event_sink
+    _event_sink = sink
+
+
+def _now_hms(epoch: float) -> str:
+    """Format an epoch time as a user-friendly local hh:mm:ss.mmm (millisecond precision)."""
+    lt = time.localtime(epoch)
+    ms = int((epoch - int(epoch)) * 1000)
+    return f"{time.strftime('%H:%M:%S', lt)}.{ms:03d}"
+
+
+def _host_of(url: str) -> str:
+    """Strip a base URL down to host[:port] for compact, verifiable logging (which controller was hit)."""
+    return re.sub(r"^https?://", "", url or "").split("/")[0]
+
+
+def _push(evt: dict) -> None:
+    """Push an event to the live sink (if attached) immediately — used for real-time progress
+    (AGV status ticks) that must reach the monitor DURING a blocking call, not after it returns.
+    These are NOT stored in the _events ring-buffer, so the runner's post-step pull-flush (which
+    replays _events) never double-emits them."""
+    if _event_sink is not None:
+        try:
+            _event_sink(evt)
+        except Exception:
+            pass
+
+
 def _record(event_type: str, endpoint: str, cmd_id: str,
-            t0: float, t1: float, status: int, extra: dict) -> None:
+            t0: float, t1: float, status: int, extra: dict, base_url: str = "") -> None:
+    host = _host_of(base_url or _base_for(endpoint))
     evt = {
-        "event_type":  event_type,
-        "endpoint":    endpoint,
-        "cmd_id":      cmd_id,
-        "robot_id":    settings.robot_id,
-        "request_at":  t0,
-        "response_at": t1,
-        "latency_ms":  round((t1 - t0) * 1000, 1),
-        "http_status": status,
+        "event_type":     event_type,
+        "endpoint":       endpoint,
+        "cmd_id":         cmd_id,
+        "robot_id":       settings.robot_id,
+        "controller":     host,             # which controller (AGV vs arm) actually served this call
+        "request_at":     t0,
+        "response_at":    t1,
+        "request_time":   _now_hms(t0),     # user-friendly hh:mm:ss.mmm
+        "response_time":  _now_hms(t1),
+        "latency_ms":     round((t1 - t0) * 1000, 1),
+        "http_status":    status,
         **extra,
     }
+    # Buffer for the runner's post-step pull-flush (and the management get_events() poll).
     _events.append(evt)
     if len(_events) > _MAX_EVENTS:
         _events.pop(0)
     # Console line mirrored to the run log — the runner also surfaces these in the live monitor.
-    print(f"    [ROBOT API] {event_type} {endpoint}"
-          f"{(' (' + cmd_id + ')') if cmd_id else ''} → {status} in {evt['latency_ms']}ms")
+    print(f"    [ROBOT API] {evt['request_time']} → {evt['response_time']} "
+          f"{event_type} {endpoint}{(' (' + cmd_id + ')') if cmd_id else ''} "
+          f"@ {host} → {status} in {evt['latency_ms']}ms")
+
+
+def _status(endpoint: str, cmd_id: str, state: str, feedback: dict, base_url: str = "") -> None:
+    """Emit a real-time AGV progress tick (not an HTTP call record) while long-polling a move.
+    Surfaces the base state ('moving'/'ready') and nav feedback (distance remaining) to the live
+    monitor every poll so the user can watch the AGV approach the kiosk instead of a silent wait."""
+    now  = time.time()
+    host = _host_of(base_url or _base_for(endpoint))
+    dist = (feedback or {}).get("distance_remaining")
+    nav  = (feedback or {}).get("nav2_state")
+    evt = {
+        "event_type":    "STATUS",
+        "endpoint":      endpoint,
+        "cmd_id":        cmd_id,
+        "robot_id":      settings.robot_id,
+        "controller":    host,
+        "response_at":   now,
+        "response_time": _now_hms(now),
+        "state":         state,
+        "distance_remaining": round(dist, 3) if isinstance(dist, (int, float)) else dist,
+        "nav2_state":    nav,
+    }
+    _push(evt)
+    extra = ""
+    if isinstance(dist, (int, float)):
+        extra += f", {dist:.2f}m remaining"
+    if nav:
+        extra += f", nav2={nav}"
+    print(f"    [ROBOT AGV] {evt['response_time']} {endpoint}"
+          f"{(' (' + cmd_id + ')') if cmd_id else ''} @ {host} — state='{state}'{extra}")
 
 
 def _resp_timeout(timeout: Optional[float] = None) -> float:
@@ -113,7 +190,7 @@ def _post_to(base: str, endpoint: str, body: dict, timeout: Optional[float] = No
     t0  = time.time()
     resp = requests.post(url, json=body, timeout=_resp_timeout(timeout))
     t1  = time.time()
-    _record("POST", endpoint, body.get("cmd_id", ""), t0, t1, resp.status_code, {})
+    _record("POST", endpoint, body.get("cmd_id", ""), t0, t1, resp.status_code, {}, base_url=base)
     resp.raise_for_status()
     return resp.json()
 
@@ -123,11 +200,22 @@ def _post(endpoint: str, body: dict, timeout: Optional[float] = None) -> dict:
 
 
 def _get(endpoint: str, timeout: Optional[float] = None) -> dict:
-    url = f"{_base_for(endpoint)}/{endpoint.lstrip('/')}"
+    base = _base_for(endpoint)
+    url  = f"{base}/{endpoint.lstrip('/')}"
     t0  = time.time()
     resp = requests.get(url, timeout=_resp_timeout(timeout))
     t1  = time.time()
-    _record("GET", endpoint, "", t0, t1, resp.status_code, {})
+    _record("GET", endpoint, "", t0, t1, resp.status_code, {}, base_url=base)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _get_quiet(endpoint: str, timeout: Optional[float] = None) -> dict:
+    """GET without emitting an [ROBOT API] telemetry record. Used inside long base-state polling so
+    the monitor shows one consolidated AGV STATUS tick per interval instead of dozens of raw GET
+    lines. Still routed strictly by _base_for (/base/* → AGV URL, else arm URL)."""
+    base = _base_for(endpoint)
+    resp = requests.get(f"{base}/{endpoint.lstrip('/')}", timeout=_resp_timeout(timeout))
     resp.raise_for_status()
     return resp.json()
 
@@ -138,7 +226,8 @@ def _poll(
     timeout_s: float,
     abort_ep: Optional[str] = None,
 ) -> dict:
-    """Poll state_ep until cmd_id matches and state=="idle", or timeout."""
+    """Poll state_ep until cmd_id matches and state=="idle", or timeout. Used for the ARM (fast,
+    sub-second taps) which reports "idle" and echoes the cmd_id. The AGV base uses _poll_base."""
     deadline = time.time() + timeout_s
     last_state: dict = {}
     while time.time() < deadline:
@@ -160,6 +249,48 @@ def _poll(
     raise TimeoutError(
         f"Robot {state_ep} timed out after {timeout_s}s "
         f"(last state: {last_state.get('state')!r})"
+    )
+
+
+def _poll_base(cmd_id: str, timeout_s: float, initial_state: str = "") -> dict:
+    """Poll /base/state until the AGV ARRIVES, emitting a live status tick each interval.
+
+    Arrival contract (per the real AGV controller, confirmed on hardware 2026-07-13):
+      • the base reports state "moving" while navigating, then "ready" once it reaches and settles
+        at the target — so we wait for a READY state (see _BASE_READY_STATES), NOT the arm's "idle";
+      • /base/state does NOT reliably echo our cmd_id (its sample returns a placeholder), so the
+        STATE field is authoritative for arrival — we do not gate on a cmd_id match here;
+      • state "error" fails fast.
+    Polls every settings.base_poll_interval_s (2s default, configurable). Each tick surfaces the
+    state + nav_feedback (distance remaining) to the live monitor via _status so the move is visible
+    instead of a silent wait. On timeout: POST /base/abort (best effort) then raise TimeoutError.
+    Strictly uses the AGV URL (all /base/* calls route to agv_api_base via _base_for)."""
+    if initial_state:
+        _status("/base/goto", cmd_id, initial_state, {})   # immediate status from the goto response
+        if initial_state.lower() in _BASE_READY_STATES:
+            return {"state": initial_state, "cmd_id": cmd_id}
+
+    deadline   = time.time() + timeout_s
+    last_state: dict = {}
+    while time.time() < deadline:
+        last_state = _get_quiet("/base/state")
+        s = str(last_state.get("state", "")).lower()
+        _status("/base/state", cmd_id, s or "?", last_state.get("nav_feedback") or {})
+        if s == "error":
+            raise RuntimeError(f"AGV base error on /base/state: {last_state}")
+        if s in _BASE_READY_STATES:
+            return last_state
+        time.sleep(settings.base_poll_interval_s)
+
+    # Timed out — attempt graceful abort so the base doesn't keep driving.
+    try:
+        _post("/base/abort", {"cmd_id": _new_cmd_id("base-abort")},
+              timeout=settings.robot_response_timeout_s)
+    except Exception:
+        pass
+    raise TimeoutError(
+        f"AGV /base/state timed out after {timeout_s}s "
+        f"(last state: {last_state.get('state')!r}) — base never reached a ready state"
     )
 
 
@@ -467,30 +598,50 @@ def setup(kiosk_definitions: list[dict], arm_poses: dict, nav_map: dict) -> dict
 
 
 def navigate_to_kiosk(kiosk_id: str, timeout_s: Optional[float] = None) -> dict:
-    """Drive the mobile base to kiosk_id; block until the robot arrives."""
+    """Drive the mobile base to kiosk_id; block until the robot arrives.
+
+    The AGV controller drives to a NAMED position from its pre-built map ("kiosk-1", "kiosk-2",
+    "home"), so /base/goto expects a `target` field holding that name — which is exactly the
+    kiosk_id (the Device-Map join key) resolved by the runner from the test-step alias, or the
+    reserved "home". x/y/theta are not needed here (see move_to_position for the pose fallback)."""
     global _current_kiosk_id
     t = timeout_s or settings.base_move_timeout_s
     cmd_id = _new_cmd_id(f"goto-{kiosk_id}")
     print(f"  [ROBOT] navigate_to_kiosk({kiosk_id!r})  timeout={t}s")
-    _post("/base/goto", {"kiosk_id": kiosk_id, "cmd_id": cmd_id})
-    result = _poll("/base/state", cmd_id, t, abort_ep="/base/abort")
+    goto = _post("/base/goto", {"target": kiosk_id, "cmd_id": cmd_id})
+    # Use the goto response's immediate state ("moving") for the first live status, then poll
+    # /base/state (strictly the AGV URL) until it reports a ready state.
+    result = _poll_base(cmd_id, t, initial_state=str((goto or {}).get("state", "")))
     _current_kiosk_id = kiosk_id
-    print(f"  [ROBOT] arrived at {kiosk_id!r}")
+    print(f"  [ROBOT] arrived at {kiosk_id!r}  (state: {result.get('state')!r})")
     return result
 
 
-def move_to_position(x: float, y: float, theta: float) -> dict:
-    """Drive the mobile base to pose (x, y, theta°) before interacting with a device's touchscreen.
+def move_to_position(x: float, y: float, theta: float, target: Optional[str] = None) -> dict:
+    """Drive the mobile base before interacting with a device's touchscreen.
 
     Backend-agnostic counterpart of stubs/playwright move_to_position (a no-op there — no physical
-    base). The test runner calls this for CROSS-KIOSK hops using each device's pose from the Device
-    Map. Non-blocking POST → poll: the HTTP call itself respects settings.robot_response_timeout_s
-    (fail fast if the base controller doesn't answer), while the physical move is awaited up to
+    base). The test runner calls this for CROSS-KIOSK hops, passing the destination kiosk_id as
+    `target` plus the device's pose from the Device Map.
+
+    The AGV controller drives to NAMED positions from its pre-built map, so when `target` is given
+    (the destination kiosk_id or "home") we send it as /base/goto's `target` field — the same
+    contract as navigate_to_kiosk. x/y/theta remain a FALLBACK for a controller that navigates by
+    raw pose instead of by name (used only when no target name is available).
+
+    Non-blocking POST → poll: the HTTP call itself respects settings.robot_response_timeout_s (fail
+    fast if the base controller doesn't answer), while the physical move is awaited up to
     base_move_timeout_s. A timeout raises, which the runner catches and fails the step gracefully."""
     cmd_id = _new_cmd_id("base-goto")
-    print(f"  [ROBOT] move_to_position(x={x}, y={y}, θ={theta}°)")
-    _post("/base/goto", {"x": x, "y": y, "theta": theta, "cmd_id": cmd_id})
-    return _poll("/base/state", cmd_id, settings.base_move_timeout_s, abort_ep="/base/abort")
+    if target:
+        print(f"  [ROBOT] move_to_position(target={target!r})")
+        body = {"target": target, "cmd_id": cmd_id}
+    else:
+        print(f"  [ROBOT] move_to_position(x={x}, y={y}, θ={theta}°)")
+        body = {"x": x, "y": y, "theta": theta, "cmd_id": cmd_id}
+    goto = _post("/base/goto", body)
+    return _poll_base(cmd_id, settings.base_move_timeout_s,
+                      initial_state=str((goto or {}).get("state", "")))
 
 
 def get_base_pose() -> dict:

@@ -584,6 +584,28 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                                           "message": msg, "robot_api": ev})
         _evt_seen[0] += len(evs)
 
+    # Real-time AGV status sink: the real backend pushes live status ticks (state + distance
+    # remaining) here WHILE the base is driving (a blocking call that can take tens of seconds), so
+    # the monitor shows the AGV approaching instead of a silent wait. These are live-only (not in the
+    # robot event ring-buffer), so the post-step _flush_robot_events() pull never double-emits them.
+    def _robot_status_sink(ev: dict) -> None:
+        if not run_id:
+            return
+        st   = ev.get("state", "?")
+        dist = ev.get("distance_remaining")
+        ep   = ev.get("endpoint", "")
+        cmd  = ev.get("cmd_id", "")
+        msg  = (f"[ROBOT AGV] {ev.get('response_time','')} {ep}"
+                f"{(' (' + cmd + ')') if cmd else ''} @ {ev.get('controller','')} — state='{st}'"
+                + (f", {dist:.2f}m remaining" if isinstance(dist, (int, float)) else ""))
+        broadcaster.emit(run_id, {"event": "log", "run_id": run_id, "test_id": test_id,
+                                  "message": msg, "robot_api": ev})
+    if hasattr(robot, "set_event_sink"):
+        try:
+            robot.set_event_sink(_robot_status_sink)
+        except Exception:
+            pass
+
     # Human-readable command ids restart at cmd-1 for each test (real backend only).
     if hasattr(robot, "reset_command_seq"):
         try:
@@ -616,7 +638,11 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                     try:
                         print(f"    [ROBOT] Moving to kiosk '{target_kid}' @ "
                               f"({dev_cfg.get('pos_x',0)}, {dev_cfg.get('pos_y',0)}, {dev_cfg.get('pos_theta',0)}°)")
-                        robot.move_to_position(dev_cfg.get("pos_x", 0), dev_cfg.get("pos_y", 0), dev_cfg.get("pos_theta", 0))
+                        # Pass the destination kiosk_id as the named `target` (the AGV map's named
+                        # position); x/y/theta ride along only as a raw-pose fallback. Real robot
+                        # drives /base/goto by target; playwright/demo ignore it (simulated).
+                        robot.move_to_position(dev_cfg.get("pos_x", 0), dev_cfg.get("pos_y", 0),
+                                               dev_cfg.get("pos_theta", 0), target=target_kid)
                         time.sleep(0.8)  # allow robot/camera to settle
                         # Playwright: point the browser at this kiosk's app URL. (No-op on real.)
                         _switch_browser_to(dev_cfg, target_kid, target_kid)
@@ -1019,7 +1045,15 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 return step_results, "failed", captured
             _flush_robot_events()
             actual = str((st or {}).get("state", "")).lower()
-            ok = True if not expected else (expected in actual or actual in expected)
+            # The AGV base reports "ready" when it has arrived and is holding position — that IS the
+            # base's idle/at-rest state. So a test asserting the AGV is "idle" (or "ready"/"arrived")
+            # is satisfied by any of those. Normalize both sides to a canonical "ready" for the base.
+            _READY_EQUIV = {"ready", "idle", "arrived", "done", "reached"}
+            is_base = target not in ("arm", "robot")
+            if is_base and expected in _READY_EQUIV and actual in _READY_EQUIV:
+                ok = True
+            else:
+                ok = True if not expected else (expected in actual or actual in expected)
             obs = f"{target} state = {actual or '?'}" + (f" (expected '{expected}')" if expected else "")
             print(f"    {i:>2}. check_state {target} → {actual or '?'}  [{'PASS' if ok else 'FAIL'}]")
             sr = {"step": f"check_state: {target}", "success": ok, "method": "robot_state",

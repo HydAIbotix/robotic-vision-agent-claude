@@ -100,11 +100,13 @@ def navigate_to_screen(screen_id: str) -> bool:
     return False
 
 
-def move_to_position(x: float, y: float, theta: float) -> dict:
-    """Drive the robot base to (x, y) with heading theta (degrees) before interacting with a device."""
-    # TODO: send navigation goal to robot base controller
-    print(f"    [ROBOT] move_to_position(x={x}, y={y}, θ={theta}°)")
-    return {"success": True, "x": x, "y": y, "theta": theta}
+def move_to_position(x: float, y: float, theta: float, target=None) -> dict:
+    """Drive the robot base before interacting with a device (simulated — no physical base here).
+
+    `target` (destination kiosk_id or "home") mirrors real_robot's target-driven /base/goto; it is
+    ignored in this simulated backend but kept in the signature for backend parity."""
+    print(f"    [ROBOT] move_to_position(target={target!r}, x={x}, y={y}, θ={theta}°) — simulated")
+    return {"success": True, "x": x, "y": y, "theta": theta, "target": target, "simulated": True}
 
 
 # ── AGV / base + state (no-op fallbacks; the real backend overrides these) ────────
@@ -131,6 +133,12 @@ def get_arm_state() -> dict:
 def get_events(since_idx: int = 0) -> list:
     """No robot-API telemetry in demo/playwright (no physical robot calls)."""
     return []
+
+
+def set_event_sink(sink) -> None:
+    """No-op for parity with real_robot: demo/playwright have no physical base to stream live AGV
+    status from, so there are no real-time ticks to push."""
+    pass
 
 
 def update_explorer_progress(explored: int, total: int, current_action: str = "") -> None:
