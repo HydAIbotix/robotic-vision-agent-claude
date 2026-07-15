@@ -23,6 +23,18 @@ _progress_injected: bool = False  # True once the HUD overlay div has been creat
 _dom_to_screen_id: dict | None = None  # reverse lookup: dom_id → app_map screen_id
 
 
+def _vp() -> tuple[int, int]:
+    """Playwright viewport (w, h) from settings — the coordinate space app_map is learned in.
+
+    SINGLE source of truth so the browser viewport, the on-screen-keyboard taps, and the app_map
+    pixel space always agree. Default 1400×900. When the eventual test target is the REAL ROBOT,
+    set VIEWPORT_WIDTH/HEIGHT to the kiosk's rectified-camera aspect ratio (e.g. 1920×1080, 16:9)
+    BEFORE exploring, so the app renders the same layout the arm will photograph and the
+    viewport→camera scale (real_robot._scale) is a clean proportional map with no aspect distortion."""
+    from vision_agent.config import settings
+    return settings.viewport_width, settings.viewport_height
+
+
 def _kiosk_url() -> str:
     """The kiosk URL to open, with the shared card service appended when configured so the
     kiosk apps share balances across machines. No-op (bare kiosk_url) when unset."""
@@ -99,11 +111,13 @@ def _ensure_page():
             "--force-device-scale-factor=1",        # prevent DPI scaling in screenshots
         ],
     )
+    _vw, _vh = settings.viewport_width, settings.viewport_height
     _page = _browser.new_page(
-        viewport={"width": 1400, "height": 900},
+        viewport={"width": _vw, "height": _vh},
         has_touch=False,           # prevent touch-mode input focus from triggering OS keyboard
         device_scale_factor=1.0,   # screenshot pixels == viewport pixels, so coords are exact
     )
+    print(f"  [PLAYWRIGHT] viewport {_vw}×{_vh}  (app_map coordinate space)")
     _page.goto(_kiosk_url())
     _page.wait_for_load_state("networkidle")
     print(f"\n  [PLAYWRIGHT] Browser opened  →  {_kiosk_url()}")
@@ -234,15 +248,16 @@ def _click_key(page, char: str) -> bool:
     coords = _keyboard_map.get(lookup) or _keyboard_map.get(char)
     if not coords:
         return False
+    vw, vh = _vp()   # keyboard coords are normalized fractions → scale by the current viewport
     # Tap shift before the key — the kiosk keyboard is ONE-SHOT: it auto-returns to
     # lowercase after typing exactly one uppercase letter (App.tsx line 2273-2274).
     # Do NOT tap shift a second time; that would re-enable uppercase for the next char.
     if needs_shift and "shift" in _keyboard_map:
         sc = _keyboard_map["shift"]
-        page.mouse.click(int(sc[0] * 1400), int(sc[1] * 900))
+        page.mouse.click(int(sc[0] * vw), int(sc[1] * vh))
         page.wait_for_timeout(60)
-    px = int(coords[0] * 1400)
-    py = int(coords[1] * 900)
+    px = int(coords[0] * vw)
+    py = int(coords[1] * vh)
     page.mouse.click(px, py)
     page.wait_for_timeout(60)   # key debounce — matches physical tap cadence
     return True
@@ -289,7 +304,8 @@ def type_text(text: str, clear_first: bool = True) -> dict:
             or _keyboard_map.get("enter")
         )
         if done_coords:
-            page.mouse.click(int(done_coords[0] * 1400), int(done_coords[1] * 900))
+            vw, vh = _vp()
+            page.mouse.click(int(done_coords[0] * vw), int(done_coords[1] * vh))
             page.wait_for_timeout(150)
 
     print(f"  [PLAYWRIGHT] type({text!r})")

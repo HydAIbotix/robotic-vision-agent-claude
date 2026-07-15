@@ -45,8 +45,11 @@ _DYNAMIC_SCREEN_KEYWORDS = {
     # User-specific data
     "profile", "account", "dashboard", "personalised", "personalized",
 }
-_VIEWPORT_W = 1400
-_VIEWPORT_H = 900
+# Scroll-math fallbacks (used only when the backend can't report live viewport dims). Sourced from
+# settings so they track a non-default exploration viewport (e.g. 1920×1080 to match a kiosk camera).
+from vision_agent.config import settings as _settings  # noqa: E402
+_VIEWPORT_W = _settings.viewport_width
+_VIEWPORT_H = _settings.viewport_height
 
 
 # ── Screen analysis ───────────────────────────────────────────────────────────

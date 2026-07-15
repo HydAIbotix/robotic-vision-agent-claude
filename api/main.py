@@ -517,6 +517,75 @@ def set_robot_conn(req: RobotConnRequest):
     }
 
 
+# ── Camera / coordinate-space config (Robot Setup page) ───────────────────────────
+
+class CameraConfigRequest(BaseModel):
+    viewport_width:  Optional[int] = None
+    viewport_height: Optional[int] = None
+    camera_width:    Optional[int] = None
+    camera_height:   Optional[int] = None
+
+
+@app.patch("/api/config/camera")
+def set_camera_config(req: CameraConfigRequest):
+    """Save the coordinate-space dimensions that keep real-robot taps accurate.
+
+    • viewport_* — the Playwright EXPLORATION pixel space app_map coordinates are learned in. Set it
+      to the kiosk's rectified-camera ASPECT RATIO so the explored layout matches what the arm
+      photographs; real_robot._scale then absorbs any pure resolution difference per-axis.
+    • camera_* — a pre-calibration SEED for the rectified /capture resolution. Every /capture measures
+      the real dims and overrides it (see vision_agent/config.py calibration note), so this only
+      affects the pre-first-capture display; it never changes a live tap.
+
+    Values take effect live (settings are read on each robot call) and persist to .env. The response
+    returns both aspect ratios + whether they match, so the UI can warn on a mismatch (the usual
+    cause of inaccurate taps)."""
+    def _pos(v: object) -> bool:
+        return isinstance(v, int) and v > 0
+
+    updates: dict[str, str] = {}
+    if req.viewport_width is not None:
+        if not _pos(req.viewport_width):
+            raise HTTPException(400, "viewport_width must be a positive integer")
+        settings.viewport_width = req.viewport_width
+        updates["VIEWPORT_WIDTH"] = str(req.viewport_width)
+    if req.viewport_height is not None:
+        if not _pos(req.viewport_height):
+            raise HTTPException(400, "viewport_height must be a positive integer")
+        settings.viewport_height = req.viewport_height
+        updates["VIEWPORT_HEIGHT"] = str(req.viewport_height)
+    if req.camera_width is not None:
+        if not _pos(req.camera_width):
+            raise HTTPException(400, "camera_width must be a positive integer")
+        settings.robot_camera_width = req.camera_width
+        updates["ROBOT_CAMERA_WIDTH"] = str(req.camera_width)
+    if req.camera_height is not None:
+        if not _pos(req.camera_height):
+            raise HTTPException(400, "camera_height must be a positive integer")
+        settings.robot_camera_height = req.camera_height
+        updates["ROBOT_CAMERA_HEIGHT"] = str(req.camera_height)
+
+    persisted = True
+    if updates:
+        try:
+            _persist_env(updates)
+        except Exception as e:
+            print(f"  [CONFIG] could not persist camera config to .env: {e}")
+            persisted = False
+
+    def _ar(w: int, h: int) -> float:
+        return round(w / h, 4) if h else 0.0
+    vp_ar  = _ar(settings.viewport_width, settings.viewport_height)
+    cam_ar = _ar(settings.robot_camera_width, settings.robot_camera_height)
+    return {
+        "status":         "ok",
+        "viewport":       {"width": settings.viewport_width,  "height": settings.viewport_height,  "aspect": vp_ar},
+        "camera":         {"width": settings.robot_camera_width, "height": settings.robot_camera_height, "aspect": cam_ar},
+        "aspect_matches": abs(vp_ar - cam_ar) < 0.02,   # within ~2% → no reflow risk from aspect
+        "persisted":      persisted,
+    }
+
+
 class DeviceConfigRequest(BaseModel):
     alias:       str
     kiosk_id:    str = ""

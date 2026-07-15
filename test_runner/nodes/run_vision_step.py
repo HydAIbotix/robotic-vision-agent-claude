@@ -657,10 +657,16 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
 
         # ── verify ────────────────────────────────────────────────────────────
         if action == "verify":
-            # playwright only: ensure a current screenshot exists even for a leading
-            # verify step (no preceding tap) so the UI has evidence and a text-mismatch
-            # message can read the actual on-screen value via Claude.
-            if settings.robot_backend == "playwright" and not last_screenshot:
+            # Ensure a CURRENT screenshot exists for the validation pipeline. A LEADING verify
+            # (no preceding tap — e.g. TC-RPS-001 step 1 "the login screen is visible") has no
+            # last_screenshot yet. On the REAL robot this is essential: the camera path validates
+            # against last_screenshot, so without a capture here _match_by_phash gets NO image →
+            # inconclusive → the Claude fallback also gets no image → spurious FAIL → needless Tier-3
+            # on the very first step. This capture also localizes the screen (AprilTag) + calibrates
+            # the camera scale on the real backend. Playwright likewise needs the frame for its
+            # evidence + text-mismatch read. Demo is excluded: its pipeline is always-true and a
+            # capture would consume a scripted demo screenshot.
+            if not last_screenshot and settings.robot_backend != "demo":
                 last_screenshot = _cap("verify", i)
             expected      = step.get("expected_screen", "")
             # Accept both field names: PLAN_FROM_MAP emits "expected_text", the UI planner

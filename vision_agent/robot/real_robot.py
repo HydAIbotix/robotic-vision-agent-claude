@@ -17,8 +17,17 @@ Coordinate mapping
 
 Non-blocking pattern (all tap/swipe/card ops)
   POST command → 202 + {cmd_id}
-  Poll GET state until state=="idle" and cmd_id matches
+  Poll the matching GET state endpoint until a TERMINAL state (and, for the arm, cmd_id matches):
+    • arm tap/type/swipe → "idle"          (fast, echoes cmd_id)
+    • card pick/tap      → "holding_card"   (arm keeps gripping the card; replace → "idle")
+    • AGV base move      → "ready" (_poll_base; state authoritative, cmd_id not echoed)
   Timeout → POST abort endpoint → raise TimeoutError
+
+Screen-localization precondition (spec)
+  /screen/click and every /card/* require a successful /capture (type:"screen") since the last
+  base motion — the kiosk screen pose is derived from that capture, else the call 409s. A base
+  move clears the _screen_localized latch; _ensure_localized() re-captures on demand before the
+  first screen/card op so a structured Tier-1/2 tap right after arrival can't 409.
 """
 import base64
 import re
@@ -34,6 +43,13 @@ from vision_agent.config import settings
 _keyboard_map: dict = {}
 _calibration:  dict = {}          # {"scale_x": float, "scale_y": float}
 _current_kiosk_id: str = ""
+
+# Screen-localization latch. Per the Robot API spec, /screen/click and every /card/* op REQUIRE at
+# least one successful screen capture (type:"screen") since the LAST base motion — the kiosk's screen
+# pose is derived from that capture, and calling before it returns 409. The base move clears this;
+# a successful /capture (or a capture_after_last frame) sets it. _ensure_localized() captures on demand
+# so a structured Tier-1/2 tap (which skips analyze) can't 409 as the first op after the AGV arrives.
+_screen_localized: bool = False
 
 # Telemetry ring-buffer — recent command events for management frontend polling
 _events: list[dict] = []
@@ -225,9 +241,12 @@ def _poll(
     cmd_id:   str,
     timeout_s: float,
     abort_ep: Optional[str] = None,
+    terminal_states: tuple = ("idle",),
 ) -> dict:
-    """Poll state_ep until cmd_id matches and state=="idle", or timeout. Used for the ARM (fast,
-    sub-second taps) which reports "idle" and echoes the cmd_id. The AGV base uses _poll_base."""
+    """Poll state_ep until cmd_id matches and state is terminal, or timeout. Used for the ARM (fast,
+    sub-second taps) which echoes the cmd_id. Taps/typing/swipes settle back to "idle"; a card
+    pick/tap COMPLETES in "holding_card" (the arm keeps holding the card), so those callers pass
+    terminal_states=("holding_card", "idle"). The AGV base uses _poll_base instead."""
     deadline = time.time() + timeout_s
     last_state: dict = {}
     while time.time() < deadline:
@@ -235,7 +254,7 @@ def _poll(
         s = last_state.get("state", "")
         if s == "error":
             raise RuntimeError(f"Robot error on {state_ep}: {last_state}")
-        if s == "idle" and last_state.get("cmd_id") == cmd_id:
+        if s in terminal_states and last_state.get("cmd_id") == cmd_id:
             return last_state
         time.sleep(settings.robot_poll_interval_s)
 
@@ -301,8 +320,20 @@ def _scale(x: int, y: int) -> tuple[int, int]:
     return int(round(x * sx)), int(round(y * sy))
 
 
-def _kiosk() -> str:
-    return _current_kiosk_id or settings.default_kiosk_id
+def _ensure_localized() -> None:
+    """Guarantee the kiosk screen is localized before a /screen/click or /card/* op.
+
+    Spec precondition: those endpoints need a successful /capture (type:"screen") since the last base
+    motion, or they 409. In the vision flow analyze_screen already captures first, so this is a no-op;
+    it only fires for a structured Tier-1/2 tap that arrives right after an AGV move and would
+    otherwise be the first screen op with no capture yet. One capture localizes the screen for all
+    subsequent taps until the base moves again (which re-clears the latch)."""
+    global _screen_localized
+    if _screen_localized:
+        return
+    save_path = str(Path(settings.screenshots_dir) / f"localize_{int(time.time() * 1000)}.png")
+    print("  [ROBOT] screen not localized since last base move — capturing to establish screen pose")
+    capture_screen(save_path)   # sets _screen_localized on success
 
 
 # ── Public robot interface (identical signature to playwright_stubs / stubs) ────
@@ -361,20 +392,24 @@ def capture_screen(save_path: str) -> dict:
     Blocking — robot API returns image directly (not a poll pattern).
     Auto-updates calibration scale factors from the returned image dimensions.
     """
+    global _screen_localized
+    cmd_id = _new_cmd_id("capture")
     t0   = time.time()
     resp = requests.post(
         f"{_arm_base_url()}/capture",
-        json={"type": "screen"},
+        json={"cmd_id": cmd_id, "type": "screen"},   # spec: every command carries a cmd_id
         timeout=_resp_timeout(),
     )
     t1 = time.time()
-    _record("POST", "/capture", "", t0, t1, resp.status_code, {})
+    _record("POST", "/capture", cmd_id, t0, t1, resp.status_code, {})
     resp.raise_for_status()
     data = resp.json()
 
     img_bytes = base64.b64decode(data["image_b64"])
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
     Path(save_path).write_bytes(img_bytes)
+    # A successful type:"screen" capture establishes the screen pose used by /screen/click & /card/*.
+    _screen_localized = True
 
     # Update calibration whenever we learn new camera dimensions
     w, h = data.get("width"), data.get("height")
@@ -398,14 +433,19 @@ def tap(x: int, y: int) -> dict:
     decode and save it, then surface it as image_path so callers can reuse it for
     verification without a separate /capture round-trip (saves an arm cycle).
     """
+    _ensure_localized()   # /screen/click 409s without a capture since the last base motion
     u, v   = _scale(x, y)
     cmd_id = _new_cmd_id("arm-click")
     print(f"    [ROBOT] tap viewport({x},{y}) → camera({u},{v})")
+    # capture_after_last:true → the completion (GET /arm/state) carries a fresh rectified frame
+    # (click_result.image_b64) taken delay_between_ms after the tap. We reuse it for verification
+    # without a separate /capture arm cycle. delay_between_ms doubles as the post-tap settle so the
+    # returned frame is captured AFTER the kiosk finishes its transition (login/render 300-700ms).
     post_resp = _post("/screen/click", {
-        "kiosk_id":         _kiosk(),
-        "points":           [{"u": u, "v": v}],
-        "delay_between_ms": 0,
-        "cmd_id":           cmd_id,
+        "cmd_id":             cmd_id,
+        "points":             [{"u": u, "v": v}],
+        "capture_after_last": True,
+        "delay_between_ms":   800,
     })
     state = _poll("/arm/state", cmd_id, settings.arm_move_timeout_s, abort_ep="/arm/abort")
     # After the arm confirms tap complete, the kiosk still needs time to process the touch
@@ -512,6 +552,8 @@ def type_text(text: str, clear_first: bool = False) -> dict:
         print(f"    [ROBOT] type({text!r}) — keyboard_map not loaded; skipping")
         return {"success": False, "error": "keyboard_map not loaded", "text": text}
 
+    _ensure_localized()   # keyboard taps go through /screen/click → same capture precondition
+
     # Derive camera dimensions from calibration (or settings fallback)
     cam_w = (_calibration.get("scale_x") or (settings.robot_camera_width  / settings.viewport_width)) * settings.viewport_width
     cam_h = (_calibration.get("scale_y") or (settings.robot_camera_height / settings.viewport_height)) * settings.viewport_height
@@ -545,10 +587,9 @@ def type_text(text: str, clear_first: bool = False) -> dict:
     cmd_id = _new_cmd_id("arm-type")
     print(f"    [ROBOT] type({text!r}) — {len(points)} key taps")
     _post("/screen/click", {
-        "kiosk_id":         _kiosk(),
+        "cmd_id":           cmd_id,
         "points":           points,
         "delay_between_ms": 80,   # 80 ms between each key
-        "cmd_id":           cmd_id,
     })
     # type_text may take longer than a single tap — allow extra time
     _poll("/arm/state", cmd_id,
@@ -559,15 +600,15 @@ def type_text(text: str, clear_first: bool = False) -> dict:
 
 def swipe(x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> dict:
     """Swipe from (x1,y1) to (x2,y2) via two sequential taps with delay."""
+    _ensure_localized()
     u1, v1 = _scale(x1, y1)
     u2, v2 = _scale(x2, y2)
     cmd_id = _new_cmd_id("arm-swipe")
     print(f"    [ROBOT] swipe ({x1},{y1})→({x2},{y2})  [{duration_ms}ms]")
     _post("/screen/click", {
-        "kiosk_id":         _kiosk(),
+        "cmd_id":           cmd_id,
         "points":           [{"u": u1, "v": v1}, {"u": u2, "v": v2}],
         "delay_between_ms": duration_ms,
-        "cmd_id":           cmd_id,
     })
     _poll("/arm/state", cmd_id, settings.arm_move_timeout_s, abort_ep="/arm/abort")
     return {"success": True}
@@ -580,12 +621,13 @@ def setup(kiosk_definitions: list[dict], arm_poses: dict, nav_map: dict) -> dict
     Upload kiosk definitions, arm rest/home poses, and navigation map.
     Call once per robot session before any navigate_to_kiosk().
     """
-    cmd_id = _new_cmd_id("setup")
+    # /setup is a BLOCKING 200 (not a 202 command), so per the spec it carries no cmd_id; the map
+    # payload is keyed "map" (base64 map data), not "nav_map".
     body = {
+        "robot_id":  settings.robot_id,
         "kiosks":    kiosk_definitions,
         "arm_poses": arm_poses,
-        "nav_map":   nav_map,
-        "cmd_id":    cmd_id,
+        "map":       nav_map,
     }
     # /setup is common to both controllers (nav_map for the AGV, arm_poses for the arm).
     arm, agv = _arm_base_url(), _agv_base_url()
@@ -604,7 +646,8 @@ def navigate_to_kiosk(kiosk_id: str, timeout_s: Optional[float] = None) -> dict:
     "home"), so /base/goto expects a `target` field holding that name — which is exactly the
     kiosk_id (the Device-Map join key) resolved by the runner from the test-step alias, or the
     reserved "home". x/y/theta are not needed here (see move_to_position for the pose fallback)."""
-    global _current_kiosk_id
+    global _current_kiosk_id, _screen_localized
+    _screen_localized = False   # base motion invalidates the screen pose → must re-capture before taps
     t = timeout_s or settings.base_move_timeout_s
     cmd_id = _new_cmd_id(f"goto-{kiosk_id}")
     print(f"  [ROBOT] navigate_to_kiosk({kiosk_id!r})  timeout={t}s")
@@ -632,6 +675,8 @@ def move_to_position(x: float, y: float, theta: float, target: Optional[str] = N
     Non-blocking POST → poll: the HTTP call itself respects settings.robot_response_timeout_s (fail
     fast if the base controller doesn't answer), while the physical move is awaited up to
     base_move_timeout_s. A timeout raises, which the runner catches and fails the step gracefully."""
+    global _screen_localized
+    _screen_localized = False   # base motion invalidates the screen pose → must re-capture before taps
     cmd_id = _new_cmd_id("base-goto")
     if target:
         print(f"  [ROBOT] move_to_position(target={target!r})")
@@ -677,26 +722,36 @@ def calibrate(save_path: str = "./screenshots/calibration.png") -> dict:
 
 # ── Card operations (physical card handling) ───────────────────────────────────
 
+# Card pick/tap COMPLETE with the arm still gripping the card, so /arm/state settles to
+# "holding_card" (not "idle"); replace hands it back and returns to "idle".
+_CARD_HOLD_STATES = ("holding_card", "idle")
+
+
 def card_pick(timeout_s: Optional[float] = None) -> dict:
-    """Pick up a smart card from the card holder tray."""
+    """Pick up a smart card from the card holder tray. Completes in state 'holding_card'."""
+    _ensure_localized()   # /card/* require a screen capture since the last base motion (kiosk pose)
     t      = timeout_s or settings.card_op_timeout_s
     cmd_id = _new_cmd_id("card-pick")
     print("  [ROBOT] card_pick")
     _post("/card/pick", {"cmd_id": cmd_id})
-    return _poll("/arm/state", cmd_id, t, abort_ep="/arm/abort")
+    return _poll("/arm/state", cmd_id, t, abort_ep="/arm/abort", terminal_states=_CARD_HOLD_STATES)
 
 
 def card_tap(reader_kiosk_id: str, timeout_s: Optional[float] = None) -> dict:
-    """Present held card to the NFC reader on reader_kiosk_id."""
+    """Present the held card to the kiosk's NFC reader. The reader kiosk is the one currently
+    localized (derived from the last /capture), so the spec /card/tap body carries only cmd_id;
+    reader_kiosk_id is kept in the signature for logging/backend parity. Stays 'holding_card'."""
+    _ensure_localized()
     t      = timeout_s or settings.card_op_timeout_s
     cmd_id = _new_cmd_id(f"card-tap-{reader_kiosk_id}")
     print(f"  [ROBOT] card_tap → {reader_kiosk_id!r}")
-    _post("/card/tap", {"kiosk_id": reader_kiosk_id, "cmd_id": cmd_id})
-    return _poll("/arm/state", cmd_id, t, abort_ep="/arm/abort")
+    _post("/card/tap", {"cmd_id": cmd_id})
+    return _poll("/arm/state", cmd_id, t, abort_ep="/arm/abort", terminal_states=_CARD_HOLD_STATES)
 
 
 def card_replace(timeout_s: Optional[float] = None) -> dict:
-    """Return held card to the card holder tray."""
+    """Return the held card to its holder tray. Returns the arm to 'idle'."""
+    _ensure_localized()
     t      = timeout_s or settings.card_op_timeout_s
     cmd_id = _new_cmd_id("card-replace")
     print("  [ROBOT] card_replace")

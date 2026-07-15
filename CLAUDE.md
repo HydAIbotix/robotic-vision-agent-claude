@@ -136,7 +136,7 @@ local PNGs), `generate_test_cases.py` (writes 50 sample TCs to Excel), `inspect_
 Health `GET /health` · Runs `GET/POST /runs`, `GET /runs/{id}`, `WS /runs/{id}/ws`,
 `GET /runs/{id}/defects`, `GET /runs/{id}/screenshots[/{file}]`, `PATCH /runs/{id}/verdict`
 (human FAIL/PASS override) · Test cases `GET /test-cases`, `POST /test-cases/upload` (Excel) ·
-Config `GET/PUT /config`, `PATCH /config/robot`, `PATCH /config/card-service`,
+Config `GET/PUT /config`, `PATCH /config/robot`, `PATCH /config/camera`, `PATCH /config/card-service`,
 `GET/PUT/DELETE /config/device[/{alias}]`, `PUT /config/kiosk` · Robot `GET /robots`,
 `GET /robot/health`, `POST /robot/test-call` (whitelisted proxy) · TC planning
 `POST /tc-plan`, `DELETE /tc-plan/{id}` · Exploration `POST /explore` (spawns `run_explorer.py`),
@@ -584,6 +584,141 @@ exactly like `/capture` did). Root cause was the arrival contract, not routing.
   12). **User: re-run `TC-AGV-001`** (home → kiosk-1 → back home) — the return-home leg should now
   complete (`ready` detected) with live distance-remaining status throughout, and the `/capture`
   timeout should be gone since the move no longer fails.
+
+### Camera-agnostic calibration + editable camera/viewport on Robot Setup (Intel RealSense D405, 2026-07-15)
+
+Made the coordinate pipeline explicitly camera-model-agnostic and exposed the two knobs on the Robot
+Setup page. Camera in use: **Intel RealSense D405** — native **1280×720 (16:9)**, RGB synthesized from
+the left depth imager (co-registered with depth), range 7–50 cm, depth FOV 87°×58°. New
+`test_camera_config` 13/13; all prior suites green (9 suites, 153 checks); frontend `tsc -b` clean.
+
+- **The camera resolution is DISCOVERED, not configured.** `real_robot.capture_screen` reads
+  `width/height` from every `/capture` response and sets `_calibration["scale_x/y"] = measured/viewport`,
+  overriding the `robot_camera_*` seed. A `/capture` always runs before the first tap (leading verify
+  or `_ensure_localized`), so a real tap always uses MEASURED dims. Nothing about the D405 (or any
+  camera) is hard-coded into the tap math — full detail is in the big comment block in
+  `vision_agent/config.py`. This directly answers "what to change for a new camera model": **nothing in
+  code** — the rectified resolution auto-measures and calibration adapts; optionally update the
+  `robot_camera_*` seed on Robot Setup (cosmetic) and re-run Capture+Calibrate.
+- **The ONE accuracy knob is the exploration viewport aspect ratio.** app_map coords live in the
+  Playwright exploration viewport; `_scale` maps them to the rectified camera frame PER-AXIS, which is
+  exact only when both share an aspect ratio (else a responsive app reflows and taps drift). The D405
+  is 16:9, but the RECTIFIED frame's aspect = the kiosk SCREEN aspect (homography), so the real rule
+  is: match the exploration viewport to the MEASURED rectified aspect.
+- ✅ **New `PATCH /api/config/camera`** (`api/main.py`) saves `viewport_width/height` +
+  `camera_width/height` to live settings + `.env` (validates positive ints; returns both aspect ratios
+  + `aspect_matches`). `robot_camera_*` default changed 1920×1080 → **1280×720** (D405 seed; overridden
+  by calibration anyway).
+- ✅ **Robot Setup page (`kiosk-test-studio/RobotSetup.tsx`) gained a "Camera & Coordinate Calibration"
+  card**: edit/save the exploration viewport + camera seed, live aspect-ratio labels, a mismatch
+  warning, the measured (last-capture) resolution, and a **"Match viewport to measured camera"** button
+  that copies the measured rectified resolution into the viewport (→ 1:1, no aspect risk). `client.ts`
+  gained `setCameraConfig`. So the operator NEVER edits code or `.env` by hand — they enter/save on the
+  page. Existing "Capture + Calibrate" already shows measured width/height/scale.
+- **Setup order for a real-robot target:** (1) Robot Setup → Capture + Calibrate (measures the rectified
+  resolution); (2) "Match viewport to measured camera" (or set the viewport aspect manually); (3)
+  explore each kiosk in Playwright at that viewport; (4) run tests. `screen_width_m/height_m` stay
+  unused by our code (the robot does pixel→3D itself). See [[agv-hardware-test-2026-07-13]].
+
+### Coordinate lifecycle: explore-viewport now configurable + real-backend leading-verify capture (2026-07-15)
+
+Two coordinate/verification fixes so the playwright-explore → real-robot-test path is accurate and
+the first screen check works on hardware. Both default-preserving (playwright suites unchanged);
+new `test_coord_config` 10/10, all prior suites green (`base_goto_target` 11, `agv_poll_status` 17,
+`api_alignment` 29, `plan_normalize` 34, `inline_fast` 16, `exec_integration` 11, `intent_rescue` 12).
+
+- ✅ **Playwright exploration viewport is now driven by `settings.viewport_width/height`** (was
+  hard-coded `1400×900` in `playwright_stubs.py` for the browser viewport AND the on-screen-keyboard
+  tap math, so `VIEWPORT_WIDTH/HEIGHT` had NO effect on exploration — a latent inconsistency: setting
+  them would have skewed `real_robot._scale`, which divides by `viewport_width`). New `_vp()` is the
+  single source; the browser viewport, `_click_key`, and the keyboard "done" tap all read it;
+  `explore_screen._VIEWPORT_W/H` scroll fallbacks too. **Default stays 1400×900** → byte-identical
+  playwright behaviour. **Why it matters:** `app_map` coords are pixels in the *exploration image*
+  space, and `real_robot._scale` maps them viewport→camera as a per-axis proportional scale. That's
+  exact only when the two images frame the SAME layout. 1400×900 is 14:9 but a kiosk camera frame is
+  typically 1920×1080 (16:9); if the app is responsive it reflows between them and a per-axis scale
+  mis-places elements. So for a REAL-ROBOT target, set `VIEWPORT_WIDTH/HEIGHT` to the kiosk's
+  rectified-camera aspect ratio (e.g. 1920×1080) BEFORE exploring — now that actually takes effect,
+  the app renders the layout the arm will photograph, and `_scale` becomes a clean map. (Pure
+  playwright targets keep 1400×900 — explore and test share it.)
+- ✅ **A LEADING `verify` now captures a camera frame on the real backend** (`run_vision_step.py`).
+  Was playwright-only: `if settings.robot_backend == "playwright" and not last_screenshot:`. So on
+  the real robot, a first-step `verify` (e.g. `TC-RPS-001` step 1 "the login screen is visible", which
+  has no preceding tap) passed `image_path=""` into the pipeline → `_match_by_phash` got no image →
+  inconclusive → the Claude fallback also got no image → **spurious FAIL on step 1 → needless Tier-3**.
+  Fixed to `if not last_screenshot and settings.robot_backend != "demo":` — captures for playwright
+  AND real (demo excluded: its pipeline is always-true and a capture would consume a scripted screen).
+  On the real backend this capture ALSO localizes the screen (AprilTag) and calibrates the camera
+  scale, so it doubles as the run's first calibration. **This is how the robot knows the login screen
+  is up:** the plan's leading `verify` step captures via the camera and matches it against the app_map
+  — `_match_by_phash` (0 LLM) when the stored hash is close, else the Claude-vision fallback (robust
+  when the stored reference came from a *browser* screenshot and the live frame is a *camera* photo).
+  It is NOT a hidden pre-step: it's an explicit plan step, so a plan that omits a leading verify just
+  starts tapping stored coordinates without confirming the start screen (well-formed plans include it).
+
+**Calibration lifecycle (how the arm gets accurate without `screen_*_m` / `robot_camera_*` from us):**
+`real_robot.capture_screen` measures the ACTUAL camera resolution from every `/capture` response and
+sets `_calibration["scale_x/y"] = camera/viewport`, which overrides the `robot_camera_width/height`
+config defaults (those are only the pre-calibration fallback). So calibration is automatic on the
+first capture — and `GET /robot/health` already does a capture+calibrate and reports the measured
+resolution + scale. The physical `screen_width_m/height_m` are NOT consumed by our code: the ROBOT
+converts the `(u,v)` pixel we send into a 3D stylus point using its OWN per-kiosk screen pose (from
+AprilTag localization) and physical dimensions from ITS `/setup` config — we only send pixels. Those
+config fields exist on the Configuration page as forward-looking values for when our `setup()` is
+wired to upload kiosk definitions; today they're unused placeholders. No separate calibration UI page
+is required (calibration is runtime-automatic and surfaced by `/robot/health`); a guided per-kiosk
+"capture & confirm the rectified frame" gate is a nice-to-have that can live in the existing Robot
+Health panel. See [[agv-hardware-test-2026-07-13]].
+
+### Full Robot-API spec-alignment pass of the real backend (`real_robot.py`, 2026-07-15)
+
+A line-by-line re-review of `vision_agent/robot/real_robot.py` against the robotics team's
+`robot_kiosk_api.md` spec surfaced several request-body / polling mismatches. All fixed generically
+(real backend ONLY — playwright/demo/stubs untouched, so the working playwright suites can't regress;
+AGV `move`/`check_state`/`wait` plans don't call any of these paths, so the verified TC-AGV-001 path is
+unaffected). New `test_api_alignment` 29/29; all prior suites still green (`base_goto_target` 11,
+`agv_poll_status` 17, `plan_normalize` 34, `inline_fast` 16, `exec_integration` 11, `intent_rescue` 12).
+
+- ✅ **`/screen/click` (tap) never sent `capture_after_last` → the "reused post-tap frame" never came
+  back.** Per spec, `image_b64` is present in the `/arm/state` completion ONLY if the click was sent
+  with `capture_after_last: true`. `tap()` relied on that frame (`click_result.image_b64`, surfaced as
+  `image_path` and reused by the runner's dynamic-value `capture`) but never requested it — so on real
+  hardware the reuse silently got nothing. Fix: tap now sends `capture_after_last: true` +
+  `delay_between_ms: 800` (the 800 ms doubles as the post-tap settle so the returned frame is captured
+  AFTER the kiosk transition, not mid-render). type/swipe don't reuse a frame, so they don't set it.
+- ✅ **Non-spec `kiosk_id` scrubbed from `/screen/click` (tap/type/swipe) and `/card/tap`.** The spec
+  bodies carry no `kiosk_id` — the target kiosk is whatever the last `/capture` localized, not a passed
+  field. We just got burned by a schema mismatch (the `/base/goto` 422), so stray fields are a real
+  422 risk on a strict server. Removed everywhere; the `card_tap(reader_kiosk_id)` arg is kept for
+  logging/parity but no longer sent. (`_kiosk()` became dead code and was deleted.)
+- ✅ **`/capture` now carries a `cmd_id`.** Spec: "every command must include a caller-generated
+  `cmd_id`." `/capture` omitted it; added `{cmd_id, type:"screen"}`.
+- ✅ **`/setup` body aligned:** `nav_map` → **`map`** (the spec field name — the old key would've been
+  ignored, uploading no navigation map), added `robot_id`, dropped `cmd_id` (setup is a BLOCKING 200,
+  not a 202 command). NB: `setup()` is defined but not yet wired into the runner, so this is
+  correctness/future-proofing.
+- ✅ **Card pick/tap polled for `idle` → would've hung until timeout.** Per spec a successful
+  `/card/pick` and `/card/tap` settle in **`holding_card`** (the arm keeps gripping the card), NOT
+  `idle` — the old `_poll` only accepted `idle`, so every card op would time out then abort. Fix:
+  `_poll` gained a `terminal_states` param; card pick/tap pass `("holding_card","idle")`, replace keeps
+  `idle`. (Card ops aren't wired into execution yet either — future-proofing, but now correct.)
+- ✅ **409 "screen not localized" pre-empted.** Spec: `/screen/click` and `/card/*` REQUIRE a `/capture`
+  since the last base motion, else 409. A structured Tier-1/2 tap skips `analyze` (no capture), so the
+  FIRST tap right after an AGV arrival would 409. Fix: a `_screen_localized` latch — cleared by
+  `navigate_to_kiosk`/`move_to_position`, set by a successful `/capture`; new `_ensure_localized()`
+  auto-captures on demand before the first screen/card op. No-op in the vision flow (analyze already
+  captured); fires once per arrival for structured plans.
+- **Confirmed still-correct (no change needed):** `/base/goto {target}` (the 2026-07-13 fix); dual-
+  controller routing via `_base_for` (`/base/*` → AGV, else arm) — re-asserted by the test; `_poll_base`
+  accepting `ready` (spec lists base states as idle/moving/error, but real hardware returns `ready`
+  with `nav_feedback` — our `_BASE_READY_STATES` covers both, and the extra nav fields are read
+  optionally); `/arm/state` reading `click_result` from the poll (now populated, since tap requests the
+  frame); `/base/abort` + `/arm/abort` bodies (`{cmd_id}`).
+- **Still open / hardware-gated:** the arm/camera/card paths (`/screen/click`, `/capture`, `/card/*`)
+  remain UNVERIFIED against physical hardware — a pure-AGV test (TC-AGV-001) exercises none of them.
+  First real arm test should watch: the localization auto-capture firing before the first tap, the
+  `capture_after_last` frame actually returning, and card ops settling in `holding_card`. See
+  [[agv-hardware-test-2026-07-13]].
 
 ### Cross-kiosk E2E round-trip fixed live (`TC-E2E-001`, 2026-07-10)
 

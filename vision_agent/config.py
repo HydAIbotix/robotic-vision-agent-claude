@@ -83,17 +83,57 @@ class Settings(BaseSettings):
         """Base URL (…/api/v1) for the mobile-base (AGV) /base/* endpoints."""
         return self._api_base(self.agv_url or self.arm_url)
 
-    # Coordinate spaces
-    # viewport_* = what app_map learned in Playwright mode (pixels)
-    # robot_camera_* = resolution returned by /capture from the real arm
+    # ── Coordinate spaces (see the big note below for how a tap stays accurate) ──
+    # viewport_* = the pixel space app_map coordinates are learned in (Playwright exploration).
+    #   This is the ONE value that must be chosen to match the target: for a REAL-ROBOT target set
+    #   it (via Robot Setup) to the kiosk's rectified-camera ASPECT RATIO so the app renders the same
+    #   layout the arm photographs; for a Playwright-only target keep the default 1400×900.
     viewport_width: int = 1400
     viewport_height: int = 900
-    robot_camera_width: int = 1920
-    robot_camera_height: int = 1080
+    # robot_camera_* = a PRE-CALIBRATION SEED for the rectified /capture resolution, NOT the live
+    #   value. Default 1280×720 = the Intel RealSense D405's native resolution (16:9). It is only used
+    #   as the viewport→camera scale numerator BEFORE the first /capture; every /capture response then
+    #   reports the ACTUAL rectified width/height and real_robot._scale switches to those measured
+    #   dims (see the calibration note below), so this seed never affects a real tap. Editable on the
+    #   Robot Setup page; update it if the camera model changes (cosmetic — calibration self-corrects).
+    robot_camera_width: int = 1280
+    robot_camera_height: int = 720
 
-    # Physical kiosk screen dimensions (meters) — used for arm pose calculations
+    # Physical kiosk screen dimensions (meters). NOT consumed by our code — the ROBOT converts the
+    # pixel (u,v) we send into a 3D stylus point using its OWN per-kiosk screen pose (AprilTag) and
+    # physical dims from ITS /setup config. Kept here (and on Robot Setup) as forward-looking values
+    # for when our setup() is wired to upload kiosk definitions. Their RATIO (0.4:0.3 = 4:3) also
+    # documents the expected screen aspect the rectified image will have — match viewport_* to it.
     screen_width_m: float = 0.400
     screen_height_m: float = 0.300
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # HOW A TAP STAYS ACCURATE ACROSS CAMERA MODELS (no code change needed)
+    # ─────────────────────────────────────────────────────────────────────────────
+    # app_map stores each element's center as PIXELS in the exploration image space
+    #   (viewport_width × viewport_height). At test time real_robot.tap(x, y) maps that to the
+    #   camera's rectified pixel space via _scale(x, y):
+    #       scale_x = measured_camera_width  / viewport_width      (per-axis, independent)
+    #       scale_y = measured_camera_height / viewport_height
+    #       u = x * scale_x ;  v = y * scale_y   → sent to POST /screen/click
+    #   The robot then turns (u,v) into a 3D stylus point using its own AprilTag screen pose. So the
+    #   ROBOT owns the pixel→metric step; WE only own the viewport→camera pixel step.
+    #
+    # WHERE THE CAMERA DIMENSIONS COME FROM — DYNAMICALLY, per camera, at runtime:
+    #   capture_screen() reads width/height from EVERY /capture response and sets
+    #   _calibration["scale_x"/"scale_y"] = measured_camera / viewport. That overrides the
+    #   robot_camera_* seed above. A /capture always runs before the first tap (the leading verify
+    #   or _ensure_localized), so a real tap uses MEASURED dims, never the seed. GET /robot/health
+    #   captures + calibrates and shows the measured width/height/scale on the Robot Setup page.
+    #
+    # THEREFORE, TO SUPPORT A DIFFERENT CAMERA MODEL: change NOTHING in code. The rectified
+    #   resolution is auto-measured and calibration adapts. Optionally update the robot_camera_*
+    #   seed on Robot Setup to the new sensor's resolution (pre-calibration cosmetics only), then
+    #   re-run Capture+Calibrate. The only accuracy-relevant knob is viewport_* — set it to the same
+    #   ASPECT RATIO as the measured rectified frame (Robot Setup's "match viewport to camera" does
+    #   this) so the Playwright-explored layout matches what the arm photographs. Per-axis scaling
+    #   then absorbs any pure resolution difference exactly.
+    # ─────────────────────────────────────────────────────────────────────────────
 
     # Timeouts (seconds)
     base_move_timeout_s: float = 60.0
