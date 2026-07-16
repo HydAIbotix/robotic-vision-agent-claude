@@ -99,24 +99,17 @@ def _log_screen(screen: dict) -> None:
         print(f"  {el['id']:<30} {el['type']:<10} [{cx:4d},{cy:4d}]   {el.get('confidence', 1.0):.2f}")
 
 
-def analyze_screen(state: VisionAgentState) -> dict:
-    image_bytes = get_storage().load(state["image_path"])
+def analyze_image_elements(image_bytes: bytes) -> ScreenAnalysis:
+    """Run the full Claude-Vision element analysis on raw image bytes — the SLOW PATH of
+    analyze_screen, extracted so it can be reused WITHOUT any graph state or the app_map cache.
 
-    # ── Fast path: App Explorer coordinate cache ──────────────────────────────
-    # If the App Explorer has already mapped this app, look up the screen by
-    # perceptual hash. Static screens (login, payment, success) return cached
-    # element coordinates with zero LLM calls. Dynamic screens fall through.
-    if settings.use_app_map_cache:
-        app_map = load_app_map(settings.app_map_path)
-        cached = lookup_screen(image_bytes, app_map)
-        if cached:
-            history = list(state.get("screen_history") or [])
-            if not history or history[-1] != cached["screen_id"]:
-                history.append(cached["screen_id"])
-            _log_screen(cached)
-            return {"screen_analysis": cached, "screen_history": history}
+    Two passes (identical to the App Explorer): Pass 1 extracts screen_id + description + every
+    interactive element with normalized coords and a confidence; Pass 2 asks Claude to confirm/
+    correct any element below the confidence threshold. Coordinates are converted to pixels via the
+    scale-tolerant _norm_to_px. Returns {screen_id, description, elements:[…]} with pixel bbox/center.
 
-    # ── Slow path: full Claude Vision analysis ────────────────────────────────
+    Used by (a) analyze_screen's slow path below, and (b) the Camera Vision Test diagnostic endpoint,
+    so the page tests the EXACT vision code the explorer uses — no reimplementation, no drift."""
     img_w, img_h = Image.open(io.BytesIO(image_bytes)).size
     b64 = base64.standard_b64encode(image_bytes).decode()
 
@@ -189,12 +182,33 @@ def analyze_screen(state: VisionAgentState) -> dict:
         el["bbox"]   = _norm_to_px(el.get("bbox",   [0.0, 0.0, 0.0, 0.0]), img_w, img_h)
         el["center"] = _norm_to_px(el.get("center", [0.5, 0.5]),            img_w, img_h)
 
-    # ── Build and log ScreenAnalysis ──────────────────────────────────────────
     screen: ScreenAnalysis = {
         "screen_id":   analysis.get("screen_id",   "unknown"),
         "description": analysis.get("description", ""),
         "elements":    elements,
     }
+    return screen
+
+
+def analyze_screen(state: VisionAgentState) -> dict:
+    image_bytes = get_storage().load(state["image_path"])
+
+    # ── Fast path: App Explorer coordinate cache ──────────────────────────────
+    # If the App Explorer has already mapped this app, look up the screen by
+    # perceptual hash. Static screens (login, payment, success) return cached
+    # element coordinates with zero LLM calls. Dynamic screens fall through.
+    if settings.use_app_map_cache:
+        app_map = load_app_map(settings.app_map_path)
+        cached = lookup_screen(image_bytes, app_map)
+        if cached:
+            history = list(state.get("screen_history") or [])
+            if not history or history[-1] != cached["screen_id"]:
+                history.append(cached["screen_id"])
+            _log_screen(cached)
+            return {"screen_analysis": cached, "screen_history": history}
+
+    # ── Slow path: full Claude Vision analysis ────────────────────────────────
+    screen = analyze_image_elements(image_bytes)
 
     history = list(state.get("screen_history") or [])
     if not history or history[-1] != screen["screen_id"]:

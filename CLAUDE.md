@@ -138,7 +138,9 @@ Health `GET /health` · Runs `GET/POST /runs`, `GET /runs/{id}`, `WS /runs/{id}/
 (human FAIL/PASS override) · Test cases `GET /test-cases`, `POST /test-cases/upload` (Excel) ·
 Config `GET/PUT /config`, `PATCH /config/robot`, `PATCH /config/camera`, `PATCH /config/card-service`,
 `GET/PUT/DELETE /config/device[/{alias}]`, `PUT /config/kiosk` · Robot `GET /robots`,
-`GET /robot/health`, `POST /robot/test-call` (whitelisted proxy) · TC planning
+`GET /robot/health`, `POST /robot/test-call` (whitelisted proxy) · Camera Vision Test
+`POST /vision-test/capture` (arm `/capture` type=raw|screen), `POST /vision-test/upload`,
+`GET /vision-test/image/{file}`, `POST /vision-test/analyze` (aHash+OpenCV+OCR+optional Claude) · TC planning
 `POST /tc-plan`, `DELETE /tc-plan/{id}` · Exploration `POST /explore` (spawns `run_explorer.py`),
 `GET /explore/{id}`, `GET/PATCH /explore-config` · App map `GET/DELETE /app-map`,
 `DELETE /app-map/{app_id}` · `POST /reset` (clears runs/results/plans/cases; preserves
@@ -669,6 +671,60 @@ wired to upload kiosk definitions; today they're unused placeholders. No separat
 is required (calibration is runtime-automatic and surfaced by `/robot/health`); a guided per-kiosk
 "capture & confirm the rectified frame" gate is a nice-to-have that can live in the existing Robot
 Health panel. See [[agv-hardware-test-2026-07-13]].
+
+### Camera Vision Test page — are real-camera frames good enough, and at which tier? (2026-07-16)
+
+Added a dedicated **Camera Vision Test** page (Settings group) + backend so an operator can capture a
+frame straight from the arm and see, on the SAME code the live system uses, whether it supports Tier-1
+(0 LLM) or needs Tier-3 (Claude). New `test_vision_test_page` 7/7; all prior suites green (9 suites, 153
+checks); frontend `tsc -b` clean. **No existing behaviour changed** — the only core edit is a pure
+extract-method in `analyze.py`.
+
+- **The refactor (non-breaking):** `vision_agent/nodes/analyze.py` now exposes
+  `analyze_image_elements(image_bytes) -> ScreenAnalysis` — the exact SLOW PATH of `analyze_screen`
+  (Pass-1 extract + Pass-2 low-confidence correction + `_norm_to_px` → pixels), extracted so the
+  diagnostic runs the SAME vision code the App Explorer uses (no reimplementation/drift).
+  `analyze_screen` now calls it; its cache fast-path + history/state handling are byte-identical.
+- **Backend endpoints (`api/main.py`, all under `/api`):**
+  - `POST /vision-test/capture {capture_type: screen|raw}` — calls the ARM controller's `/capture`
+    directly (`settings.arm_api_base`, spec `type` field) so it works whenever the arm is reachable
+    regardless of `robot_backend`. Pure diagnostic: does NOT touch `real_robot`'s live calibration or
+    the `_screen_localized` latch. Saves the frame under `screenshots/vision_test/`.
+  - `POST /vision-test/upload` — save a frame captured elsewhere (e.g. the attached `screen_image.png`)
+    so the pipeline can be assessed offline, no live robot.
+  - `GET /vision-test/image/{file}` — serve the saved frame (`.name` guard, no traversal).
+  - `POST /vision-test/analyze {filename, expected_screen?, use_claude}` — runs the REAL pipeline and
+    returns a tier verdict: (1) **Tier-1 aHash** via `screen_cache.compute_hash` ranked against every
+    `app_map` `screen_hash` (thresholds mirror `validate_pipeline._match_by_phash`: ≤8 match, >20
+    mismatch); (2) **OpenCV boundaries** via `vision/detector.detect_interactive_rects` (0 LLM);
+    (3) **OCR** via pytesseract full-image (0 LLM, if installed); (4) optional **Claude vision** via
+    `analyze_image_elements` (Tier-3). Emits a plain-English recommendation.
+- **Frontend (`kiosk-test-studio/pages/CameraVisionTest.tsx`, wired in `App.tsx`/`Layout.tsx`;
+  `client.ts` gained `visionTestCapture/Upload/Analyze` + types):** capture (screen/raw) or upload →
+  overlays OpenCV boxes (cyan) + Claude element centers (pink) on the frame with percentage-scaled
+  divs → shows the Tier-1 ranking table (best highlighted), OCR text, Claude element table, and a
+  verdict banner.
+- **KEY EMPIRICAL FINDING (ran the pipeline on the user's real `screen_image.png`, the RPS/POS
+  login frame, 600×360):** on that frame **all three zero-LLM methods FAIL** — Tier-1 aHash nearest
+  screen is `smart_card_kiosk_station` at distance **24** (correct `login` is **42** away, both ≫ 8);
+  OpenCV finds **0** interactive rectangles; tesseract OCR extracts an **empty** string. The frame is
+  legible to Claude vision (Tier-3) but not to the cheap tiers, because a camera PHOTO (glare top-right,
+  blur, slight keystone/perspective, blue color cast, low field/background contrast) is far from the
+  crisp BROWSER screenshots the `app_map` references were captured from. Implications, in order:
+  1. **Tapping accuracy is UNAFFECTED** — element COORDINATES come from the `app_map` (learned in
+     Playwright), not from the camera frame. Only screen/text VALIDATION reads the camera.
+  2. **Validation will fall through to Claude (Tier-3)** — ~1 LLM call per `verify`. Correct and
+     robust, just not free. (This is exactly why the real-backend leading-verify capture + the
+     `_claude_vision_validate` fallback exist.)
+  3. **To make Tier-1 viable on the real robot**, the `screen_hash`/`reference_screenshot` references
+     must be CAMERA-domain, not browser-domain — i.e. after Playwright exploration, do a one-time
+     per-screen camera-reference pass on the real robot so aHash compares camera↔camera. Even then,
+     glare/blur variance may keep it fragile; this page is the tool to evaluate it per kiosk.
+  4. **Frame-quality levers** worth trying before a hardware test: reduce glare (diffuse lighting / a
+     polarizer), improve focus, and confirm `type:"screen"` rectification actually deskews+crops to a
+     fronto-parallel screen (the 600×360 attachment is also low-res — check the real `/capture` dims
+     this page reports; higher-res sharper frames help OCR/OpenCV, though not the browser-vs-camera
+     aHash gap). See [[agv-hardware-test-2026-07-13]].
 
 ### Full Robot-API spec-alignment pass of the real backend (`real_robot.py`, 2026-07-15)
 

@@ -758,6 +758,289 @@ def robot_test_call(req: RobotTestCall):
             "response_body": body}
 
 
+# ── Camera Vision Test (dedicated page) ──────────────────────────────────────
+# Diagnostics to judge whether REAL robot-camera frames are good enough for the automation:
+#   1. call the arm /capture API with type raw|screen (per the Robot API spec) and show the frame;
+#   2. run the SAME detection pipeline the App Explorer / validation uses on that frame —
+#      aHash screen match (Tier-1, 0 LLM), OpenCV boundary detection (0 LLM), OCR (0 LLM), and
+#      optionally the Claude-vision element analysis (Tier-3) — and report which tier the image
+#      supports. The rest of the automation relies on how much we can extract from these frames.
+
+def _vision_test_dir() -> Path:
+    d = _base_screens_dir() / "vision_test"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _img_dims(img_bytes: bytes) -> tuple[Optional[int], Optional[int]]:
+    try:
+        from PIL import Image as _Img
+        return _Img.open(io.BytesIO(img_bytes)).size
+    except Exception:
+        return None, None
+
+
+class VisionCaptureRequest(BaseModel):
+    capture_type: str = "screen"   # "screen" (AprilTag-rectified) | "raw" (unrectified sensor frame)
+
+
+@app.post("/api/vision-test/capture")
+def vision_test_capture(req: VisionCaptureRequest):
+    """Call the arm controller's /capture (spec `type` = raw|screen) and save the returned frame.
+
+    Hits the arm controller directly (settings.arm_api_base) so the diagnostic works whenever the
+    arm is reachable, regardless of the active robot_backend. Pure diagnostic — it does NOT alter
+    real_robot's live calibration or the screen-localization latch."""
+    import requests as _rq
+    import time as _t
+    import base64 as _b64
+    ctype = (req.capture_type or "screen").lower()
+    if ctype not in ("screen", "raw"):
+        raise HTTPException(400, "capture_type must be 'screen' or 'raw'")
+    base   = settings.arm_api_base()
+    url    = f"{base}/capture"
+    cmd_id = f"vision-test-{ctype}-{int(_t.time() * 1000)}"
+    t0 = _t.time()
+    try:
+        resp = _rq.post(url, json={"cmd_id": cmd_id, "type": ctype}, timeout=30.0)
+    except Exception as e:
+        raise HTTPException(502, f"Capture failed calling {url}: {type(e).__name__}: {e}")
+    elapsed = round((_t.time() - t0) * 1000, 1)
+    if not resp.ok:
+        raise HTTPException(502, f"Capture returned HTTP {resp.status_code} from {url}: {resp.text[:300]}")
+    try:
+        data = resp.json()
+    except Exception:
+        raise HTTPException(502, "Capture response was not JSON")
+    b64 = data.get("image_b64")
+    if not b64:
+        raise HTTPException(502, "Capture response had no 'image_b64'")
+    try:
+        img_bytes = _b64.b64decode(b64)
+    except Exception as e:
+        raise HTTPException(502, f"'image_b64' decode failed: {e}")
+
+    fname = f"vision_test_{ctype}_{int(_t.time() * 1000)}.png"
+    (_vision_test_dir() / fname).write_bytes(img_bytes)
+
+    w, h = data.get("width"), data.get("height")
+    if not (w and h):
+        w, h = _img_dims(img_bytes)
+    return {
+        "status":       "ok",
+        "capture_type": ctype,
+        "filename":     fname,
+        "image_url":    f"/api/vision-test/image/{fname}",
+        "width":        w,
+        "height":       h,
+        "aspect":       round(w / h, 4) if (w and h) else None,
+        "bytes":        len(img_bytes),
+        "elapsed_ms":   elapsed,
+        "controller":   base,
+        "cmd_id":       cmd_id,
+    }
+
+
+@app.post("/api/vision-test/upload")
+def vision_test_upload(file: UploadFile = File(...)):
+    """Save an uploaded image (e.g. a frame already captured from the robot) so the SAME detection
+    pipeline can run on it without a live robot — useful for offline assessment of camera frames."""
+    import time as _t
+    data = file.file.read()
+    w, h = _img_dims(data)
+    if not (w and h):
+        raise HTTPException(400, "Uploaded file is not a readable image")
+    ext   = (Path(file.filename or "").suffix or ".png").lower()
+    if ext not in (".png", ".jpg", ".jpeg"):
+        ext = ".png"
+    fname = f"vision_test_upload_{int(_t.time() * 1000)}{ext}"
+    (_vision_test_dir() / fname).write_bytes(data)
+    return {
+        "status":       "ok",
+        "capture_type": "upload",
+        "filename":     fname,
+        "image_url":    f"/api/vision-test/image/{fname}",
+        "width":        w,
+        "height":       h,
+        "aspect":       round(w / h, 4) if (w and h) else None,
+        "bytes":        len(data),
+        "elapsed_ms":   0.0,
+        "controller":   "",
+        "cmd_id":       "",
+    }
+
+
+@app.get("/api/vision-test/image/{filename}")
+def vision_test_image(filename: str):
+    from fastapi.responses import FileResponse
+    path = _vision_test_dir() / Path(filename).name   # .name → no path traversal
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, "Not found")
+    return FileResponse(str(path))
+
+
+class VisionAnalyzeRequest(BaseModel):
+    filename:        str
+    expected_screen: Optional[str] = None   # optional: also report the phash distance to this screen
+    use_claude:      bool = False           # also run the Tier-3 Claude-vision element analysis
+
+
+# aHash distance thresholds — mirror validate_pipeline._match_by_phash so the verdict here matches
+# what a real run's Tier-1 screen check would conclude.
+_PHASH_MATCH_THRESHOLD    = 8
+_PHASH_MISMATCH_THRESHOLD = 20
+
+
+@app.post("/api/vision-test/analyze")
+def vision_test_analyze(req: VisionAnalyzeRequest):
+    """Run the REAL detection pipeline on a captured/uploaded frame and report tier suitability:
+
+      • Tier-1 aHash screen match  — compute_hash + compare to every app_map screen_hash (0 LLM).
+        Ranks all screens by Hamming distance; a best distance ≤ 8 means Tier-1 alone can identify
+        the screen from this camera frame (no Claude needed).
+      • OpenCV boundary detection  — detect_interactive_rects (0 LLM): how many interactive
+        rectangles are found purely from edges (a proxy for element-boundary clarity).
+      • OCR text                   — pytesseract full-image read (0 LLM), if installed.
+      • Claude vision (optional)   — analyze_image_elements: the Tier-3 element extraction the App
+        Explorer uses, so you can see labelled elements + coordinates the model reads from the frame.
+
+    Everything runs on the frame the /capture (or upload) endpoint saved — same code the live
+    system uses, no reimplementation."""
+    from vision_agent.screen_cache import compute_hash
+    from app_map import store as app_map_store
+
+    path = _vision_test_dir() / Path(req.filename).name
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, f"Frame {req.filename!r} not found — capture or upload first")
+    img_bytes = path.read_bytes()
+    img_w, img_h = _img_dims(img_bytes)
+
+    # ── 1. Tier-1 aHash screen match (0 LLM) ──────────────────────────────────
+    try:
+        current_hash = compute_hash(img_bytes)
+    except Exception as e:
+        raise HTTPException(500, f"Could not hash image: {e}")
+
+    app_map = app_map_store.load(settings.app_map_path) if Path(settings.app_map_path).exists() else {"screens": {}}
+    screens = app_map.get("screens") or {}
+
+    def _hamming(a: str, b: str) -> int:
+        return sum(c1 != c2 for c1, c2 in zip(a, b))
+
+    ranking = []
+    for sid, sc in screens.items():
+        h = (sc or {}).get("screen_hash", "")
+        if not h:
+            continue
+        ranking.append({
+            "screen_id":  sid,
+            "app_id":     sc.get("app_id", ""),
+            "distance":   _hamming(current_hash, h),
+            "is_dynamic": bool(sc.get("is_dynamic", False)),
+        })
+    ranking.sort(key=lambda r: r["distance"])
+
+    best = ranking[0] if ranking else None
+    if best is None:
+        tier1_verdict = "no_reference"
+        tier1_detail  = "No app_map screen hashes to compare against — run the App Explorer first."
+    elif best["distance"] <= _PHASH_MATCH_THRESHOLD:
+        tier1_verdict = "match"
+        tier1_detail  = (f"Tier-1 identifies this as '{best['screen_id']}' "
+                         f"(distance {best['distance']} ≤ {_PHASH_MATCH_THRESHOLD}) — no Claude needed.")
+    elif best["distance"] > _PHASH_MISMATCH_THRESHOLD:
+        tier1_verdict = "no_match"
+        tier1_detail  = (f"Nearest screen '{best['screen_id']}' is {best['distance']} away "
+                         f"(> {_PHASH_MISMATCH_THRESHOLD}) — aHash cannot identify the screen from this "
+                         f"frame; Tier-2/3 (Claude vision) is required.")
+    else:
+        tier1_verdict = "inconclusive"
+        tier1_detail  = (f"Nearest screen '{best['screen_id']}' is {best['distance']} away "
+                         f"(between {_PHASH_MATCH_THRESHOLD} and {_PHASH_MISMATCH_THRESHOLD}) — "
+                         f"borderline; Claude-vision fallback would run.")
+
+    expected_distance = None
+    if req.expected_screen and req.expected_screen in screens and screens[req.expected_screen].get("screen_hash"):
+        expected_distance = _hamming(current_hash, screens[req.expected_screen]["screen_hash"])
+
+    # ── 2. OpenCV boundary detection (0 LLM) ──────────────────────────────────
+    opencv_rects: list[dict] = []
+    opencv_error = ""
+    try:
+        from PIL import Image as _Img
+        from vision_agent.vision.detector import detect_interactive_rects
+        opencv_rects = detect_interactive_rects(_Img.open(io.BytesIO(img_bytes)))
+    except Exception as e:
+        opencv_error = f"{type(e).__name__}: {e}"
+
+    # ── 3. OCR text (0 LLM) ───────────────────────────────────────────────────
+    ocr_text = ""
+    ocr_available = True
+    ocr_error = ""
+    try:
+        import pytesseract
+        from PIL import Image as _Img
+        ocr_text = pytesseract.image_to_string(_Img.open(io.BytesIO(img_bytes))).strip()
+    except ImportError:
+        ocr_available = False
+    except Exception as e:
+        ocr_error = f"{type(e).__name__}: {e}"
+
+    # ── 4. Claude-vision element analysis (Tier-3, optional) ──────────────────
+    claude = None
+    if req.use_claude:
+        try:
+            from vision_agent.nodes.analyze import analyze_image_elements
+            claude = analyze_image_elements(img_bytes)
+        except Exception as e:
+            claude = {"error": f"{type(e).__name__}: {e}", "elements": []}
+
+    # ── Overall recommendation ────────────────────────────────────────────────
+    if tier1_verdict == "match":
+        recommendation = ("Tier-1 (perceptual-hash) screen identification WORKS on this camera frame "
+                          "— steady-state validation needs 0 LLM calls for screen identity.")
+    elif tier1_verdict == "no_reference":
+        recommendation = ("No reference hashes yet — explore the app first, then re-capture to test "
+                          "Tier-1. Element identity meanwhile relies on Claude vision (Tier-3).")
+    else:
+        recommendation = ("Tier-1 aHash does NOT reliably match this camera frame against the "
+                          "browser-captured references — expected, since a camera photo differs from a "
+                          "clean screenshot (glare, blur, perspective, color). Screen validation will "
+                          "fall through to Claude vision (Tier-3), which reads the frame reliably. "
+                          "Element COORDINATES still come from the app_map (learned in Playwright), so "
+                          "taps are unaffected; only screen/text VALIDATION pays an LLM call.")
+
+    return {
+        "status":       "ok",
+        "filename":     req.filename,
+        "width":        img_w,
+        "height":       img_h,
+        "current_hash": current_hash,
+        "tier1": {
+            "verdict":           tier1_verdict,
+            "detail":            tier1_detail,
+            "best":              best,
+            "ranking":           ranking[:10],
+            "expected_screen":   req.expected_screen or "",
+            "expected_distance": expected_distance,
+            "match_threshold":   _PHASH_MATCH_THRESHOLD,
+            "mismatch_threshold": _PHASH_MISMATCH_THRESHOLD,
+        },
+        "opencv": {
+            "count": len(opencv_rects),
+            "rects": opencv_rects,
+            "error": opencv_error,
+        },
+        "ocr": {
+            "available": ocr_available,
+            "text":      ocr_text,
+            "error":     ocr_error,
+        },
+        "claude":         claude,
+        "recommendation": recommendation,
+    }
+
+
 # ── TC Plan (Claude-powered, cached) ─────────────────────────────────────────
 
 _TC_PLAN_PROMPT = """\
