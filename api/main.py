@@ -21,6 +21,7 @@ Endpoints:
 """
 import sys
 import io
+import os
 
 # Windows default stdout/stderr use cp1252 which can't encode many Unicode chars
 # (emoji, em-dash, etc.) that appear in Claude API responses and test output.
@@ -767,7 +768,12 @@ def robot_test_call(req: RobotTestCall):
 #      supports. The rest of the automation relies on how much we can extract from these frames.
 
 def _vision_test_dir() -> Path:
-    d = _base_screens_dir() / "vision_test"
+    # Dedicated, persistent folder for Camera Vision Test frames (raw/screen captures, uploads, and
+    # their enhanced variants). Kept at the PROJECT ROOT (sibling to screenshots/) — NOT under
+    # screenshots/ — so an App Explorer "clear all" (which nukes top-level screenshot files) never
+    # wipes captured camera frames. Every frame the /capture and /upload endpoints return is saved
+    # here automatically for later inspection.
+    d = Path(settings.app_map_path).parent / "camera_captures"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -778,6 +784,104 @@ def _img_dims(img_bytes: bytes) -> tuple[Optional[int], Optional[int]]:
         return _Img.open(io.BytesIO(img_bytes)).size
     except Exception:
         return None, None
+
+
+# Common Tesseract-engine install locations, checked when it isn't on PATH (Windows installers put
+# it under Program Files but don't add it to PATH — the usual cause of "tesseract is not installed").
+_TESSERACT_CANDIDATES = [
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    str(Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Tesseract-OCR" / "tesseract.exe"),
+    "/usr/bin/tesseract", "/usr/local/bin/tesseract", "/opt/homebrew/bin/tesseract",
+]
+
+
+def _resolve_tesseract() -> str:
+    """Return a runnable Tesseract-engine path, or "" if none found.
+
+    Order: explicit settings.tesseract_cmd → on PATH (shutil.which) → common install locations.
+    When found, points pytesseract at it so image_to_string works even when the binary isn't on PATH.
+    """
+    import shutil
+    candidates = []
+    if settings.tesseract_cmd:
+        candidates.append(settings.tesseract_cmd)
+    on_path = shutil.which("tesseract")
+    if on_path:
+        candidates.append(on_path)
+    candidates.extend(_TESSERACT_CANDIDATES)
+    for c in candidates:
+        if c and Path(c).is_file():
+            try:
+                import pytesseract
+                pytesseract.pytesseract.tesseract_cmd = c
+            except Exception:
+                pass
+            return c
+    return ""
+
+
+def _run_ocr(img_bytes: bytes) -> dict:
+    """Full-image OCR (0 LLM). Returns {available, text, error, engine}.
+
+    Distinguishes the two failure modes the old code conflated: the pytesseract PACKAGE missing vs
+    the Tesseract ENGINE binary missing — the latter is what actually happened (package installed,
+    binary present at Program Files but not on PATH). Gives an actionable message in each case."""
+    try:
+        import pytesseract
+        from PIL import Image as _Img
+    except ImportError:
+        return {"available": False, "text": "", "engine": "",
+                "error": "pytesseract package not installed on the backend (pip install pytesseract)."}
+    engine = _resolve_tesseract()
+    if not engine:
+        return {"available": False, "text": "", "engine": "",
+                "error": ("Tesseract ENGINE not found. Install it (Windows: winget install "
+                          "UB-Mannheim.TesseractOCR) or set tesseract_cmd in .env to tesseract.exe. "
+                          "The pytesseract pip package is only a wrapper around this binary.")}
+    try:
+        img = _Img.open(io.BytesIO(img_bytes))
+        # Try a few page-segmentation modes and keep the longest read. On a soft/low-res camera frame
+        # the default fully-automatic mode (psm 3) often returns nothing, while a uniform-block (6) or
+        # sparse-text (11) pass recovers partial text — this makes OCR a best-effort read, not all-or-none.
+        best = ""
+        for psm in (3, 6, 11):
+            try:
+                t = pytesseract.image_to_string(img, config=f"--psm {psm}").strip()
+            except Exception:
+                t = ""
+            if len(t) > len(best):
+                best = t
+        return {"available": True, "text": best, "engine": engine, "error": ""}
+    except Exception as e:
+        return {"available": True, "text": "", "engine": engine, "error": f"{type(e).__name__}: {e}"}
+
+
+def _enhance_for_ocr(img_bytes: bytes) -> Optional[bytes]:
+    """Return a PNG of an OpenCV-preprocessed copy tuned to make cheap-tier reads (OCR / edge
+    detection) work better on a soft, low-res, glare-y camera photo. Returns None if OpenCV/decoding
+    fails (caller then just skips enhancement — no behaviour change).
+
+    Pipeline (all local, OpenCV already a dependency): grayscale → 3× cubic upscale (recover small
+    text) → CLAHE (local contrast, fights glare/uneven lighting + the blue color cast) → light
+    denoise → unsharp mask (counter blur). Deliberately no hard threshold: binarizing this frame
+    destroyed more text than it recovered in testing."""
+    try:
+        import cv2
+        import numpy as np
+        arr = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if arr is None:
+            return None
+        gray = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+        up = cv2.resize(gray, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+        cl = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(up)
+        den = cv2.fastNlMeansDenoising(cl, None, 7, 7, 21)
+        blur = cv2.GaussianBlur(den, (0, 0), 3)
+        sharp = cv2.addWeighted(den, 1.6, blur, -0.6, 0)
+        ok, buf = cv2.imencode(".png", sharp)
+        return buf.tobytes() if ok else None
+    except Exception:
+        return None
 
 
 class VisionCaptureRequest(BaseModel):
@@ -952,7 +1056,13 @@ def vision_test_analyze(req: VisionAnalyzeRequest):
         tier1_verdict = "no_match"
         tier1_detail  = (f"Nearest screen '{best['screen_id']}' is {best['distance']} away "
                          f"(> {_PHASH_MISMATCH_THRESHOLD}) — aHash cannot identify the screen from this "
-                         f"frame; Tier-2/3 (Claude vision) is required.")
+                         f"frame; Tier-2/3 (Claude vision) is required. NOTE: with the best distance in "
+                         f"the mismatch band, the ranking ORDER below is not meaningful — aHash is a 16×16 "
+                         f"global-brightness fingerprint, so it ranks by coarse light/dark layout, NOT by "
+                         f"fields or their order. A camera photo compared against browser-captured "
+                         f"references can rank an unrelated screen (even another kiosk's) nearest purely by "
+                         f"a similar bright-panel-on-dark shape; '{best['screen_id']}' being #1 is not a real "
+                         f"content match. See the recommendation for how to make Tier-1 viable.")
     else:
         tier1_verdict = "inconclusive"
         tier1_detail  = (f"Nearest screen '{best['screen_id']}' is {best['distance']} away "
@@ -973,18 +1083,46 @@ def vision_test_analyze(req: VisionAnalyzeRequest):
     except Exception as e:
         opencv_error = f"{type(e).__name__}: {e}"
 
-    # ── 3. OCR text (0 LLM) ───────────────────────────────────────────────────
-    ocr_text = ""
-    ocr_available = True
-    ocr_error = ""
-    try:
-        import pytesseract
-        from PIL import Image as _Img
-        ocr_text = pytesseract.image_to_string(_Img.open(io.BytesIO(img_bytes))).strip()
-    except ImportError:
-        ocr_available = False
-    except Exception as e:
-        ocr_error = f"{type(e).__name__}: {e}"
+    # ── 3. OCR text (0 LLM) — on the raw frame, same as a live read ───────────
+    ocr = _run_ocr(img_bytes)
+
+    # ── 3b. Image-enhancement pass (0 LLM) — local OpenCV preprocessing to give the cheap tiers a
+    #        better shot on a soft/low-res/glare-y camera photo. Re-runs OCR + OpenCV + aHash on the
+    #        enhanced copy so the operator can see, side by side, whether preprocessing helps. Saved
+    #        under camera_captures/ too so the enhanced frame can be displayed and inspected. ──────
+    enhanced = None
+    enh_bytes = _enhance_for_ocr(img_bytes)
+    if enh_bytes:
+        enh_fname = Path(req.filename).stem + "_enhanced.png"
+        (_vision_test_dir() / enh_fname).write_bytes(enh_bytes)
+        enh_w, enh_h = _img_dims(enh_bytes)
+        enh_ocr = _run_ocr(enh_bytes)
+        enh_rects: list[dict] = []
+        try:
+            from PIL import Image as _Img
+            from vision_agent.vision.detector import detect_interactive_rects
+            enh_rects = detect_interactive_rects(_Img.open(io.BytesIO(enh_bytes)))
+        except Exception:
+            enh_rects = []
+        try:
+            enh_hash = compute_hash(enh_bytes)
+            enh_best = min(
+                ({"screen_id": sid, "distance": _hamming(enh_hash, (sc or {}).get("screen_hash", ""))}
+                 for sid, sc in screens.items() if (sc or {}).get("screen_hash")),
+                key=lambda r: r["distance"], default=None)
+        except Exception:
+            enh_best = None
+        enhanced = {
+            "applied":      True,
+            "filename":     enh_fname,
+            "image_url":    f"/api/vision-test/image/{enh_fname}",
+            "width":        enh_w,
+            "height":       enh_h,
+            "pipeline":     "grayscale → 3× upscale → CLAHE → denoise → unsharp",
+            "ocr":          enh_ocr,
+            "opencv_count": len(enh_rects),
+            "tier1_best":   enh_best,
+        }
 
     # ── 4. Claude-vision element analysis (Tier-3, optional) ──────────────────
     claude = None
@@ -1005,10 +1143,14 @@ def vision_test_analyze(req: VisionAnalyzeRequest):
     else:
         recommendation = ("Tier-1 aHash does NOT reliably match this camera frame against the "
                           "browser-captured references — expected, since a camera photo differs from a "
-                          "clean screenshot (glare, blur, perspective, color). Screen validation will "
-                          "fall through to Claude vision (Tier-3), which reads the frame reliably. "
-                          "Element COORDINATES still come from the app_map (learned in Playwright), so "
-                          "taps are unaffected; only screen/text VALIDATION pays an LLM call.")
+                          "clean screenshot (glare, blur, perspective, color). To make Tier-1 viable on "
+                          "the real robot, the reference hashes must be CAMERA-domain: after Playwright "
+                          "exploration, do a one-time per-screen camera-reference pass so aHash compares "
+                          "camera↔camera (not camera↔browser). Meanwhile screen validation falls through "
+                          "to Claude vision (Tier-3), which reads the frame reliably. Element COORDINATES "
+                          "still come from the app_map (learned in Playwright), so taps are unaffected; "
+                          "only screen/text VALIDATION pays an LLM call. The enhanced-frame results below "
+                          "show whether local preprocessing recovers OCR/edges on this capture.")
 
     return {
         "status":       "ok",
@@ -1031,11 +1173,8 @@ def vision_test_analyze(req: VisionAnalyzeRequest):
             "rects": opencv_rects,
             "error": opencv_error,
         },
-        "ocr": {
-            "available": ocr_available,
-            "text":      ocr_text,
-            "error":     ocr_error,
-        },
+        "ocr":            ocr,
+        "enhanced":       enhanced,
         "claude":         claude,
         "recommendation": recommendation,
     }

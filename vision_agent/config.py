@@ -43,6 +43,14 @@ class Settings(BaseSettings):
     screenshots_dir: str = "./screenshots"
     results_dir: str = "./results"
 
+    # OCR engine path (Camera Vision Test diagnostic only). pytesseract is a thin wrapper that shells
+    # out to the Tesseract ENGINE binary — the pip package alone is not enough. If Tesseract is
+    # installed but not on PATH (common on Windows), set this to its full path, e.g.
+    #   C:\Program Files\Tesseract-OCR\tesseract.exe
+    # Blank → auto-discover the common install locations. OCR is a 0-LLM legibility aid on the
+    # diagnostic page only; the live automation reads text via Claude vision, so this never affects a run.
+    tesseract_cmd: str = ""
+
     # Vision confidence: elements below this score get a correction follow-up call
     coordinate_confidence_threshold: float = 0.85
 
