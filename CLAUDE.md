@@ -783,6 +783,121 @@ glare). Four issues raised; all fixed and **actually tested** this time (new `te
   the diagnostic endpoint; the `ocr` response keeps `available/text/error` (frontend contract) and only
   ADDS `engine` + `enhanced`. See [[camera-vision-test-2026-07-16]], [[agv-hardware-test-2026-07-13]].
 
+### Claude vision 400 on real-camera JPEG — media-type now sniffed, not hardcoded (2026-07-23)
+
+Testing the Camera Vision Test against the REAL arm `/capture type=screen`, Tier-3 element extraction
+failed: `BadRequestError 400 … image/png media type, but the image appears to be a image/jpeg image`.
+Root cause: the real arm's `/capture` returns **JPEG** bytes (`type:screen` is AprilTag-rectified +
+re-encoded — magic bytes `ffd8ffe0`), even when the frame is saved with a `.png` filename, but **every
+Claude vision block hardcoded `media_type: "image/png"`**. Browser screenshots are PNG so this never
+bit until a real camera frame reached Claude. Generic fix (no behaviour change for PNG):
+
+- ✅ **New `vision_agent/llm.detect_image_media_type(bytes)`** sniffs the format from magic bytes
+  (JPEG `ff d8 ff`, PNG `89 50 4e 47…`, GIF, WEBP; defaults to `image/png` on anything unrecognised —
+  the historical assumption, so browser PNGs are byte-identical).
+- ✅ **Applied at EVERY Claude image block** (all consume the SAME bytes they base64-encode, so the
+  media_type always matches the data): `analyze.py` (`analyze_image_elements` — the Tier-3 / Camera
+  Vision Test path that hit the 400), `validate_pipeline.py` (all 4 vision fallbacks:
+  `_claude_vision_text_check`, `_claude_extract_value`, `verify_intent_satisfied`,
+  `_claude_vision_validate`), `validate.py` (legacy VisionAgent validate node), `run_vision_step.py`
+  (`_capture_value_via_vision` + the inline-vision fast path — the two that hit real-robot camera JPEGs
+  during a test run), and `explore_screen.py` (scroll-analysis + keyboard-map — browser today, future
+  camera-reference-proof).
+- **No regression by construction:** PNG frames still resolve to `image/png` (verified), so playwright/
+  browser paths are unchanged; only the media_type STRING varies, never the bytes. Tested:
+  `tests/test_camera_vision.py` (13 passed) asserts PNG/JPEG/GIF/WEBP detection, that the REAL camera
+  frame `camera_captures/vision_test_screen_1784803921993.png` sniffs as `image/jpeg` (the exact 400
+  trigger), and garbage→png default. All 5 edited modules import clean. (Pre-existing
+  `test_vision_agent.py` failures here are unrelated — `ReadTimeout` to the arm at `192.168.0.105:8000`,
+  which isn't reachable from the dev box.)
+- **NEXT: real-robot RPS login test** (operator will run it and report). Watch: the leading `verify`
+  captures a camera JPEG → now reaches Claude for screen ID without the 400; aHash will likely
+  `no_match` (browser↔camera domain gap — expected, falls to Claude vision per [[camera-vision-test-2026-07-16]]);
+  tapping uses app_map coords (camera quality irrelevant to taps). See the Tier clarifications below.
+
+### Tier architecture clarified + real-robot 0-LLM plan + Tier-3 cost (analysis only, 2026-07-23)
+
+Operator questions after the phone-photo test. **No code changed** — this records the architecture
+answers + the recommended path so they aren't re-derived. Key clarifications (verified against
+`run_vision_step.py` / `validate_pipeline.py` / `detector.py`):
+
+- **OCR ≠ element detection.** Tesseract returns text strings only (+ boxes for text it read); it has
+  NO concept of buttons/inputs, so it can NEVER emit UI-element boxes regardless of camera quality —
+  that's OpenCV `detect_interactive_rects` / Claude's job. On the phone frame OCR read ONLY the
+  white-on-near-black header ("ROBOTICS KIOSK AUTOMATION / Generic Kiosk POS") because Tesseract's
+  Otsu binarization needs high luminance contrast; the login card (light text on medium-blue) + LCD
+  moiré + soft/keystoned edges falls below that threshold and is dropped. A better camera spreads the
+  header-quality read to the card, but still won't produce element boxes.
+- **Tier-1 identifies the SCREEN, not elements.** Element coordinates come from the **app_map**
+  (Playwright-learned), scaled to the camera — in EVERY tier. A Tier-1/2 tap is `robot.tap(px,py)` with
+  px/py from the plan (app_map); the camera image is never consulted to LOCATE an element. ⇒ **camera
+  image quality does NOT affect tapping accuracy at all** — only screen/text VALIDATION (`verify`
+  steps) reads the camera. So the real-robot goal is two independent things: (1) screen identity works
+  from a camera frame (keeps `verify` 0-LLM), (2) tapping stays accurate (calibration + AprilTag, not
+  sharpness). See [[camera-vision-test-2026-07-16]].
+- **Tier-3 confirmed = the FALLBACK, not the default.** Per step it makes a Claude VISION call that
+  reads element coordinates OFF THE IMAGE and taps them (does NOT use app_map for coords) — used only
+  when a screen/step isn't charted or a structured step fails. The operator's "identify screen, all
+  detection from app_map" describes **Tier-1/2** (0 LLM per click; Claude paid only at Tier-2 planning,
+  one text-only call). Two distinct runtime Claude uses: (a) screen-identity verify fallback when aHash
+  can't confirm (~1 cheap call/verify), (b) full Tier-3 element extraction when a step falls through
+  (~1 call/step). **Cost (Opus 4.8, $5/$25 per 1M):** ~3k input+prompt ≈ $0.015; screen-identity verify
+  ≈ **$0.02–0.03/call**, full Tier-3 step ≈ **$0.04–0.06/step**. A 4-verify run all falling to Claude
+  ≈ $0.10–0.12/run — modest but not zero at fleet scale, which is why closing the aHash gap matters.
+- **Camera-domain references are NOT the only 0-LLM screen-ID option.** Ranked: **QR/fiducial screen
+  tag** (app renders a tiny code encoding `screen_id` — deterministic, immune to the domain gap,
+  cheapest reliable win IF the app can be modified) > **ORB/AKAZE feature match** vs camera-domain refs
+  (robust to glare/blur/angle AND yields a homography → better than the current per-axis `_scale`) >
+  **warp-then-reuse** (warp the camera frame to the browser-viewport grid via the AprilTag homography +
+  photometric normalize, then aHash against EXISTING browser refs — no recapture) > OCR-token
+  fingerprint > hash a stable high-contrast band (header) only. Recommended: QR tag + ORB fallback.
+- **Physical setup — the real lever (D405 is a SHORT-range 7–50 cm camera; use it CLOSE, not at
+  distance).** 21" 16:9 screen ≈ 465 mm wide; the operator's plan to shrink the RPS app to ~50% width
+  (≈232 mm) for the myCobot 280's 280 mm reach ALSO fixes image quality: at ~15 cm the D405's 87° HFOV
+  spans ≈285 mm → the app fills ~80% of the 1280×720 frame ≈ 4.5 px/mm (vs the current 600×341 crop =
+  screen only ~21% of the sensor). Recommendation: half-width app + D405 at ~12–20 cm, centered,
+  fronto-parallel (reduce keystone — 2nd-biggest lever after distance); confirm `/capture type:screen`
+  returns full-res not downscaled; then a per-screen camera-domain reference pass (or ORB). **Joint
+  angles are NOT the quality lever** — they change pose (distance/angle/framing), not sensor quality;
+  optimize FOR "close + centered + head-on," not a specific joint config. Arm-reach and image-quality
+  have the SAME solution. See [[agv-hardware-test-2026-07-13]].
+- **Offered next build (not yet done, awaiting go-ahead):** a camera-domain reference-capture tool +
+  an ORB matcher alongside aHash — local, 0-LLM, additive/non-regressive (behind existing toggles;
+  playwright/demo untouched). Start with reference-capture to measure how much ORB buys.
+
+### Camera Vision Test timed out on a large (phone-photo) upload — resolution-bounding fix (2026-07-23)
+
+The operator uploaded a **mobile-phone photo** of the RPS login screen (`IMG_5716.jpeg`, **4032×3024**,
+~12 MP — taken to compare a phone camera vs the RealSense frames) into the Camera Vision Test page. It
+**timed out** (client allows analyze 90 s) instead of returning results. Root cause: `analyze` ran the
+expensive 0-LLM steps at full resolution — `_enhance_for_ocr` upscales the source **3×**, so a 12 MP
+photo became **~110 MP**, then `fastNlMeansDenoising` + triple-PSM OCR + OpenCV ran on THAT → minutes of
+work. RealSense frames are ~600 px so this path was always fast; only an oversized upload triggers it.
+
+- ✅ **Bound the working copy for the expensive steps** (`api/main.py`). New `_bound_for_processing(bytes,
+  max_dim=1600)` downscales (LANCZOS, aspect-preserving) only when the longest side exceeds 1600 px, else
+  returns the **original bytes unchanged**. `vision_test_analyze` computes `proc_bytes` once and feeds it to
+  OpenCV, OCR, `_enhance_for_ocr`, AND the optional Claude call. **Tier-1 aHash stays on the full-res
+  original** (`compute_hash` resizes to 16×16 itself, so its match semantics are byte-identical). The
+  enhance upscale is also capped: `fx = min(3.0, 2400/longest)` (never < 1.0) so its output can't explode —
+  a 600 px frame still gets exactly 3× (unchanged), anything larger is bounded to a 2400 px working image.
+- **No regression by construction:** real camera frames (~600 px) and browser screenshots (~1400 px) are
+  under the 1600 cap → `_bound_for_processing` returns them unchanged and every downstream step is
+  byte-identical. Verified: new `test_camera_vision` tests (12/12) assert sub-cap frames pass through
+  untouched (identity), a 4032×3024 frame is capped ≤1600 with aspect preserved, bad bytes return the input,
+  and `analyze` completes end-to-end on a large frame with the enhanced output bounded ≤2400.
+- **Empirical result on the phone photo** (analyze now **~19 s**, well under 90 s): the phone camera is
+  MUCH clearer than the RealSense frames — raw-frame **OCR actually reads real text** ("ROBOTICS KIOSK
+  AUTOMATION / Generic Kiosk POS / Card sharing off…"), and OpenCV finds a few rects (vs 0 on RealSense).
+  BUT **Tier-1 aHash is still `no_match`** (nearest `smart_card_kiosk_station` at distance 22 > 20): even a
+  crisp phone photo doesn't match the **browser-captured** reference hashes — the camera↔browser domain gap
+  again (see [[camera-vision-test-2026-07-16]]); the real Tier-1-on-real-robot fix remains a camera-domain
+  reference pass, not image quality. Also observed: on this already-sharp photo the **enhanced** OCR is
+  WORSE than raw (3× upscale + CLAHE + denoise adds artifacts) — expected, since enhancement targets soft
+  low-res frames; the operator sees both side by side. **Takeaway for the hardware effort:** a better
+  physical camera/framing lifts OCR/OpenCV (Tier-2/3 legibility) but NOT Tier-1 aHash, which needs
+  camera-domain references regardless of frame quality.
+
 ### Full Robot-API spec-alignment pass of the real backend (`real_robot.py`, 2026-07-15)
 
 A line-by-line re-review of `vision_agent/robot/real_robot.py` against the robotics team's

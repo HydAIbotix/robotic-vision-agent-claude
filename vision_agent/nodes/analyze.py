@@ -31,7 +31,7 @@ from PIL import Image
 from langchain_core.messages import HumanMessage, SystemMessage
 from vision_agent.state import VisionAgentState, ScreenAnalysis
 from vision_agent.prompts import ANALYZE_SCREEN, CORRECT_ELEMENT_COORD
-from vision_agent.llm import get_llm
+from vision_agent.llm import get_llm, detect_image_media_type
 from vision_agent.storage import get_storage
 from vision_agent.config import settings
 from vision_agent.screen_cache import load_app_map, lookup_screen
@@ -112,6 +112,7 @@ def analyze_image_elements(image_bytes: bytes) -> ScreenAnalysis:
     so the page tests the EXACT vision code the explorer uses — no reimplementation, no drift."""
     img_w, img_h = Image.open(io.BytesIO(image_bytes)).size
     b64 = base64.standard_b64encode(image_bytes).decode()
+    media_type = detect_image_media_type(image_bytes)
 
     llm = get_llm()
 
@@ -131,7 +132,7 @@ def analyze_image_elements(image_bytes: bytes) -> ScreenAnalysis:
         "type": "image",
         "source": {
             "type": "base64",
-            "media_type": "image/png",
+            "media_type": media_type,
             "data": b64,
         },
         "cache_control": {"type": "ephemeral"},

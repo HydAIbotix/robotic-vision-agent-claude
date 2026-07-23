@@ -519,12 +519,13 @@ def _claude_vision_text_check(image_path: str, expected_text: str, description: 
     """Ask Claude Opus whether expected_text is visible in the screenshot."""
     import base64, json
     from langchain_core.messages import HumanMessage
-    from vision_agent.llm import get_fast_llm
+    from vision_agent.llm import get_fast_llm, detect_image_media_type
     from vision_agent.storage import get_storage
 
     try:
         image_bytes = get_storage().load(image_path)
         b64 = base64.standard_b64encode(image_bytes).decode()
+        media_type = detect_image_media_type(image_bytes)
         prompt = (
             f"Examine this screenshot carefully.\n"
             f"Is the text '{expected_text}' visible anywhere on screen?\n"
@@ -534,7 +535,7 @@ def _claude_vision_text_check(image_path: str, expected_text: str, description: 
         )
         llm = get_fast_llm()
         msg = HumanMessage(content=[
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64},
+            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64},
              "cache_control": {"type": "ephemeral"}},
             {"type": "text", "text": prompt},
         ])
@@ -557,10 +558,12 @@ def _claude_extract_value(image_path: str, expected_text: str, description: str)
     """
     import base64, json
     from langchain_core.messages import HumanMessage
-    from vision_agent.llm import get_fast_llm
+    from vision_agent.llm import get_fast_llm, detect_image_media_type
     from vision_agent.storage import get_storage
     try:
-        b64 = base64.standard_b64encode(get_storage().load(image_path)).decode()
+        image_bytes = get_storage().load(image_path)
+        b64 = base64.standard_b64encode(image_bytes).decode()
+        media_type = detect_image_media_type(image_bytes)
         prompt = (
             f"A test expected to see the value '{expected_text}' on this screen.\n"
             f"Context: {description}\n\n"
@@ -571,7 +574,7 @@ def _claude_extract_value(image_path: str, expected_text: str, description: str)
         )
         llm = get_fast_llm()
         msg = HumanMessage(content=[
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64},
+            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64},
              "cache_control": {"type": "ephemeral"}},
             {"type": "text", "text": prompt},
         ])
@@ -598,13 +601,15 @@ def verify_intent_satisfied(image_path: str, step_description: str,
     playwright browser and the real-robot camera produce). Returns (satisfied, observation)."""
     import base64, json
     from langchain_core.messages import HumanMessage
-    from vision_agent.llm import get_fast_llm
+    from vision_agent.llm import get_fast_llm, detect_image_media_type
     from vision_agent.storage import get_storage
 
     if not image_path:
         return False, "no screenshot for intent check"
     try:
-        b64 = base64.standard_b64encode(get_storage().load(image_path)).decode()
+        image_bytes = get_storage().load(image_path)
+        b64 = base64.standard_b64encode(image_bytes).decode()
+        media_type = detect_image_media_type(image_bytes)
         prompt = (
             "A test VERIFY step describes an expected OUTCOME. Judge STRICTLY, from the screenshot, "
             "whether that described outcome is TRUE on the current screen.\n"
@@ -619,7 +624,7 @@ def verify_intent_satisfied(image_path: str, step_description: str,
         )
         llm = get_fast_llm()
         msg = HumanMessage(content=[
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64},
+            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64},
              "cache_control": {"type": "ephemeral"}},
             {"type": "text", "text": prompt},
         ])
@@ -637,7 +642,7 @@ def _claude_vision_validate(image_path: str, description: str, screen_before: st
     """Node 3 fallback — full VALIDATE_STEP call via Claude Opus."""
     import base64, json
     from langchain_core.messages import HumanMessage
-    from vision_agent.llm import get_fast_llm
+    from vision_agent.llm import get_fast_llm, detect_image_media_type
     from vision_agent.prompts import VALIDATE_STEP
     from vision_agent.storage import get_storage
 
@@ -652,6 +657,7 @@ def _claude_vision_validate(image_path: str, description: str, screen_before: st
     try:
         image_bytes = get_storage().load(image_path)
         b64 = base64.standard_b64encode(image_bytes).decode()
+        media_type = detect_image_media_type(image_bytes)
         prompt = VALIDATE_STEP.format(
             action_description=description,
             action_type="verify",
@@ -659,7 +665,7 @@ def _claude_vision_validate(image_path: str, description: str, screen_before: st
         )
         llm = get_fast_llm()
         msg = HumanMessage(content=[
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64},
+            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64},
              "cache_control": {"type": "ephemeral"}},
             {"type": "text", "text": prompt},
         ])

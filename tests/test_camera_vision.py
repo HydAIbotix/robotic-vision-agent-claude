@@ -107,6 +107,85 @@ def test_enhance_helps_or_holds_on_real_camera_frame():
         f"enhancement reduced OCR: raw={len(raw_text)} enh={len(enh_text)}")
 
 
+# ── Image media-type detection (JPEG-vs-PNG 400 fix) ─────────────────────────
+
+def test_detect_media_type_png_and_jpeg():
+    """The real arm /capture returns JPEG; browser shots are PNG. Both must be detected
+    correctly so the Claude vision block never sends the wrong media_type (400)."""
+    from vision_agent.llm import detect_image_media_type
+    for fmt, exp in (("PNG", "image/png"), ("JPEG", "image/jpeg"), ("GIF", "image/gif"),
+                     ("WEBP", "image/webp")):
+        buf = io.BytesIO()
+        Image.new("RGB", (16, 16), "blue").save(buf, format=fmt)
+        got = detect_image_media_type(buf.getvalue())
+        assert got == exp, f"{fmt} detected as {got}, expected {exp}"
+
+
+def test_detect_media_type_real_camera_frame_is_jpeg():
+    """The real RealSense `type:screen` capture is JPEG even when saved with a .png name —
+    this is the exact frame that produced the 400 before the fix."""
+    from vision_agent.llm import detect_image_media_type
+    frame = Path(__file__).resolve().parents[1] / "camera_captures" / "vision_test_screen_1784803921993.png"
+    if not frame.exists():
+        import pytest
+        pytest.skip("real camera frame not present")
+    assert detect_image_media_type(frame.read_bytes()) == "image/jpeg"
+
+
+def test_detect_media_type_defaults_png_on_garbage():
+    from vision_agent.llm import detect_image_media_type
+    assert detect_image_media_type(b"not-an-image") == "image/png"
+
+
+# ── Large-upload bounding (phone-photo timeout fix) ──────────────────────────
+
+def _png(w: int, h: int) -> bytes:
+    """A non-trivial image of a given size (gradient so it isn't a flat block)."""
+    img = Image.new("RGB", (w, h))
+    px = img.load()
+    for y in range(h):
+        for x in range(0, w, 8):          # coarse fill — fast enough for a big canvas
+            px[x, y] = ((x + y) % 256, (x * 2) % 256, (y * 2) % 256)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_bound_leaves_small_frames_unchanged():
+    """Real camera frames (~600px) and browser screenshots (~1400px) must pass through untouched."""
+    raw = _png(600, 400)
+    assert m._bound_for_processing(raw) is raw, "a sub-cap frame must be returned unchanged (no regression)"
+    raw2 = _png(1400, 900)
+    assert m._bound_for_processing(raw2) is raw2
+
+
+def test_bound_downscales_oversized_frame():
+    """A 12 MP phone photo must be capped so its largest side is ≤ 1600 (the timeout fix)."""
+    big = _png(4032, 3024)
+    out = m._bound_for_processing(big)
+    assert out is not big
+    w, h = m._img_dims(out)
+    assert max(w, h) <= 1600, f"expected ≤1600, got {w}x{h}"
+    assert abs((w / h) - (4032 / 3024)) < 0.01, "aspect ratio must be preserved"
+
+
+def test_bound_bad_bytes_returns_input():
+    junk = b"not an image"
+    assert m._bound_for_processing(junk) is junk
+
+
+def test_analyze_completes_on_large_upload():
+    """End-to-end: a big frame flows through analyze without exploding; enhanced output stays capped."""
+    dst = m._vision_test_dir() / "unittest_big.png"
+    dst.write_bytes(_png(4032, 3024))
+    r = m.vision_test_analyze(m.VisionAnalyzeRequest(filename="unittest_big.png", use_claude=False))
+    assert r["status"] == "ok"
+    if r.get("enhanced"):
+        assert max(r["enhanced"]["width"], r["enhanced"]["height"]) <= 2400, "enhanced frame must be bounded"
+    dst.unlink(missing_ok=True)
+    (m._vision_test_dir() / "unittest_big_enhanced.png").unlink(missing_ok=True)
+
+
 # ── Capture folder + analyze endpoint contract ───────────────────────────────
 
 def test_capture_dir_is_dedicated_camera_captures_folder():

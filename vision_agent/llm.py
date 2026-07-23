@@ -15,6 +15,25 @@ from langchain_core.language_models import BaseChatModel
 from vision_agent.config import settings
 
 
+def detect_image_media_type(image_bytes: bytes) -> str:
+    """Return the Anthropic media_type for an image, sniffed from its magic bytes.
+
+    Camera frames from the real arm's `/capture` come back as JPEG (`type:screen` is
+    AprilTag-rectified + re-encoded), while browser screenshots are PNG — so a hardcoded
+    `image/png` triggers a 400 ("appears to be a image/jpeg image") when the bytes are JPEG.
+    Sniffing the header makes every Claude vision call correct regardless of source format.
+    Defaults to image/png (the historical assumption) if the header is unrecognised."""
+    if image_bytes[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if image_bytes[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/png"
+
+
 def _strip_fences(text: str) -> str:
     text = (text or "").strip()
     if "```" in text:

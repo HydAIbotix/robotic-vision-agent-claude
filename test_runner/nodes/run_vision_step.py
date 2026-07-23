@@ -123,10 +123,12 @@ def _capture_value_via_vision(image_path: str, name: str, description: str) -> s
         return ""
     import base64, json
     from langchain_core.messages import HumanMessage
-    from vision_agent.llm import get_fast_llm
+    from vision_agent.llm import get_fast_llm, detect_image_media_type
     from vision_agent.storage import get_storage
     try:
-        b64 = base64.standard_b64encode(get_storage().load(image_path)).decode()
+        _img = get_storage().load(image_path)
+        b64 = base64.standard_b64encode(_img).decode()
+        media_type = detect_image_media_type(_img)
         prompt = (
             f"A test needs to capture the value named '{name}' from this screen so it can be "
             f"reused in a later step.\nContext: {description or name}\n\n"
@@ -137,7 +139,7 @@ def _capture_value_via_vision(image_path: str, name: str, description: str) -> s
         )
         llm = get_fast_llm()
         msg = HumanMessage(content=[
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64},
+            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64},
              "cache_control": {"type": "ephemeral"}},
             {"type": "text", "text": prompt},
         ])
@@ -178,7 +180,7 @@ def _inline_vision_fast(desc: str, captured: dict, run_id: str, test_id: str,
     import base64, io, json
     from PIL import Image
     from langchain_core.messages import HumanMessage
-    from vision_agent.llm import get_fast_llm
+    from vision_agent.llm import get_fast_llm, detect_image_media_type
     from vision_agent.storage import get_storage
     from vision_agent.nodes.analyze import _norm_to_px
 
@@ -216,6 +218,7 @@ def _inline_vision_fast(desc: str, captured: dict, run_id: str, test_id: str,
             image_bytes = get_storage().load(img_path)
             img_w, img_h = Image.open(io.BytesIO(image_bytes)).size
             b64 = base64.standard_b64encode(image_bytes).decode()
+            media_type = detect_image_media_type(image_bytes)
             vals = "\n".join(f"  {k} = {v}" for k, v in provided_vals.items())
             vals_block = ("\nValues to enter (use EXACTLY, never invent):\n" + vals) if vals else ""
             retry_block = (f"\nIMPORTANT — RETRY: {correction_note}\n") if correction_note else ""
@@ -246,7 +249,7 @@ def _inline_vision_fast(desc: str, captured: dict, run_id: str, test_id: str,
                 "Return ONLY the JSON."
             )
             msg = HumanMessage(content=[
-                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64},
+                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64},
                  "cache_control": {"type": "ephemeral"}},
                 {"type": "text", "text": prompt},
             ])

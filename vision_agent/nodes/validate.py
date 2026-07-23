@@ -7,7 +7,7 @@ import base64
 from langchain_core.messages import HumanMessage
 from vision_agent.state import VisionAgentState
 from vision_agent.prompts import VALIDATE_STEP
-from vision_agent.llm import get_llm, invoke_json
+from vision_agent.llm import get_llm, invoke_json, detect_image_media_type
 from vision_agent.storage import get_storage
 
 
@@ -20,6 +20,7 @@ def validate_step(state: VisionAgentState) -> dict:
 
     image_bytes = get_storage().load(state["image_path"])
     b64 = base64.standard_b64encode(image_bytes).decode()
+    media_type = detect_image_media_type(image_bytes)
 
     screen_before = state["screen_analysis"]["screen_id"]
     prompt = VALIDATE_STEP.format(
@@ -36,7 +37,7 @@ def validate_step(state: VisionAgentState) -> dict:
             "type": "image",
             "source": {
                 "type": "base64",
-                "media_type": "image/png",
+                "media_type": media_type,
                 "data": b64,
             },
             "cache_control": {"type": "ephemeral"},

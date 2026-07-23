@@ -786,6 +786,34 @@ def _img_dims(img_bytes: bytes) -> tuple[Optional[int], Optional[int]]:
         return None, None
 
 
+def _bound_for_processing(img_bytes: bytes, max_dim: int = 1600) -> bytes:
+    """Downscale a frame so its largest side is ≤ max_dim, for the EXPENSIVE 0-LLM steps
+    (OpenCV edge detection, OCR, and the enhance pipeline). Returns the ORIGINAL bytes unchanged
+    when it already fits (or on any failure) — so real robot-camera frames (~600px) and browser
+    screenshots (~1400px) are byte-identical and nothing about their detection changes.
+
+    Why: a phone photo comes in at ~4032×3024 (12 MP); the enhance pass then upscales it 3× to
+    ~110 MP and runs fastNlMeansDenoising + triple-PSM OCR on THAT — minutes of work, which blew
+    past the 90 s client timeout. RealSense frames never hit this. Capping the working resolution
+    keeps the diagnostic responsive on huge uploads with zero loss for the tiny frames it's built for.
+    (Tier-1 aHash is deliberately NOT bounded here — compute_hash resizes to 16×16 itself, so it
+    already sees the full frame and its match semantics are preserved.)"""
+    try:
+        from PIL import Image as _Img
+        img = _Img.open(io.BytesIO(img_bytes))
+        w, h = img.size
+        if max(w, h) <= max_dim:
+            return img_bytes
+        scale = max_dim / float(max(w, h))
+        img = img.convert("RGB").resize((max(1, round(w * scale)), max(1, round(h * scale))),
+                                        _Img.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return img_bytes
+
+
 # Common Tesseract-engine install locations, checked when it isn't on PATH (Windows installers put
 # it under Program Files but don't add it to PATH — the usual cause of "tesseract is not installed").
 _TESSERACT_CANDIDATES = [
@@ -873,7 +901,14 @@ def _enhance_for_ocr(img_bytes: bytes) -> Optional[bytes]:
         if arr is None:
             return None
         gray = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
-        up = cv2.resize(gray, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+        # 3× upscale to recover small text on a low-res camera frame — but cap the RESULT so a
+        # large source (e.g. a downscaled phone photo already ~1600px) can't blow up to a size that
+        # makes the denoise step crawl. min(3.0, 2400/longest) keeps a 600px frame at exactly 3×
+        # (unchanged behaviour) while bounding anything bigger to a 2400px working image.
+        h0, w0 = gray.shape[:2]
+        f = min(3.0, 2400.0 / max(h0, w0)) if max(h0, w0) else 3.0
+        f = max(1.0, f)
+        up = cv2.resize(gray, None, fx=f, fy=f, interpolation=cv2.INTER_CUBIC)
         cl = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(up)
         den = cv2.fastNlMeansDenoising(cl, None, 7, 7, 21)
         blur = cv2.GaussianBlur(den, (0, 0), 3)
@@ -1019,6 +1054,12 @@ def vision_test_analyze(req: VisionAnalyzeRequest):
     img_bytes = path.read_bytes()
     img_w, img_h = _img_dims(img_bytes)
 
+    # Bound the working copy for the EXPENSIVE steps (OpenCV / OCR / enhance / Claude) so a large
+    # upload (e.g. a 12 MP phone photo) doesn't exceed the client timeout. Real camera frames and
+    # browser screenshots are already under the cap → this returns them unchanged (no regression).
+    # aHash below stays on the FULL-res original (compute_hash resizes to 16×16 itself).
+    proc_bytes = _bound_for_processing(img_bytes)
+
     # ── 1. Tier-1 aHash screen match (0 LLM) ──────────────────────────────────
     try:
         current_hash = compute_hash(img_bytes)
@@ -1079,19 +1120,19 @@ def vision_test_analyze(req: VisionAnalyzeRequest):
     try:
         from PIL import Image as _Img
         from vision_agent.vision.detector import detect_interactive_rects
-        opencv_rects = detect_interactive_rects(_Img.open(io.BytesIO(img_bytes)))
+        opencv_rects = detect_interactive_rects(_Img.open(io.BytesIO(proc_bytes)))
     except Exception as e:
         opencv_error = f"{type(e).__name__}: {e}"
 
     # ── 3. OCR text (0 LLM) — on the raw frame, same as a live read ───────────
-    ocr = _run_ocr(img_bytes)
+    ocr = _run_ocr(proc_bytes)
 
     # ── 3b. Image-enhancement pass (0 LLM) — local OpenCV preprocessing to give the cheap tiers a
     #        better shot on a soft/low-res/glare-y camera photo. Re-runs OCR + OpenCV + aHash on the
     #        enhanced copy so the operator can see, side by side, whether preprocessing helps. Saved
     #        under camera_captures/ too so the enhanced frame can be displayed and inspected. ──────
     enhanced = None
-    enh_bytes = _enhance_for_ocr(img_bytes)
+    enh_bytes = _enhance_for_ocr(proc_bytes)
     if enh_bytes:
         enh_fname = Path(req.filename).stem + "_enhanced.png"
         (_vision_test_dir() / enh_fname).write_bytes(enh_bytes)
@@ -1129,7 +1170,7 @@ def vision_test_analyze(req: VisionAnalyzeRequest):
     if req.use_claude:
         try:
             from vision_agent.nodes.analyze import analyze_image_elements
-            claude = analyze_image_elements(img_bytes)
+            claude = analyze_image_elements(proc_bytes)
         except Exception as e:
             claude = {"error": f"{type(e).__name__}: {e}", "elements": []}
 

@@ -19,7 +19,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 from langchain_core.messages import HumanMessage
 from vision_agent.nodes.analyze import analyze_screen as _analyze
-from vision_agent.llm import get_llm, get_explorer_llm, invoke_json
+from vision_agent.llm import get_llm, get_explorer_llm, invoke_json, detect_image_media_type
 from vision_agent.screen_cache import compute_hash
 from vision_agent.storage import get_storage
 from vision_agent.config import settings
@@ -147,7 +147,7 @@ def _collect_scrolled_elements(base_elements: list, image_path: str, screen_id: 
         content.append({"type": "text", "text": f"Screenshot {i} (scroll_y={sy}px from top):"})
         content.append({
             "type": "image",
-            "source": {"type": "base64", "media_type": "image/png", "data": b64},
+            "source": {"type": "base64", "media_type": detect_image_media_type(img_bytes), "data": b64},
         })
     content.append({
         "type": "text",
@@ -362,9 +362,10 @@ def _map_keyboard(elements: list, app_map: dict) -> dict:
 
     image_bytes = get_storage().load(kb_path)
     b64         = base64.standard_b64encode(image_bytes).decode()
+    media_type  = detect_image_media_type(image_bytes)
     llm = get_llm()
     msg = HumanMessage(content=[
-        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
+        {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
         {"type": "text", "text": MAP_KEYBOARD},
     ])
     kb_data = invoke_json(llm, [msg], default={"keys": {}}, label="keyboard")
