@@ -113,8 +113,8 @@ def run_validate_pipeline(
             screen_note   = f"on '{expected_screen}' [demo]"
 
         else:
-            # real robot — perceptual hash comparison (zero LLM)
-            hr = _match_by_phash(image_path, app_map, expected_screen)
+            # real robot — template matching (zero LLM), aHash fallback
+            hr = _real_screen_identity(image_path, app_map, expected_screen)
             phash_success = hr.get("success")   # True / False / None
             actual_screen = hr.get("actual_screen", "")
             id_method     = hr.get("method", "phash")
@@ -232,7 +232,71 @@ def run_validate_pipeline(
     }
 
 
-# ── Node 1B: Perceptual hash match ────────────────────────────────────────────
+# ── Node 1B: Screen identity (template matching → aHash fallback) ─────────────
+
+def _real_screen_identity(image_path: str, app_map: dict, expected_screen: str) -> dict:
+    """Real-robot screen identity, zero LLM.
+
+    Primary: normalized cross-correlation template matching against each screen's reference image
+    (robust to the browser↔camera domain gap). Fallback: legacy 16×16 aHash — used ONLY when
+    template matching has no reference to compare against (so setups without reference files, and
+    the toggle-off path, keep their exact previous behaviour). A template-inconclusive result falls
+    straight through to the Claude-vision fallback, same as an aHash-inconclusive result did.
+    """
+    if settings.use_template_screen_match:
+        tr = _match_by_template(image_path, app_map, expected_screen)
+        if tr.get("method") not in ("template_no_reference", "template_no_image"):
+            return tr
+    return _match_by_phash(image_path, app_map, expected_screen)
+
+
+def _match_by_template(image_path: str, app_map: dict, expected_screen: str) -> dict:
+    """Identify the current screen by TM_CCOEFF_NORMED template matching (see
+    vision_agent/vision/template_match.py). Returns the same {success, method, actual_screen, …}
+    contract as _match_by_phash. `success` is None (→ Claude fallback) whenever there is no usable
+    reference for the expected screen, so a missing/poor reference degrades safely instead of
+    producing a wrong verdict.
+    """
+    from pathlib import Path
+    if not image_path or not Path(image_path).exists():
+        return {"success": None, "method": "template_no_image", "actual_screen": ""}
+    try:
+        from vision_agent.vision.template_match import build_references, identify_screen
+    except Exception as exc:
+        print(f"  [TEMPLATE] import error: {exc}")
+        return {"success": None, "method": "template_no_reference", "actual_screen": ""}
+
+    refs = build_references(app_map, settings.template_ref_dir)
+    if expected_screen and expected_screen not in refs:
+        # No reference image for the expected screen — cannot template-match it. Fall back.
+        return {"success": None, "method": "template_no_reference", "actual_screen": ""}
+    try:
+        img_bytes = Path(image_path).read_bytes()
+    except Exception:
+        return {"success": None, "method": "template_no_reference", "actual_screen": ""}
+
+    res = identify_screen(
+        img_bytes, refs, expected_screen,
+        settings.template_match_threshold, settings.template_match_margin,
+    )
+    top = ", ".join(f"{r['screen_id']}={r['score']}" for r in (res.get("ranking") or [])[:3])
+    print(f"  [TEMPLATE] expected='{expected_screen}' -> {res['method']} "
+          f"(score={res.get('score')}) top: {top}")
+
+    # Safety: a template MATCH is a confident 0-LLM win, but a template MISMATCH is downgraded to
+    # inconclusive (→ Claude vision decides). Reference quality is asymmetric (a screen with only a
+    # poor auto-explored reference could be out-scored by another screen's clean override template),
+    # so we never turn a template mismatch into a hard "wrong screen" failure — that authority stays
+    # with Claude. This makes the change strictly additive over the legacy aHash path (which likewise
+    # returned inconclusive on camera frames): we only ADD confident matches, never new hard fails.
+    if res.get("success") is False:
+        res["success"] = None
+        res["method"]  = "template_inconclusive"
+    res.setdefault("note", "")
+    return res
+
+
+# ── Node 1B (legacy fallback): Perceptual hash match ──────────────────────────
 
 def _match_by_phash(image_path: str, app_map: dict, expected_screen: str) -> dict:
     """

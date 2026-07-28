@@ -64,6 +64,16 @@ _event_sink = None
 # the arm's "idle". Treat these as "the base has arrived and is holding position".
 _BASE_READY_STATES = frozenset({"ready", "idle", "arrived", "done", "reached"})
 
+# Arm "available & responsive" states for the health probe. The physical arm controller reports
+# "ready" when idle-and-available (same convention as the base), not the spec's "idle" — so a
+# health check must accept "ready" as healthy. "holding_card" is a valid mid-flow gripping state.
+_ARM_HEALTHY_STATES = frozenset({"idle", "ready", "holding_card"})
+
+# Arm command-COMPLETE states for _poll (tap/type/swipe). The real arm settles to "ready" after a tap
+# (verified on hardware 2026-07-28: a click completed physically but the poll waited for "idle" and
+# timed out at 30s). Both "ready" and "idle" mean "done". Card ops override with "holding_card".
+_ARM_TERMINAL_STATES = frozenset({"idle", "ready"})
+
 # Monotonic command counter → human-readable command ids (cmd-1-goto-VPS, cmd-2-arm-click, …).
 # Reset at the start of each run by reset_command_seq() so ids read 1..N per run.
 _cmd_seq = 0
@@ -241,20 +251,26 @@ def _poll(
     cmd_id:   str,
     timeout_s: float,
     abort_ep: Optional[str] = None,
-    terminal_states: tuple = ("idle",),
+    terminal_states: tuple = _ARM_TERMINAL_STATES,
 ) -> dict:
-    """Poll state_ep until cmd_id matches and state is terminal, or timeout. Used for the ARM (fast,
-    sub-second taps) which echoes the cmd_id. Taps/typing/swipes settle back to "idle"; a card
-    pick/tap COMPLETES in "holding_card" (the arm keeps holding the card), so those callers pass
-    terminal_states=("holding_card", "idle"). The AGV base uses _poll_base instead."""
+    """Poll state_ep until the ARM finishes the command (terminal state), or timeout. Used for the ARM
+    (fast, sub-second taps/typing/swipes). The physical arm settles to "ready" (NOT the spec's "idle")
+    when a tap completes — same convention the AGV base uses — so BOTH are terminal (_ARM_TERMINAL_STATES).
+    A card pick/tap completes in "holding_card" (arm keeps gripping the card), so those callers pass an
+    explicit terminal_states. The AGV base uses _poll_base instead.
+
+    cmd_id gating: complete when the state is terminal AND the controller either echoes OUR cmd_id or
+    echoes no usable cmd_id at all (some controllers return an empty/placeholder id — then the STATE is
+    authoritative, matching _poll_base). This avoids a 30s timeout when the arm sits at "ready"."""
     deadline = time.time() + timeout_s
     last_state: dict = {}
     while time.time() < deadline:
         last_state = _get(state_ep)
-        s = last_state.get("state", "")
+        s = str(last_state.get("state", "")).lower()
         if s == "error":
             raise RuntimeError(f"Robot error on {state_ep}: {last_state}")
-        if s in terminal_states and last_state.get("cmd_id") == cmd_id:
+        echoed = last_state.get("cmd_id")
+        if s in terminal_states and (echoed == cmd_id or not echoed):
             return last_state
         time.sleep(settings.robot_poll_interval_s)
 
@@ -496,24 +512,46 @@ def _image_similarity(path1: str, path2: str) -> float:
 def verify_current_screen(expected_screen_id: str, app_map: dict, save_path: str = "") -> dict:
     """Camera-based screen verification (real-robot backend).
 
-    Captures the kiosk screen via the robot arm camera, then compares the image against
-    the reference_screenshot stored per-screen in app_map (written by the App Explorer).
-    No LLM call — pure image similarity.  Requires PIL + numpy (standard in the project).
+    Captures the kiosk screen via the robot arm camera, then identifies it by TEMPLATE MATCHING
+    (normalized cross-correlation, TM_CCOEFF_NORMED) against each screen's reference image — far
+    more robust to the browser↔camera domain gap than a raw pixel MSE. References come from
+    template_ref_dir overrides (clean per-screen templates) then the app_map reference_screenshot.
+    No LLM call. Falls back to the legacy pixel-MSE similarity only if the template module is
+    unavailable, so behaviour never hard-fails.
 
-    Returns {"actual_screen": str, "match": bool, "method": "camera_reference", "confidence": float}.
-    The "actual_screen" is the app_map key whose reference screenshot is most similar to the
-    current camera frame.  Empty string means no screen reached the 0.70 similarity threshold.
+    Returns {"actual_screen": str, "match": bool, "method": str, "confidence": float, "screenshot": str}.
+    "actual_screen" is the best-scoring screen id; empty when none reaches the match threshold.
     """
     if not save_path:
         save_path = f"./screenshots/verify_{int(time.time() * 1000)}.png"
 
     result       = capture_screen(save_path)
     current_path = result["image_path"]
+    threshold    = settings.template_match_threshold
 
+    # Primary: TM_CCOEFF_NORMED template matching (robust to camera↔browser domain gap).
+    try:
+        from vision_agent.vision.template_match import build_references, rank_references
+        refs    = build_references(app_map or {}, settings.template_ref_dir)
+        ranking = rank_references(Path(current_path).read_bytes(), refs) if refs else []
+        if ranking:
+            best_screen = ranking[0]["screen_id"]
+            best_score  = ranking[0]["score"]
+            if best_score < threshold:
+                return {"actual_screen": "", "match": False, "method": "template_match",
+                        "confidence": round(max(best_score, 0.0), 3), "screenshot": current_path}
+            return {"actual_screen": best_screen,
+                    "match":         (best_screen == expected_screen_id),
+                    "method":        "template_match",
+                    "confidence":    round(best_score, 3),
+                    "screenshot":    current_path}
+    except Exception as exc:
+        print(f"    [VERIFY] template match unavailable ({exc}); using pixel-MSE fallback")
+
+    # Fallback: legacy pixel-MSE similarity against reference_screenshot.
     screens     = (app_map or {}).get("screens", {})
     best_screen = ""
     best_score  = -1.0
-
     for screen_id, screen_data in screens.items():
         ref_path = (screen_data or {}).get("reference_screenshot", "")
         if not ref_path or not Path(ref_path).exists():
@@ -524,21 +562,11 @@ def verify_current_screen(expected_screen_id: str, app_map: dict, save_path: str
             best_screen = screen_id
 
     if not best_screen or best_score < 0.70:
-        return {
-            "actual_screen": "",
-            "match":         False,
-            "method":        "camera_reference",
-            "confidence":    round(max(best_score, 0.0), 3),
-            "screenshot":    current_path,
-        }
-
-    return {
-        "actual_screen": best_screen,
-        "match":         (best_screen == expected_screen_id),
-        "method":        "camera_reference",
-        "confidence":    round(best_score, 3),
-        "screenshot":    current_path,
-    }
+        return {"actual_screen": "", "match": False, "method": "camera_reference",
+                "confidence": round(max(best_score, 0.0), 3), "screenshot": current_path}
+    return {"actual_screen": best_screen, "match": (best_screen == expected_screen_id),
+            "method": "camera_reference", "confidence": round(best_score, 3),
+            "screenshot": current_path}
 
 
 def type_text(text: str, clear_first: bool = False) -> dict:
@@ -812,7 +840,7 @@ def health_check(do_capture: bool = True) -> dict:
     try:
         arm = _get("/arm/state")
         st  = arm.get("state", "unknown")
-        ok  = st in ("idle", "holding_card")
+        ok  = str(st).lower() in _ARM_HEALTHY_STATES
         components["robot"] = comp(
             "ok" if ok else "error",
             f"Arm responsive (state: {st})" if ok else f"Arm reports state '{st}'",

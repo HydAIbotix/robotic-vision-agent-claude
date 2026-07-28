@@ -72,6 +72,33 @@ def _load_device_map() -> dict[str, dict]:
         return {}
 
 
+import re as _re
+
+# Explicit AGV/base-movement intent in a test's raw steps. Requires a movement VERB near a
+# device/kiosk/AGV/home token, so a UI phrase like "go to the products page" does NOT trigger a
+# physical base move (no device token), while "Move the AGV to Kiosk-1" / "Navigate to RPS" does.
+_AGV_MOVE_RE = _re.compile(
+    r"\b(move|navigate|drive|travel|go|goto|head|return|proceed)\b[^.\n]{0,40}?"
+    r"\b(agv|base|kiosk|device|station|home|dock|vps|rps|tvm|k[-_]?\d+|kiosk[-_]?\d+)\b",
+    _re.IGNORECASE,
+)
+# Also catch object-first phrasings: "AGV to VPS", "drive the base back home".
+_AGV_MOVE_RE2 = _re.compile(
+    r"\b(agv|base)\b[^.\n]{0,30}?\b(to|home|back|goto|move|navigate|kiosk|dock)\b",
+    _re.IGNORECASE,
+)
+
+
+def _test_wants_agv_move(tc: dict) -> bool:
+    """True when a test's steps explicitly ask to physically move the AGV/base to a device/kiosk/home.
+
+    Used to gate per-test AGV positioning: unless a test says so (or the gate is disabled via
+    settings.agv_move_requires_explicit_step=False), the robot is left where it is (assumed already
+    parked at the target kiosk). Explicit `move` plan steps are handled separately and always drive."""
+    text = (tc.get("steps_raw") or "")
+    return bool(_AGV_MOVE_RE.search(text) or _AGV_MOVE_RE2.search(text))
+
+
 def _position_for_test(tc: dict) -> None:
     """Ensure the robot/browser is at THIS test's kiosk before it runs.
 
@@ -93,9 +120,17 @@ def _position_for_test(tc: dict) -> None:
             print(f"  [RUN] Per-test kiosk '{kid}' → {url}  (was {settings.kiosk_url})")
             settings.kiosk_url = url
     elif settings.robot_backend == "real":
+        # Do NOT auto-drive the AGV unless the test explicitly asks to move (or the gate is disabled).
+        # A single-kiosk test (e.g. a sign-in) leaves the robot where the operator parked it; only a
+        # test whose steps say move/go/navigate to a device/home drives the base here. Explicit `move`
+        # plan steps still drive during execution regardless.
+        if settings.agv_move_requires_explicit_step and not _test_wants_agv_move(tc):
+            print(f"  [RUN] Per-test: NOT moving AGV for kiosk '{kid}' — no explicit move/go/navigate "
+                  f"step in this test (robot assumed already at the kiosk)")
+            return
         try:
             if hasattr(robot, "navigate_to_kiosk"):
-                print(f"  [RUN] Per-test: driving AGV to kiosk '{kid}' before the test")
+                print(f"  [RUN] Per-test: driving AGV to kiosk '{kid}' before the test (explicit move intent)")
                 robot.navigate_to_kiosk(kid)
         except Exception as exc:
             print(f"  [RUN] Per-test AGV move to '{kid}' failed (continuing): {exc}")

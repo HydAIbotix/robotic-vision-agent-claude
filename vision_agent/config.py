@@ -62,6 +62,27 @@ class Settings(BaseSettings):
     app_map_path: str = "app_map.json"
     use_app_map_cache: bool = True
 
+    # ── Tier-1 screen determination: template matching (0 LLM) ────────────────
+    # Real-robot screen identity uses normalized cross-correlation template matching
+    # (cv2.matchTemplate TM_CCOEFF_NORMED, full-frame) against a per-screen reference image —
+    # far more robust to the browser↔camera domain gap (lighting/contrast/colour-cast/blur/JPEG)
+    # than the legacy 16×16 aHash, which could not bridge it. See vision_agent/vision/template_match.py.
+    #   use_template_screen_match — master toggle. True: template matching is the Tier-1 screen
+    #        identifier for the real backend (aHash remains a fallback when no reference image exists,
+    #        so setups without reference files never regress). False: legacy aHash-only behaviour.
+    #   template_match_threshold  — minimum TM_CCOEFF_NORMED score (peak, -1..1) to accept a match.
+    #   template_match_margin     — the winning score must beat the runner-up by at least this much
+    #        (discrimination guard, so a globally-bright frame cannot false-match a different screen).
+    #   template_ref_dir          — in-repo folder of clean per-screen reference templates. A file
+    #        named exactly "<screen_id>.png" (e.g. "login.png") — or whose name contains the screen_id,
+    #        e.g. "Login_page.png" — OVERRIDES that screen's app_map reference_screenshot. Build this
+    #        camera-domain library with POST /api/vision-test/save-reference (or capture_reference.py).
+    #        Missing folder → no overrides (app_map references are used), so this default never regresses.
+    use_template_screen_match: bool = True
+    template_match_threshold: float = 0.55
+    template_match_margin: float = 0.06
+    template_ref_dir: str = "./reference_screens"
+
     # App Explorer mode:
     #   "claude"          — screenshot → Claude vision → elements (default; works for all backends)
     #   "playwright_aria" — ARIA accessibility tree → elements (playwright backend only; 0 LLM calls)
@@ -157,6 +178,14 @@ class Settings(BaseSettings):
     # fail the step gracefully (see run_vision_step's try/except → Tier-3/fail path). Kept small and
     # configurable so a hung robot never stalls a whole suite. Applies to every real-robot API call.
     robot_response_timeout_s: float = 2.0
+
+    # Per-test AGV positioning gate (real backend only). When True (default), the runner drives the
+    # AGV to a test's kiosk BEFORE the test ONLY if the test's steps explicitly ask to move the base
+    # (words like "move to", "go to", "navigate to", "drive to", referencing a kiosk/device/AGV/home).
+    # A test that never mentions moving (e.g. a single-kiosk sign-in) leaves the robot where it is —
+    # so the robot is assumed already parked at the target kiosk. Explicit `move` PLAN steps are
+    # unaffected (they always drive the base). Set False to restore the old always-position behaviour.
+    agv_move_requires_explicit_step: bool = True
 
     # Management API (FastAPI server for management frontend)
     api_host: str = "0.0.0.0"

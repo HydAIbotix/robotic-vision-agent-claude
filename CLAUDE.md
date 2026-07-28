@@ -815,6 +815,196 @@ bit until a real camera frame reached Claude. Generic fix (no behaviour change f
   `no_match` (browser↔camera domain gap — expected, falls to Claude vision per [[camera-vision-test-2026-07-16]]);
   tapping uses app_map coords (camera quality irrelevant to taps). See the Tier clarifications below.
 
+### Template-matching Tier-1 screen determination REPLACES aHash + arm-health `ready` fix (2026-07-28)
+
+Two changes, both tested against the LIVE arm at **192.168.0.106** (`/capture type=screen`,
+`/arm/state`). The Tier-1 screen-identity change is the fix for the long-standing camera↔browser
+domain gap that made aHash fail on real camera frames.
+
+**Task 1 — replaced the aHash screen matcher with normalized-cross-correlation TEMPLATE MATCHING**
+(ported from the proven `Agentic_Orchestrator` vision layer — `ObjectFinder-BaseFormat.find_template_image`
++ `login_happy_path.template_match_score`). Reviewed that repo's whole vision layer (template matching,
+element/coord detection via `find_form_fields`/`find_keyboard_chars`, OCR title check `verify_pagename`,
+popup detection); the piece that makes screen ID robust is `cv2.matchTemplate(TM_CCOEFF_NORMED)` on
+grayscale FULL frames (template resized to page size). It subtracts the mean + normalizes variance, so a
+uniform brightness/contrast/colour-cast change (exactly the camera↔browser difference) barely moves the
+score — where aHash's 16×16 brightness fingerprint could not bridge it.
+
+- **Measured on the LIVE arm login frame** (camera photo, glare/blur/keystone/blue-cast, 1291×547):
+  template matching scores **login 0.65 vs products 0.49** (clean separation, correct screen wins);
+  aHash gave **login d=23, products d=25** (both in the >20 mismatch band, indistinguishable). So aHash
+  said `no_match`; template matching said **`login`**. The app_map's OWN stored login reference
+  (`explore_entry.png`, a browser shot shared with kiosk-1) only scores 0.27 — confirming the operator's
+  clean templates in `Image_processor/uploads` (`Login_page.png`, `Products_page.png`) are the right
+  references. Full real-robot `run_validate_pipeline('login', …)` on the live frame → **PASS, method=
+  `template_match`, 0 LLM.**
+- **New module `vision_agent/vision/template_match.py`** (pure PIL/OpenCV, no LLM/network):
+  `template_match_score` (the ported scorer), `resolve_template_ref` (filename→screen_id: `Login_page.png`
+  → `login`), `build_references` (override dir wins over app_map `reference_screenshot`), `rank_references`,
+  and `identify_screen` (returns the SAME `{success, actual_screen, score, method, ranking}` contract as the
+  old `_match_by_phash`). Match rule: expected clears `template_match_threshold` (0.55) and is the top scorer
+  → True; a different screen clears the floor and beats expected by `template_match_margin` (0.06) → mismatch;
+  else None (inconclusive).
+- **Wired into the REAL-ROBOT screen-identity path** (`validate_pipeline._real_screen_identity` → new
+  `_match_by_template`, aHash `_match_by_phash` kept as FALLBACK only when no reference image exists — so
+  setups without reference files and the toggle-off path keep byte-identical old behaviour). Also upgraded
+  `real_robot.verify_current_screen` from pixel-MSE to the same template matcher (pixel-MSE kept as a
+  fallback). **No-regression design:** a template MATCH is a confident 0-LLM win; a template MISMATCH is
+  DOWNGRADED to inconclusive (`_match_by_template` sets success=None) so Claude vision — not template
+  matching — remains the authority on a wrong-screen HARD FAIL. This is strictly additive over the legacy
+  aHash path (which also returned inconclusive on camera frames): we only ADD confident matches, never new
+  hard fails. Playwright uses DOM (`robot.verify_current_screen`) and demo is always-true — both UNCHANGED.
+- **Config** (`vision_agent/config.py`, `.env`): `use_template_screen_match` (default True),
+  `template_match_threshold` (0.55), `template_match_margin` (0.06), `template_ref_dir` (folder of clean
+  per-screen templates; a filename containing the screen_id overrides that screen's app_map reference).
+  `.env` now sets `TEMPLATE_REF_DIR=…\Image_processor\uploads` so the operator's real RPS login run gets
+  a Tier-1 template match immediately (login/products from the uploads templates; other screens fall back
+  to app_map refs → inconclusive → Claude, exactly as before).
+- **Camera Vision Test page** now shows the template-match verdict as the PRIMARY Tier-1 result: backend
+  `POST /api/vision-test/analyze` returns a `template_match` block (verdict + per-screen score ranking) and
+  the recommendation LEADS with it; frontend `CameraVisionTest.tsx` renders a new template-match card
+  (`client.ts` gained `VisionTemplateMatch`). aHash block kept below for continuity. Verified live: the
+  endpoint returns `template_match success=True '(login, 0.65)'` on a fresh arm capture.
+- **Tests:** new `tests/test_template_match.py` (12/12, run with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` — a
+  langsmith pytest-plugin DLL is blocked by an Application-Control policy on this box, unrelated to our
+  code) asserts the scorer, filename→screen mapping, override precedence, all four `identify_screen`
+  verdicts, and that the pipeline wrapper downgrades a mismatch to inconclusive. `tests/test_camera_vision.py`
+  still green (15/15). All edited modules + `api.main` import clean; frontend `tsc -b` clean.
+- **NOTE on `template_ref_dir` for production Tier-1:** with it BLANK, `login` falls back to the poor
+  `explore_entry.png` (0.27 < 0.55) → inconclusive → Claude (no 0-LLM win, but correct). To get 0-LLM
+  Tier-1 on the real robot, point `template_ref_dir` at good per-screen templates (done in `.env`). The
+  ideal long-term references are CAMERA-domain (a per-screen camera-reference pass), but clean browser
+  templates already cross the 0.55 floor on the live login frame.
+
+**Follow-up (same day) — in-repo reference folder + capture tooling + exact-stem matching.**
+- **References moved in-repo:** new **`reference_screens/`** folder at repo root (was pointing at the
+  external `Image_processor/uploads`). `settings.template_ref_dir` default is now `./reference_screens`
+  and `.env` `TEMPLATE_REF_DIR=./reference_screens`. The two known templates were copied there with the
+  canonical exact names `login.png` / `products.png`. `.gitignore` ignores `reference_screens/*.png`
+  (per-environment generated data, like `app_map.json`) but keeps the folder + `README.md` tracked.
+  A missing folder → no overrides → app_map fallback (default is non-regressive).
+- **Refinement #1 — exact-stem match wins (`template_match.resolve_template_ref`).** Two passes:
+  (1) a file named exactly `<screen_id>.<ext>` (`login.png` → `login`) is chosen deterministically;
+  (2) else token-membership fallback (`Login_page.png` tokens {login,page} → `login`). Prefix matching
+  was REMOVED, so `product_detail.png` can never be mis-assigned to screen `products`. Older `*_page.png`
+  names still work via pass 2.
+- **Refinement #2 v1 — one-action reference capture** to build the camera-domain library screen-by-screen
+  (navigate the robot to a screen, then save the current frame as `<screen_id>.png`):
+  - Backend: `POST /api/vision-test/save-reference {screen_id, capture_type?, filename?}` — saves the
+    already-captured frame when `filename` is given (the frame the operator is viewing), else captures a
+    fresh arm frame; writes `<screen_id>.png` to `template_ref_dir` and returns a self-match score (~1.0).
+    Plus `GET /api/vision-test/references` (list), `GET /api/vision-test/reference-image/{f}` (serve),
+    `DELETE /api/vision-test/reference/{f}` — all `.name`-guarded (no traversal).
+  - CLI: **`python capture_reference.py --screen login`** (or `--list`) — same capture→save, arm URL from `.env`.
+  - Frontend: Camera Vision Test page gained a **"Reference template library"** card — a screen-id input
+    (datalist of app_map screens), a "Save captured frame as reference" button, and a thumbnail grid of
+    saved references with delete (`client.ts` gained `visionTestSaveReference/References/DeleteReference`
+    + types). The `save-reference` client passes the current `capture.filename` so it saves the exact frame shown.
+- **Verified live (arm 192.168.0.106):** references list shows `login`/`products` from `./reference_screens`;
+  `save-reference` (fresh capture AND from an existing frame) writes `<slug>.png` with self-score 1.0;
+  `analyze expected=login` still `template_match success=True (login 0.64)` off the in-repo folder; CLI
+  `--list` and `--screen` both work; delete cleans up. Tests: `tests/test_template_match.py` 15/15 (added
+  exact-stem-preference + no-prefix-collision + token-fallback cases); `tests/test_camera_vision.py` 15/15;
+  frontend `tsc -b` clean; all backend imports clean. Fixed one bug found in testing: an `UnboundLocalError`
+  on `base` in the save-reference `filename` path (now initialised to `""`).
+
+**Operator Q — camera at a top angle, yet `type=screen` looks straight; do I need a special arm pose?**
+`type=raw` is the unrectified sensor frame (shows the oblique/top angle). `type=screen` is **software
+rectified**: the robot detects the AprilTag fiducials around the kiosk, computes the perspective
+**homography** that maps the tilted screen quad to a fronto-parallel rectangle, warps, and crops — so the
+straightening is done in software, NOT by moving the arm. Therefore you do NOT need a special pose just to
+get a straight image; and the `/screen/click` response already returns a rectified frame each tap
+(`capture_after_last`), which is why runtime verifies can reuse it. BUT image QUALITY (sharpness, framing,
+no occlusion) depends on pose: a closer, more fronto-parallel pose with all AprilTags in view gives crisper
+rectified frames and higher template scores. Recommendation: a dedicated **"observe" pose** (arm parks the
+camera closer + head-on, tags visible, no hand occlusion) is worth creating for BOTH reference capture and
+runtime verification, so references and live frames share geometry (maximises match scores). It's optional
+(the click-response frame works when rectification is consistent), and it costs one extra arm move per
+verify if you capture from it explicitly. Not needed for the image to be straight — only for quality/
+consistency. See [[agv-hardware-test-2026-07-13]].
+
+**Task 2 — arm health showed "Error" though the arm was fine** (`real_robot.health_check`, kiosk-test-studio
+Robot Setup page). Root cause: the check accepted only `state in ("idle","holding_card")`, but the physical
+arm reports **`ready`** when idle-and-available (same convention the AGV base uses — `_BASE_READY_STATES`).
+So a healthy `ready` arm was flagged `error` ("Arm reports state 'ready'"). Fix: new `_ARM_HEALTHY_STATES =
+{"idle","ready","holding_card"}`; the probe now marks the arm `ok` on any of them. Verified live: `/arm/state`
+returns `ready` → health component now `status: ok, "Arm responsive (state: ready)"`. Frontend needed NO
+logic change (it faithfully renders `comp.status`); only the `/arm/state` doc string on Robot Setup was
+updated to list `ready`. The AGV-base "unreachable at 192.168.0.101" error in the same screenshot is
+LEGITIMATE (the base controller was down) and was left untouched. See [[agv-hardware-test-2026-07-13]],
+[[camera-vision-test-2026-07-16]].
+
+### First live RPS sign-in run (TC-RPS-001) — 4 findings fixed (2026-07-28)
+
+Operator ran TC-RPS-001 on the real robot after the template-matching work. Four issues; fixes below,
+all no-regression (playwright/demo paths untouched; existing suites green).
+
+- **#1 — Camera Vision Test showed fallback methods even after a template MATCH.** When template matching
+  already identified the screen (0 LLM), the page still rendered the aHash recommendation banner ("NO
+  Tier-1 match…"), the aHash card, the OCR card, and the enhancement card — confusing noise. Fix
+  (`CameraVisionTest.tsx`): compute `templateOk = template_match.success === true` and hide those four
+  blocks when true (they only render as a FALLBACK when template matching did NOT match). Also renamed
+  the template card badge `MATCH` → **`TEMPLATE MATCH - 0-LLM screen identity`**. Frontend-only; `tsc -b` clean.
+- **#2 — Tap landed on the title, not the email field (big coordinate error).** Root cause is the
+  documented aspect-ratio mismatch: the app_map was explored at **1400×900** (14:9) with a stale
+  LEFT-aligned login layout (email center `[463,286]`), but the arm's rectified `/capture` frame is
+  **1291×547 (~2.36:1)** with the login form CENTERED (~`650,320`). `real_robot._scale` maps per-axis
+  (0.9221, 0.6078), which is only correct when the two share an aspect ratio — here they don't, so a
+  responsive app reflow put the tap at the wrong place (Y at 31% = the title band, not the 58% email
+  field). **This is not a code bug in the tap math — it's a viewport/exploration mismatch.** Fix:
+  `.env` `VIEWPORT_WIDTH=1291 / VIEWPORT_HEIGHT=547` (match the rectified-camera aspect; scale→~1.0), and
+  **the kiosk must be RE-EXPLORED** so app_map coordinates are re-learned at the matching centered layout.
+  (Robot Setup → "Match viewport to measured camera" sets the same values.) Cached plans carry the old
+  px/py, so **regenerate the TC-RPS-001 plan** (Test Intake → force) after re-exploring. No code change to
+  the scale pipeline — it was already correct; the inputs (viewport + app_map) were mismatched.
+- **#3 — Arm did not move at all (motion-planning failure).** The arm received a (u,v), computed a 3D
+  point, but couldn't plan a motion to it. This is a robot-side IK/reachability limit (myCobot 280, 280 mm
+  reach — it can't reach the whole 21″ screen; the title/top band the wrong #2 coordinate hit is among the
+  hardest to reach). Two things help: fixing #2 sends a correct, more central coordinate (the email field),
+  and the planned app-shrink-to-~50%-width brings the whole screen into reach. No coordinate-pipeline code
+  change is warranted; our side already fails the step gracefully on a robot error. Watch after #2: whether
+  the corrected email-field tap is reachable from the current pose.
+- **#4 — AGV was driven for a single-kiosk test with no move step.** `_position_for_test` (real backend)
+  ALWAYS drove the AGV to the test's kiosk before the test; TC-RPS-001 has no movement step, yet it tried
+  `navigate_to_kiosk('kiosk-2')` and (with the AGV controller down) logged a connect-timeout. Fix
+  (`run_vision_step.py` + `config.py`): new `_test_wants_agv_move(tc)` scans the test's `steps_raw` for an
+  explicit base-movement phrase (a verb — move/go/navigate/drive/travel/return — near a device/kiosk/AGV/
+  home token; "go to the products page" and "proceed to payment" do NOT match). The real branch of
+  `_position_for_test` now skips the AGV move unless intent is present, gated by new setting
+  `agv_move_requires_explicit_step` (default True; set False to restore always-move). Explicit `move` PLAN
+  steps are unaffected (they always drive during execution). Verified against real data: TC-RPS-001 →
+  no move; TC-AGV-001 ("Go to VPS device / Go back home") and TC-E2E-001 ("Move to RPS…") → move. Playwright
+  per-test browser URL switch (not an AGV command, essential for suite isolation) is UNCHANGED.
+- **Tests:** new `tests/test_agv_gate.py` 7/7 (intent detection + gate behaviour incl. the disabled-gate
+  legacy path); `tests/test_template_match.py` 15/15; `tests/test_camera_vision.py` 15/15; all imports
+  clean; frontend `tsc -b` clean. See [[agv-hardware-test-2026-07-13]], [[camera-vision-test-2026-07-16]].
+
+**Live iteration on the same run (2026-07-28) — #2 and #3 resolved, then a new arm-poll fix:**
+- **#2 confirmed fixed live:** after re-exploring at `1291×547` + regenerating the plan, the arm tap
+  landed ON the email field (was the title). Template match still `login` (score 0.65, 0 LLM). The
+  operator viewport must equal the rectified-camera aspect — a single global setting, re-explore after
+  changing (one run re-captures all pages).
+- **#3 was a reach limit, resolved by moving the robot closer.** The robot log showed a correct 3D
+  projection but a PTP target `x=0.386 m` forward — beyond the myCobot 280's ~0.28 m reach → MoveIt
+  couldn't plan → arm didn't move. NOT a software bug. Moving the base ~15 cm closer brought targets
+  into reach and **the arm clicked the email field**. (The app-shrink-to-50% plan stacks with this.)
+- **NEW FIX — arm tap-poll hung at `ready` (30 s timeout → abort → step fail).** After the arm
+  physically clicked email, `_poll("/arm/state", …)` waited for state `idle`, but the real arm settles
+  to **`ready`** (the same convention the AGV base + health check already use) — so it polled 30 s,
+  aborted (`/arm/abort`), failed the step, and fell to Tier-3. This was the last place the `ready` state
+  wasn't handled. Fix (`real_robot.py`): new `_ARM_TERMINAL_STATES = {"idle","ready"}` is the `_poll`
+  default (tap/type/swipe); and the cmd_id gate is now lenient — complete when the state is terminal AND
+  the controller echoes OUR cmd_id **or echoes no usable cmd_id** (state-authoritative, matching
+  `_poll_base`), so it can't hang if the arm doesn't echo. `error` still fails fast; a never-terminal
+  arm still times out; card ops keep their explicit `_CARD_HOLD_STATES=("holding_card","idle")` (a card
+  pick must NOT be "done" at bare `ready`). `type_text` uses the same default `_poll`, so typing is
+  covered; the keyboard_map is loaded in `_execute_run`, so after this fix the flow proceeds email-tap →
+  type → password → Sign In. New `tests/test_arm_poll.py` 6/6 (ready with/without cmd_id, idle still
+  works, error raises, never-terminal times out, card states unchanged). No regression: playwright/demo
+  use their own stubs; the base path (`_poll_base`) is untouched; card terminal states unchanged.
+  **User: re-run TC-RPS-001** — the email-tap poll should now complete on `ready` and typing should
+  follow. If it still times out, share the `/arm/state` response BODY (to see the echoed cmd_id/state).
+
 ### Tier architecture clarified + real-robot 0-LLM plan + Tier-3 cost (analysis only, 2026-07-23)
 
 Operator questions after the phone-photo test. **No code changed** — this records the architecture

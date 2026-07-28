@@ -43,3 +43,12 @@ htmlcov/
 # ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+
+# ── Screen reference templates (camera-domain, per-environment generated data) ──
+# The folder + README stay tracked; the captured PNG templates are per-setup, like app_map.json.
+reference_screens/*.png
+reference_screens/*.jpg
+reference_screens/*.jpeg
+reference_screens/*.bmp
+reference_screens/*.webp
+!reference_screens/README.md

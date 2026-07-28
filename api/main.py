@@ -1018,6 +1018,141 @@ def vision_test_image(filename: str):
     return FileResponse(str(path))
 
 
+# ── Reference-template library (camera-domain Tier-1 screen templates) ────────
+# Build a per-screen library so real-robot screen identity is 0 LLM: navigate the robot to a screen,
+# capture the current arm frame, and save it as "<screen_id>.png" in template_ref_dir. Template
+# matching (vision_agent/vision/template_match.py) then compares live frames against these.
+
+def _template_ref_dir() -> Path:
+    d = Path(settings.template_ref_dir or "./reference_screens")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _safe_screen_slug(s: str) -> str:
+    """Normalise a screen_id to a safe filename stem (lowercase, alnum/_/- only). No path traversal."""
+    import re as _re
+    return _re.sub(r"[^a-z0-9_-]+", "_", (s or "").strip().lower()).strip("_-")
+
+
+class SaveReferenceRequest(BaseModel):
+    screen_id:    str
+    capture_type: str = "screen"        # "screen" (AprilTag-rectified — normal) | "raw"
+    filename:     Optional[str] = None  # save THIS already-captured vision-test frame; else capture fresh
+
+
+@app.post("/api/vision-test/save-reference")
+def vision_test_save_reference(req: SaveReferenceRequest):
+    """Save a kiosk-screen frame as the reference template for `screen_id` (<screen_id>.png in
+    template_ref_dir). If `filename` names an already-captured vision-test frame, that exact frame is
+    saved (no re-capture); otherwise the CURRENT arm frame is captured fresh. Build the camera-domain
+    library one screen at a time — navigate the robot to a screen, then call this. Overwrites an
+    existing template for that screen. Returns the saved path + a self-match score (should be ~1.0)."""
+    import requests as _rq
+    import time as _t
+    import base64 as _b64
+
+    slug = _safe_screen_slug(req.screen_id)
+    if not slug:
+        raise HTTPException(400, "screen_id is required")
+    ctype = (req.capture_type or "screen").lower()
+    if ctype not in ("screen", "raw"):
+        raise HTTPException(400, "capture_type must be 'screen' or 'raw'")
+
+    data: dict = {}
+    base = ""   # controller that served the frame ("" when saving an existing on-disk frame)
+    if req.filename:
+        # Save an already-captured vision-test frame (the one the operator is looking at).
+        src = _vision_test_dir() / Path(req.filename).name   # .name → no traversal
+        if not src.exists() or not src.is_file():
+            raise HTTPException(404, f"Frame {req.filename!r} not found — capture or upload first")
+        img_bytes = src.read_bytes()
+    else:
+        # Capture a fresh frame from the arm.
+        base   = settings.arm_api_base()
+        url    = f"{base}/capture"
+        cmd_id = f"save-ref-{slug}-{int(_t.time() * 1000)}"
+        try:
+            resp = _rq.post(url, json={"cmd_id": cmd_id, "type": ctype}, timeout=30.0)
+        except Exception as e:
+            raise HTTPException(502, f"Capture failed calling {url}: {type(e).__name__}: {e}")
+        if not resp.ok:
+            raise HTTPException(502, f"Capture returned HTTP {resp.status_code} from {url}: {resp.text[:300]}")
+        try:
+            data = resp.json()
+            img_bytes = _b64.b64decode(data["image_b64"])
+        except Exception as e:
+            raise HTTPException(502, f"Capture response missing/!decodable image_b64: {e}")
+
+    dest = _template_ref_dir() / f"{slug}.png"
+    dest.write_bytes(img_bytes)
+
+    # Self-match sanity: the saved template vs itself should score ~1.0 (proves it's readable).
+    self_score = None
+    try:
+        from vision_agent.vision.template_match import _to_bgr_from_bytes, template_match_score
+        bgr = _to_bgr_from_bytes(img_bytes)
+        self_score = round(template_match_score(bgr, bgr), 4)
+    except Exception:
+        pass
+
+    w, h = data.get("width"), data.get("height")
+    if not (w and h):
+        w, h = _img_dims(img_bytes)
+    return {
+        "status":       "ok",
+        "screen_id":    slug,
+        "filename":     dest.name,
+        "path":         str(dest),
+        "image_url":    f"/api/vision-test/reference-image/{dest.name}",
+        "width":        w,
+        "height":       h,
+        "bytes":        len(img_bytes),
+        "capture_type": ctype,
+        "self_score":   self_score,
+        "controller":   base,
+    }
+
+
+@app.get("/api/vision-test/references")
+def vision_test_references():
+    """List the saved per-screen reference templates in template_ref_dir."""
+    d = _template_ref_dir()
+    exts = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+    items = []
+    for f in sorted(d.iterdir()):
+        if not f.is_file() or f.suffix.lower() not in exts:
+            continue
+        w, h = _img_dims(f.read_bytes())
+        items.append({
+            "screen_id": f.stem,
+            "filename":  f.name,
+            "image_url": f"/api/vision-test/reference-image/{f.name}",
+            "width":     w,
+            "height":    h,
+            "bytes":     f.stat().st_size,
+        })
+    return {"status": "ok", "dir": str(d), "count": len(items), "references": items}
+
+
+@app.get("/api/vision-test/reference-image/{filename}")
+def vision_test_reference_image(filename: str):
+    from fastapi.responses import FileResponse
+    path = _template_ref_dir() / Path(filename).name   # .name → no path traversal
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, "Not found")
+    return FileResponse(str(path))
+
+
+@app.delete("/api/vision-test/reference/{filename}")
+def vision_test_delete_reference(filename: str):
+    path = _template_ref_dir() / Path(filename).name   # .name → no path traversal
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, "Not found")
+    path.unlink()
+    return {"status": "ok", "deleted": path.name}
+
+
 class VisionAnalyzeRequest(BaseModel):
     filename:        str
     expected_screen: Optional[str] = None   # optional: also report the phash distance to this screen
@@ -1114,6 +1249,31 @@ def vision_test_analyze(req: VisionAnalyzeRequest):
     if req.expected_screen and req.expected_screen in screens and screens[req.expected_screen].get("screen_hash"):
         expected_distance = _hamming(current_hash, screens[req.expected_screen]["screen_hash"])
 
+    # ── 1b. Tier-1 TEMPLATE MATCHING (0 LLM) — the robust screen identifier ────
+    # Normalized cross-correlation (TM_CCOEFF_NORMED) against each screen's reference image. Unlike
+    # aHash, it bridges the camera↔browser domain gap, so this is the primary real-robot Tier-1.
+    template_match = None
+    try:
+        from vision_agent.vision.template_match import build_references, identify_screen
+        t_refs = build_references(app_map, settings.template_ref_dir)
+        t_res  = identify_screen(
+            proc_bytes, t_refs, req.expected_screen or "",
+            settings.template_match_threshold, settings.template_match_margin,
+        )
+        template_match = {
+            "method":          t_res.get("method"),
+            "success":         t_res.get("success"),
+            "best":            (t_res.get("ranking") or [None])[0],
+            "score":           t_res.get("score"),
+            "ranking":         (t_res.get("ranking") or [])[:10],
+            "reference_count": len(t_refs),
+            "reference_dir":   settings.template_ref_dir or "",
+            "threshold":       settings.template_match_threshold,
+            "margin":          settings.template_match_margin,
+        }
+    except Exception as e:
+        template_match = {"error": f"{type(e).__name__}: {e}", "ranking": []}
+
     # ── 2. OpenCV boundary detection (0 LLM) ──────────────────────────────────
     opencv_rects: list[dict] = []
     opencv_error = ""
@@ -1193,12 +1353,34 @@ def vision_test_analyze(req: VisionAnalyzeRequest):
                           "only screen/text VALIDATION pays an LLM call. The enhanced-frame results below "
                           "show whether local preprocessing recovers OCR/edges on this capture.")
 
+    # Lead the recommendation with the TEMPLATE-MATCH verdict (the primary real-robot Tier-1),
+    # then keep the aHash guidance below it for continuity.
+    _tb = template_match.get("best") if isinstance(template_match, dict) else None
+    _ts = template_match.get("success") if isinstance(template_match, dict) else None
+    if _ts is True and _tb:
+        template_reco = (f"Tier-1 TEMPLATE MATCHING identifies this as '{_tb['screen_id']}' "
+                         f"(score {_tb['score']} ≥ {settings.template_match_threshold}) — 0-LLM screen "
+                         f"identity. This is the primary real-robot screen identifier; it is robust to "
+                         f"the camera↔browser gap (normalized cross-correlation), unlike aHash below.")
+    elif _tb:
+        template_reco = (f"Tier-1 template matching ranks '{_tb['screen_id']}' highest (score {_tb['score']}), "
+                         f"but under the {settings.template_match_threshold} match floor (margin "
+                         f"{settings.template_match_margin}). Add a cleaner per-screen reference template "
+                         f"(drop a file named after the screen into template_ref_dir) to push it over — "
+                         f"template matching still discriminates far better than the aHash below.")
+    else:
+        template_reco = ("No template references available. Set template_ref_dir to a folder of per-screen "
+                         "templates (each filename containing its screen_id, e.g. Login_page.png → 'login'), "
+                         "or explore the app so reference_screenshot images exist.")
+    recommendation = template_reco + "  " + recommendation
+
     return {
         "status":       "ok",
         "filename":     req.filename,
         "width":        img_w,
         "height":       img_h,
         "current_hash": current_hash,
+        "template_match": template_match,
         "tier1": {
             "verdict":           tier1_verdict,
             "detail":            tier1_detail,
