@@ -246,43 +246,145 @@ def _get_quiet(endpoint: str, timeout: Optional[float] = None) -> dict:
     return resp.json()
 
 
+def _arm_status(endpoint: str, cmd_id: str, state: str, label: str, elapsed: float) -> None:
+    """Push ONE consolidated [ROBOT ARM] progress tick to the live monitor while polling an arm
+    command, so the operator sees 'what the arm is doing' instead of dozens of raw GET /arm/state
+    lines. Not an HTTP record and not stored in the ring-buffer (delivered via the push sink), so the
+    runner's post-step pull-flush never double-emits it. Mirrors the AGV _status tick."""
+    now  = time.time()
+    host = _host_of(_base_for(endpoint))
+    evt  = {
+        "event_type":    "STATUS",
+        "endpoint":      endpoint,
+        "cmd_id":        cmd_id,
+        "robot_id":      settings.robot_id,
+        "controller":    host,
+        "response_at":   now,
+        "response_time": _now_hms(now),
+        "state":         state,
+        "operation":     label,
+        "elapsed_s":     round(elapsed, 1),
+    }
+    _push(evt)
+    print(f"    [ROBOT ARM] {evt['response_time']} {label or endpoint}"
+          f"{(' (' + cmd_id + ')') if cmd_id else ''} @ {host} — state='{state}' ({elapsed:.0f}s)")
+
+
+def _recover_arm() -> None:
+    """Recover the arm to a known-safe state after an ERROR or a stuck-moving TIMEOUT, per the spec
+    ('use /arm/abort + /arm/command {action:"home"} to recover from error states before issuing new
+    commands'). Best-effort and NEVER raises — recovery must not mask the original failure. Bounded
+    wait for the home move to settle; does NOT recurse into _poll."""
+    try:
+        _post("/arm/abort", {"cmd_id": _new_cmd_id("arm-abort")},
+              timeout=settings.robot_response_timeout_s)
+    except Exception:
+        pass
+    try:
+        _post("/arm/command", {"cmd_id": _new_cmd_id("arm-home"), "action": "home"},
+              timeout=settings.robot_response_timeout_s)
+    except Exception as exc:
+        print(f"    [ROBOT ARM] home command failed during recovery (ignored): {exc}")
+        return
+    deadline = time.time() + settings.arm_move_timeout_s
+    while time.time() < deadline:
+        try:
+            st = str(_get_quiet("/arm/state").get("state", "")).lower()
+        except Exception:
+            break
+        if st and st != "moving":
+            print(f"    [ROBOT ARM] recovered to home (state='{st}')")
+            return
+        time.sleep(settings.robot_poll_interval_s)
+    print("    [ROBOT ARM] home recovery did not confirm within timeout")
+
+
 def _poll(
     state_ep: str,
     cmd_id:   str,
     timeout_s: float,
     abort_ep: Optional[str] = None,
-    terminal_states: tuple = _ARM_TERMINAL_STATES,
+    terminal_states: Optional[tuple] = None,
+    initial_state: str = "",
+    label: str = "",
+    recover_on_fail: bool = True,
 ) -> dict:
-    """Poll state_ep until the ARM finishes the command (terminal state), or timeout. Used for the ARM
-    (fast, sub-second taps/typing/swipes). The physical arm settles to "ready" (NOT the spec's "idle")
-    when a tap completes — same convention the AGV base uses — so BOTH are terminal (_ARM_TERMINAL_STATES).
-    A card pick/tap completes in "holding_card" (arm keeps gripping the card), so those callers pass an
-    explicit terminal_states. The AGV base uses _poll_base instead.
+    """Poll GET state_ep until the ARM command FINISHES, per the robot API spec: the click/type result
+    is available 'once state is no longer moving'. Returns the final state dict (the caller inspects
+    click_result for completed/total). Used for the ARM (taps / typing / swipes / card ops); the AGV
+    base uses _poll_base.
 
-    cmd_id gating: complete when the state is terminal AND the controller either echoes OUR cmd_id or
-    echoes no usable cmd_id at all (some controllers return an empty/placeholder id — then the STATE is
-    authoritative, matching _poll_base). This avoids a 30s timeout when the arm sits at "ready"."""
-    deadline = time.time() + timeout_s
+    Completion is STATE-AUTHORITATIVE — the arm echoes its OWN last cmd_id (e.g. 'c-030'), never the
+    one we sent, so we do NOT gate on a cmd_id match (doing so caused 30s timeouts). Rules:
+      • state == "error"          → the command FAILED (spec surfaces errors via the state endpoint);
+                                     recover (abort + home) and raise.
+      • state == "moving"         → still in progress; keep polling.
+      • any other non-empty state → the command is DONE (idle / ready / holding_card / …). Return it.
+        When terminal_states is given (card ops), completion ADDITIONALLY requires the state to be in
+        that set, so a card pick isn't 'done' at a bare 'idle' mid-motion.
+
+    Race guard: if the POST ack reported the command 'moving' (initial_state), we wait to OBSERVE a
+    'moving' sample — or a short settle grace (arm_settle_grace_s) — before accepting a terminal
+    state, so a STALE pre-command 'ready' can't be misread as instant completion.
+
+    Live feed: polls QUIETLY (via _get_quiet — no per-GET spam) and pushes ONE consolidated
+    [ROBOT ARM] status tick per arm_status_tick_s while the arm is busy. On timeout (arm stuck in
+    'moving'): abort + recover, then raise TimeoutError."""
+    deadline      = time.time() + timeout_s
+    start         = time.time()
+    expect_moving = str(initial_state).lower() == "moving"
+    seen_moving   = False
+    last_tick     = 0.0
     last_state: dict = {}
+    if label:
+        _arm_status(state_ep, cmd_id, str(initial_state or "moving"), label, 0.0)
+        last_tick = time.time()
+
     while time.time() < deadline:
-        last_state = _get(state_ep)
-        s = str(last_state.get("state", "")).lower()
+        try:
+            last_state = _get_quiet(state_ep)
+        except Exception as exc:
+            # A transient state-read error shouldn't abort the whole command; retry until deadline.
+            print(f"    [ROBOT ARM] state read error (retrying): {exc}")
+            time.sleep(settings.robot_poll_interval_s)
+            continue
+        s       = str(last_state.get("state", "")).lower()
+        elapsed = time.time() - start
+        now     = time.time()
+        if label and (now - last_tick) >= settings.arm_status_tick_s:
+            _arm_status(state_ep, cmd_id, s or "?", label, elapsed)
+            last_tick = now
+
         if s == "error":
-            raise RuntimeError(f"Robot error on {state_ep}: {last_state}")
-        echoed = last_state.get("cmd_id")
-        if s in terminal_states and (echoed == cmd_id or not echoed):
-            return last_state
+            if label:
+                _arm_status(state_ep, cmd_id, "error", f"{label} — FAILED", elapsed)
+            if recover_on_fail:
+                _recover_arm()
+            raise RuntimeError(
+                f"Robot {state_ep} reported state 'error' for {label or cmd_id}: {last_state}")
+
+        if s == "moving":
+            seen_moving = True
+        elif s:
+            # Non-empty, non-moving, non-error → potential completion.
+            accepted = (s in terminal_states) if terminal_states else True
+            if accepted and (seen_moving or not expect_moving or elapsed >= settings.arm_settle_grace_s):
+                if label:
+                    _arm_status(state_ep, cmd_id, s, f"{label} — done", elapsed)
+                return last_state
         time.sleep(settings.robot_poll_interval_s)
 
-    # Timed out — attempt graceful abort
+    # Timed out — the arm never left 'moving'. Abort + recover so the NEXT command starts clean.
     if abort_ep:
         try:
             _abort_label = abort_ep.strip("/").replace("/", "-")  # /arm/abort → arm-abort
             _post(abort_ep, {"cmd_id": _new_cmd_id(_abort_label)}, timeout=settings.robot_response_timeout_s)
         except Exception:
             pass
+    if recover_on_fail:
+        _recover_arm()
     raise TimeoutError(
-        f"Robot {state_ep} timed out after {timeout_s}s "
+        f"Robot {state_ep} timed out after {timeout_s}s for {label or cmd_id} "
         f"(last state: {last_state.get('state')!r})"
     )
 
@@ -414,7 +516,10 @@ def capture_screen(save_path: str) -> dict:
     resp = requests.post(
         f"{_arm_base_url()}/capture",
         json={"cmd_id": cmd_id, "type": "screen"},   # spec: every command carries a cmd_id
-        timeout=_resp_timeout(),
+        # /capture is blocking and moves the arm to an inspection pose first — needs a generous
+        # timeout, not the 2s per-call default (which read-timed-out after a failed tap left the arm
+        # away from the inspect pose).
+        timeout=_resp_timeout(settings.capture_timeout_s),
     )
     t1 = time.time()
     _record("POST", "/capture", cmd_id, t0, t1, resp.status_code, {})
@@ -442,6 +547,32 @@ def capture_screen(save_path: str) -> dict:
     }
 
 
+def _check_click_completed(state: dict, post_resp: dict, cmd_id: str) -> None:
+    """Raise if the /screen/click sequence reported a failed/partial completion.
+
+    Per the robot API spec, GET /arm/state after a click carries a ``click_result`` with
+    ``completed``/``total`` (plus ``code``/``failed_index``/``detail`` on failure).  The physical arm
+    can return a TERMINAL state ("ready"/"idle") even when the touch itself FAILED — observed on
+    hardware 2026-07-29: a ``DESCEND_LIN_FAILED`` left ``completed=0/total=1`` while the state went
+    back to idle, so our state-only poll treated a click that never landed as success and the run
+    proceeded to type into an unfocused field.  The state alone is therefore not sufficient; inspect
+    the click_result.
+
+    Only raises when the result is PRESENT and explicitly incomplete — a missing click_result (no
+    ``capture_after_last``, or an older controller) is treated as OK, so this never manufactures a
+    false failure for callers that don't request a completion frame."""
+    cr = state.get("click_result") or post_resp.get("click_result") or {}
+    total     = cr.get("total")
+    completed = cr.get("completed")
+    if total is not None and completed is not None and completed < total:
+        code   = cr.get("code")
+        detail = cr.get("detail") or code or "click did not land"
+        extra  = f" (code={code}, failed_index={cr.get('failed_index')})" if code else ""
+        raise RuntimeError(
+            f"Arm click {cmd_id} did NOT land: completed {completed}/{total}{extra} — {detail}"
+        )
+
+
 def tap(x: int, y: int) -> dict:
     """Physically tap kiosk touchscreen at viewport pixel (x, y).
 
@@ -463,7 +594,12 @@ def tap(x: int, y: int) -> dict:
         "capture_after_last": True,
         "delay_between_ms":   800,
     })
-    state = _poll("/arm/state", cmd_id, settings.arm_move_timeout_s, abort_ep="/arm/abort")
+    state = _poll("/arm/state", cmd_id, settings.arm_move_timeout_s, abort_ep="/arm/abort",
+                  initial_state=post_resp.get("state", ""), label=f"tap ({x},{y})")
+    # The arm can report a TERMINAL state even when the touch itself failed to land (e.g. a linear
+    # descend that could not be planned) — verify the click_result actually completed, else raise so
+    # the runner fails this step and hands off to Tier-3 instead of typing into an unfocused field.
+    _check_click_completed(state, post_resp, cmd_id)
     # After the arm confirms tap complete, the kiosk still needs time to process the touch
     # event and complete any navigation (e.g. login API call + React re-render takes 300-700ms).
     # 0.2s was too short and caused the next camera capture to land mid-transition.
@@ -609,21 +745,52 @@ def type_text(text: str, clear_first: bool = False) -> dict:
     if skipped:
         print(f"    [ROBOT] type: keys not in keyboard_map — skipped: {skipped!r}")
 
-    if not points:
+    char_points = points   # taps that actually enter characters
+
+    # A caller that asked to type real characters, none of which are in the keyboard_map, cannot
+    # enter the value — report failure so the runner trips Tier-3 (matches the "no keyboard_map"
+    # contract) instead of silently reporting success on an empty field.
+    if text.strip() and not char_points:
+        print(f"    [ROBOT] type({text!r}) — no characters matched the keyboard_map; cannot type")
+        return {"success": False, "error": "no characters in keyboard_map", "text": text}
+
+    # Dismiss the on-screen keyboard by tapping its Done/return/enter key AFTER the characters —
+    # mirrors the playwright backend.  Without this the keyboard stays open and overlaps the next
+    # input, so the following focus tap lands on a key instead of the field (observed on RPS: the
+    # password field stayed covered after the email type, and the next arm move hung).  Also lets
+    # type_text("") act as a keyboard-dismiss (the App Explorer relies on that).
+    dismiss = (_keyboard_map.get("done") or _keyboard_map.get("return")
+               or _keyboard_map.get("enter"))
+    all_points = list(char_points)
+    if dismiss:
+        all_points.append({"u": int(dismiss[0] * cam_w), "v": int(dismiss[1] * cam_h)})
+
+    if not all_points:
         return {"success": True, "text": text, "tapped_keys": 0}
 
     cmd_id = _new_cmd_id("arm-type")
-    print(f"    [ROBOT] type({text!r}) — {len(points)} key taps")
-    _post("/screen/click", {
+    print(f"    [ROBOT] type({text!r}) — {len(char_points)} key taps" + (" + Done" if dismiss else ""))
+    type_resp = _post("/screen/click", {
         "cmd_id":           cmd_id,
-        "points":           points,
+        "points":           all_points,
         "delay_between_ms": 80,   # 80 ms between each key
     })
-    # type_text may take longer than a single tap — allow extra time
-    _poll("/arm/state", cmd_id,
-          settings.arm_move_timeout_s + len(points) * 0.1,
-          abort_ep="/arm/abort")
-    return {"success": True, "text": text, "tapped_keys": len(points)}
+    # Each key is its own physical hover→descend→touch→ascend on the arm, executed sequentially, so
+    # the deadline scales with the number of taps (see arm_key_tap_timeout_s) — NOT a flat +0.1s/key,
+    # which timed out mid-word on the real arm.
+    type_timeout = settings.arm_move_timeout_s + len(all_points) * settings.arm_key_tap_timeout_s
+    state = _poll("/arm/state", cmd_id, type_timeout, abort_ep="/arm/abort",
+                  initial_state=type_resp.get("state", ""),
+                  label=f"type {text[:20]!r} ({len(all_points)} taps)")
+    # If a key tap failed mid-sequence the remaining keys are aborted (completed < total) → the value
+    # was only partially entered.  Report failure so the runner re-tries via Tier-3 rather than
+    # proceeding with a half-typed field.
+    try:
+        _check_click_completed(state, type_resp, cmd_id)
+    except RuntimeError as exc:
+        print(f"    [ROBOT] type({text!r}) — {exc}")
+        return {"success": False, "error": str(exc), "text": text}
+    return {"success": True, "text": text, "tapped_keys": len(char_points)}
 
 
 def swipe(x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> dict:
@@ -633,12 +800,14 @@ def swipe(x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> dict:
     u2, v2 = _scale(x2, y2)
     cmd_id = _new_cmd_id("arm-swipe")
     print(f"    [ROBOT] swipe ({x1},{y1})→({x2},{y2})  [{duration_ms}ms]")
-    _post("/screen/click", {
+    swipe_resp = _post("/screen/click", {
         "cmd_id":           cmd_id,
         "points":           [{"u": u1, "v": v1}, {"u": u2, "v": v2}],
         "delay_between_ms": duration_ms,
     })
-    _poll("/arm/state", cmd_id, settings.arm_move_timeout_s, abort_ep="/arm/abort")
+    state = _poll("/arm/state", cmd_id, settings.arm_move_timeout_s, abort_ep="/arm/abort",
+                  initial_state=swipe_resp.get("state", ""), label=f"swipe ({x1},{y1})->({x2},{y2})")
+    _check_click_completed(state, swipe_resp, cmd_id)
     return {"success": True}
 
 
@@ -761,8 +930,9 @@ def card_pick(timeout_s: Optional[float] = None) -> dict:
     t      = timeout_s or settings.card_op_timeout_s
     cmd_id = _new_cmd_id("card-pick")
     print("  [ROBOT] card_pick")
-    _post("/card/pick", {"cmd_id": cmd_id})
-    return _poll("/arm/state", cmd_id, t, abort_ep="/arm/abort", terminal_states=_CARD_HOLD_STATES)
+    resp = _post("/card/pick", {"cmd_id": cmd_id})
+    return _poll("/arm/state", cmd_id, t, abort_ep="/arm/abort", terminal_states=_CARD_HOLD_STATES,
+                 initial_state=resp.get("state", ""), label="card_pick", recover_on_fail=False)
 
 
 def card_tap(reader_kiosk_id: str, timeout_s: Optional[float] = None) -> dict:
@@ -773,8 +943,10 @@ def card_tap(reader_kiosk_id: str, timeout_s: Optional[float] = None) -> dict:
     t      = timeout_s or settings.card_op_timeout_s
     cmd_id = _new_cmd_id(f"card-tap-{reader_kiosk_id}")
     print(f"  [ROBOT] card_tap → {reader_kiosk_id!r}")
-    _post("/card/tap", {"cmd_id": cmd_id})
-    return _poll("/arm/state", cmd_id, t, abort_ep="/arm/abort", terminal_states=_CARD_HOLD_STATES)
+    resp = _post("/card/tap", {"cmd_id": cmd_id})
+    return _poll("/arm/state", cmd_id, t, abort_ep="/arm/abort", terminal_states=_CARD_HOLD_STATES,
+                 initial_state=resp.get("state", ""), label=f"card_tap {reader_kiosk_id}",
+                 recover_on_fail=False)
 
 
 def card_replace(timeout_s: Optional[float] = None) -> dict:
@@ -783,8 +955,9 @@ def card_replace(timeout_s: Optional[float] = None) -> dict:
     t      = timeout_s or settings.card_op_timeout_s
     cmd_id = _new_cmd_id("card-replace")
     print("  [ROBOT] card_replace")
-    _post("/card/replace", {"cmd_id": cmd_id})
-    return _poll("/arm/state", cmd_id, t, abort_ep="/arm/abort")
+    resp = _post("/card/replace", {"cmd_id": cmd_id})
+    return _poll("/arm/state", cmd_id, t, abort_ep="/arm/abort",
+                 initial_state=resp.get("state", ""), label="card_replace", recover_on_fail=False)
 
 
 # ── Telemetry for management frontend ─────────────────────────────────────────

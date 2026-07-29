@@ -166,9 +166,31 @@ class Settings(BaseSettings):
 
     # Timeouts (seconds)
     base_move_timeout_s: float = 60.0
-    arm_move_timeout_s: float = 30.0
+    # Overall deadline for ONE arm click sequence (hover PTP → linear descend → touch → ascend →
+    # return).  The myCobot 280 is slow: a single Cartesian move can take 4-17s and a full click
+    # sequence 25-45s (observed on hardware 2026-07-29 — the ascend alone took 17.3s, pushing the
+    # total past the old 30s deadline so we aborted a click that had ALREADY touched the screen).
+    # 60s covers a full slow sequence with margin; a genuinely stuck arm still fails (state "error"
+    # is immediate, and a never-terminal arm times out at this deadline).  Configurable via
+    # ARM_MOVE_TIMEOUT_S.
+    arm_move_timeout_s: float = 60.0
+    # Per-key budget for on-screen-keyboard typing. type_text batches N key taps into ONE
+    # /screen/click, and the arm executes them SEQUENTIALLY — each key is its own hover→descend→
+    # touch→ascend mini-sequence (~5-15s on the myCobot 280).  So the type poll deadline must scale
+    # with the number of keys, NOT the old `+ len*0.1` (0.1s/key, which timed out mid-word).  Total
+    # type deadline = arm_move_timeout_s + N * arm_key_tap_timeout_s.  Configurable via
+    # ARM_KEY_TAP_TIMEOUT_S; a stuck arm still fails (state "error" is immediate).
+    arm_key_tap_timeout_s: float = 15.0
     card_op_timeout_s: float = 30.0
     robot_poll_interval_s: float = 0.5
+    # Arm-state polling (spec-aligned): a command is DONE "once state is no longer moving". If the
+    # POST ack said 'moving' we wait to observe a moving sample before accepting a terminal state, so
+    # a stale pre-command 'ready' can't be misread as completion; arm_settle_grace_s bounds that wait
+    # (also the max wait for a command that never enters 'moving'). arm_status_tick_s is how often a
+    # consolidated [ROBOT ARM] status line is pushed to the live monitor DURING a long move/type
+    # (instead of dozens of raw GET lines).
+    arm_settle_grace_s: float = 2.0
+    arm_status_tick_s: float = 3.0
     # How often to poll /base/state while the AGV is driving to a kiosk. The base move is slow
     # (seconds→tens of seconds), so a 2s cadence gives readable live status without hammering the
     # controller. Separate from the fast arm poll (robot_poll_interval_s) which times sub-second taps.
@@ -178,6 +200,13 @@ class Settings(BaseSettings):
     # fail the step gracefully (see run_vision_step's try/except → Tier-3/fail path). Kept small and
     # configurable so a hung robot never stalls a whole suite. Applies to every real-robot API call.
     robot_response_timeout_s: float = 2.0
+    # POST /capture is BLOCKING and runs the full perception pipeline — which per the spec MOVES the
+    # arm to an inspection pose first, then does AprilTag detection + rectification. That arm move can
+    # take several seconds (much longer than the 2s per-call timeout), especially right after a failed
+    # tap when the arm is not already at the inspect pose. Give /capture its own generous read timeout
+    # so the leading verify + Tier-3 handoff captures don't spuriously read-time-out. Configurable via
+    # CAPTURE_TIMEOUT_S. The robot itself returns 504 if its internal capture genuinely times out.
+    capture_timeout_s: float = 30.0
 
     # Per-test AGV positioning gate (real backend only). When True (default), the runner drives the
     # AGV to a test's kiosk BEFORE the test ONLY if the test's steps explicitly ask to move the base

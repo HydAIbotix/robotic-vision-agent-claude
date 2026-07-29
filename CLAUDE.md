@@ -1005,6 +1005,156 @@ all no-regression (playwright/demo paths untouched; existing suites green).
   **User: re-run TC-RPS-001** — the email-tap poll should now complete on `ready` and typing should
   follow. If it still times out, share the `/arm/state` response BODY (to see the echoed cmd_id/state).
 
+### Live RPS sign-in run #2 (TC-RPS-001, 2026-07-29) — arm typed nothing; 4 more root causes fixed
+
+The arm-poll fix worked (email tap-poll completed on `ready`), but sign-in still failed. Correlating
+OUR app log with the ROBOT-side ROS log (`Robot_Testing_Results/29-July/Robot_logs.txt`) + the arm's
+`/arm/state` (`{"state":"ready","cmd_id":"c-030"}` — the arm echoes its OWN command id, never ours)
+exposed FOUR distinct defects. All fixed generically (real-robot only where hardware-specific;
+playwright/demo untouched), `tests/test_keyboard_typing.py` 14/14 + `test_arm_poll` 6/6, full suite
+57/57 green, imports clean.
+
+- ✅ **#1 (PRIMARY) — the `keyboard_map` was silently DROPPED on save, so the arm had no keys to tap.**
+  Log: `[ROBOT] type('tester@kiosk.local') — keyboard_map not loaded; skipping`. The App Explorer DID
+  map the keyboard during the re-exploration (screenshot `keyboard_map_1785249625684.png` shows the full
+  QWERTY), but `app_map/store.merge_explored_app` rebuilt the merged multi-app map with ONLY
+  `app_name/explored_at/entry_screen/screens/apps` — it **discarded the top-level `keyboard_map`**. So
+  `app_map.json` had no keyboard and `real_robot.type_text` skipped every char. Fix: `merge_explored_app`
+  now preserves EVERY other top-level key (spread of `base` minus screens/apps) and carries the
+  keyboard_map (fresh exploration's wins, else the prior one is kept). **Recovery without a full
+  re-explore:** new `recover_keyboard_map.py` re-runs the SAME `MAP_KEYBOARD` vision prompt on the
+  screenshot the explorer already captured and injects `keyboard_map` into `app_map.json` (`--dry-run`
+  to preview). Ran it → 44 keys recovered (incl. `shift`/`@`/`.`/`done`), and both `tester@kiosk.local`
+  and `Password123` now fully map. app_map.json already patched, so the next run can type without
+  re-exploring.
+- ✅ **#2 — a `type` that couldn't type still reported the step as PASS (silent false-progress).**
+  `run_vision_step`'s `type` handler ignored `type_text`'s return, marking the step `success:True,
+  method:app_map` even when the real robot returned `{"success":False,"error":"keyboard_map not
+  loaded"}` — so the run proceeded to the password field with an EMPTY email. Fix: the handler now
+  honours the returned `success` flag — a `False` fails the step (`method:type_failed`) and hands off to
+  Tier-3. playwright/demo always return `success:True`, so no change for them. Answers the operator's Q2
+  ("if the step wasn't successful, is it failing the step?" — now YES).
+- ✅ **#3 — the arm reported a tap as done even when the touch FAILED to land.** Robot log:
+  `cmd-2-arm-click done status=failed completed=0/1 code=DESCEND_LIN_FAILED` — the arm hovered over
+  email but the **linear descend to touch the screen could not be planned**, yet `/arm/state` returned
+  to a TERMINAL `idle/ready` (NOT `error`), so our state-only `_poll` treated a click that never landed
+  as success. Fix: per the robot API spec, `/arm/state` after a click carries `click_result.completed/
+  total` (+ `code`/`failed_index` on failure) — new `real_robot._check_click_completed(state,post_resp,
+  cmd_id)` raises when `completed < total`; wired into `tap`, `type_text` (partial type → `success:
+  False`), and `swipe`. Only raises when a click_result is PRESENT and incomplete, so a missing result
+  (no `capture_after_last` / older controller) never manufactures a false failure. NB: the descend
+  failure itself is a PHYSICAL reach/kinematics limit — the email field sits higher on the screen
+  (hover z=0.217 failed; the lower password z=0.176 descended fine); remedies are the same as before
+  (move the base closer / the app-shrink-to-50% plan). Our fix makes us DETECT+report it (→ Tier-3)
+  instead of silently typing into an unfocused field.
+- ✅ **#4 — the 30 s arm timeout aborted a click that had ALREADY touched.** For the password tap the
+  descend succeeded but the **ascend alone took 17.3 s** (myCobot 280 is slow); hover+descend+ascend+
+  return exceeded 30 s, so `_poll` fired `/arm/abort` on a completed touch (then the abort itself read-
+  timed-out). Fix: `arm_move_timeout_s` default 30 → **60 s** (`ARM_MOVE_TIMEOUT_S`) — a full slow click
+  sequence fits with margin; a stuck arm still fails (`error` immediate; never-terminal times out at
+  60 s).
+- ✅ **Real-robot keyboard-dismiss parity.** playwright `type_text` taps the on-screen keyboard's Done
+  key after typing (so the next field isn't covered); `real_robot.type_text` did NOT — the open keyboard
+  overlapped the password field, so the following focus tap landed on the keyboard and the arm hung.
+  Fix: real `type_text` now appends the `done`/`return`/`enter` key from the keyboard_map after the char
+  taps (and `type_text("")` acts as a pure dismiss, which the explorer relies on). A type whose real
+  characters are NONE-of-them-mapped now returns `success:False` (can't enter the value) instead of a
+  false success.
+- **Files:** `app_map/store.py`, `test_runner/nodes/run_vision_step.py`, `vision_agent/robot/real_robot.py`,
+  `vision_agent/config.py`, new `recover_keyboard_map.py`, new `tests/test_keyboard_typing.py`.
+
+**Run #3 (TC-RPS-001, 2026-07-29 16:52) — reach FIXED, but backend was STALE + a typing-timeout bug:**
+- ✅ **The email descend now SUCCEEDS** (base moved closer): arm log `cmd-2 … hover=(0.319,-0.022,0.243)
+  … descend done (exec=4.047s)` — the arm physically TOUCHED the email field (last time it was
+  `DESCEND_LIN_FAILED`). Finding #3's reach limit is resolved by keeping the base close; template match
+  still `login` 0.83, 0 LLM.
+- ⚠️ **The run still used 30 s timeout, not the 60 s I set → the backend was running PRE-FIX code.** The
+  Studio launches uvicorn WITHOUT `--reload` (intentional), so NONE of the run #2 fixes were loaded. The
+  arm was cancelled mid-ASCEND at 30.5 s (`client cancelled during ascend`). **The API server must be
+  RESTARTED after any backend edit** — this is the #1 operational gotcha; a run that shows a stale
+  timeout value is the tell.
+- ✅ **NEW FIX — the typing poll deadline was absurdly short for a real arm.** `type_text` used
+  `arm_move_timeout_s + len(points)*0.1` (0.1 s/key). But the arm executes a batched multi-point
+  `/screen/click` SEQUENTIALLY — each key is its own hover→descend→touch→ascend (~5-15 s). 19 keys would
+  need minutes; the old formula allowed ~62 s → guaranteed mid-word timeout. Fix: new
+  `settings.arm_key_tap_timeout_s` (default 15 s, `ARM_KEY_TAP_TIMEOUT_S`); type deadline =
+  `arm_move_timeout_s + N * arm_key_tap_timeout_s` (e.g. 19 taps → 345 s ceiling; returns as soon as the
+  arm reports `ready`). `test_keyboard_typing` +1 (timeout scales with key count).
+- ✅ **Live read-only validation (arm 192.168.0.106, no motion):** `/capture type=screen` → 1441×572
+  (calibration scale 1.116/1.046); `verify_current_screen('login')` → `template_match match=True
+  conf=0.84` (0 LLM); keyboard coords for `t`/`@`/`done`/`shift` all resolve INSIDE the frame. So screen-
+  ID, calibration, and typing-coordinate building are confirmed healthy on the real arm; only the
+  physical typing motion remains to be seen on a live run.
+- **User (IMPORTANT): RESTART the backend** (stop the Studio's API / uvicorn and relaunch) so ALL run #2
+  + run #3 fixes load, then re-run TC-RPS-001. Expected: tap email (touches — keep base close) → type
+  `tester@kiosk.local` key-by-key (slow, ~1-3 min) → Done → tap password → type `Password123` → Done →
+  tap Sign In. Typing is inherently slow on the arm (physical per-key taps); tune `ARM_KEY_TAP_TIMEOUT_S`
+  if needed. If the email descend fails again, nudge the base closer/lower.
+
+### Full spec-alignment pass of the arm command/poll/error handling (2026-07-29)
+
+Re-reviewed `Design/robot_kiosk_api.md.pdf` end-to-end and aligned the real-backend command lifecycle
+to it. `test_arm_poll` rewritten 9/9, full suite 61/61 green, imports clean. Real-backend only —
+playwright/demo untouched.
+
+- ✅ **Batching CONFIRMED already correct.** `/screen/click` accepts an ARRAY of points and clicks them
+  sequentially; `real_robot.type_text` already batches ALL keys (+ the Done dismiss) into ONE
+  `/screen/click` — email and password each go in a single API call, not one call per character. The
+  per-character-timeout scaling from run #3 stays (`arm_move_timeout_s + N*arm_key_tap_timeout_s`).
+- ✅ **Completion is now STATE-AUTHORITATIVE, per the spec** ("the result is available by polling
+  GET /arm/state once state is no longer moving"). `_poll` rewritten: `moving` = in progress; ANY other
+  non-empty state (`idle`/`ready`/`holding_card`/…) = DONE; `error` = failed. The cmd_id gate is GONE —
+  the arm echoes its OWN last cmd_id (`c-030`), never ours, so matching it is wrong (it caused the 30s
+  hangs). We accept "not moving" generically instead of hard-coding `{idle,ready}`, so state-name
+  variants the spec doesn't enumerate can't hang us.
+- ✅ **Stale-state race guard.** The POST 202 ack reports `{state:"moving"}`; `_poll` now receives that
+  `initial_state` and, when a move is expected, waits to OBSERVE a `moving` sample (or a short
+  `arm_settle_grace_s`, default 2s) before accepting a terminal state — so a STALE pre-command `ready`
+  from the previous command can't be misread as instant completion. When no move is expected (blank
+  ack), a terminal state is accepted immediately (fast path, no regression for state queries).
+- ✅ **Error/timeout RECOVERY, per the spec** ("use /arm/abort + /arm/command {action:'home'} to recover
+  from error states before issuing new commands"). New `_recover_arm()` (abort → home → bounded settle
+  wait, best-effort, never raises) runs on a `state:"error"` and on a stuck-`moving` timeout, so the
+  NEXT command starts from a clean pose. A CLEAN-terminal-but-failed-click (`completed<total`, e.g.
+  `DESCEND_LIN_FAILED` that returns to `idle`) is NOT homed — the arm is already safe; it just reports
+  failure → Tier-3. Card ops pass `recover_on_fail=False` (homing while `holding_card` could drop the
+  card).
+- ✅ **Click success/failure read from `click_result`** (unchanged from run #2, now spec-cited):
+  `_check_click_completed` raises on `completed<total` (+ `code`/`failed_index`) in `tap`/`type_text`/
+  `swipe`; a partial type → `success:False`.
+- ✅ **Live feed is now CLEAR.** The arm poll uses `_get_quiet` (no per-GET `[ROBOT API]` spam — the
+  earlier logs had ~60 raw `GET /arm/state` lines per tap) and instead pushes ONE consolidated
+  `[ROBOT ARM] hh:mm:ss.mmm <operation> — state='moving' (Ns)` tick every `arm_status_tick_s` (3s) via
+  the same push-sink the AGV status uses, plus a `… — done`/`… — FAILED` tick at the end. Each tap/type
+  carries a readable label (`tap (635,320)`, `type 'tester@kiosk.local' (19 taps)`), so the monitor
+  shows what the arm is doing and how long it's taken.
+- **Config:** new `arm_settle_grace_s` (2.0s), `arm_status_tick_s` (3.0s). **No regression:** the arm
+  poll semantics are a superset of the old (still completes on idle/ready, still raises on error, still
+  times out when stuck); card terminal-state gating preserved; playwright/demo use their own stubs.
+  New tests cover stale-ready-before-moving, ack-not-moving fast path, card holding_card gating, error,
+  and timeout. **User: after your current RPS test, this loads on the next backend restart.**
+
+**Run #4 (TC-RPS-001, 2026-07-29 17:55) — new code CONFIRMED live; failure is now ROBOT-SIDE.** With
+a fresh backend the log shows the new behaviour end-to-end: clean `[ROBOT ARM] tap (635,320) …
+state='moving' (Ns)` ticks every ~3s (no GET spam), completion on `ready`, then our
+`_check_click_completed` correctly caught **`Arm click … did NOT land: completed 0/1 (code=HOVER_FAILED,
+failed_index=0) — hover did not finish within 30.000000s`** → step failed → Tier-3. So our command/
+poll/error handling is doing exactly the right thing. The remaining blocker is **robot-side MoveIt**:
+the arm's HOVER (initial PTP to above the tap point) took >30s and the robot's OWN click-sequence timed
+it out (`HOVER_FAILED`). In run #3 the SAME hover took 9.2s and succeeded, so this is planning
+slowness/pose-dependent on the Ubuntu side (the earlier Arm_logs also showed `apply_planning_scene call
+failed` + `goal not confirmed within 3.0s; nudging`), not our backend. Robot-side remedies (their
+robotics team owns these): start each tap from a good close/head-on observe pose so the approach is a
+short easy plan; investigate the planning-scene errors; move the base closer / shrink the app to 50%
+so targets are central and reachable; or raise the robot-side hover deadline if 30s is genuinely too
+tight for their planner.
+- ✅ **Fixed on our side: `/capture` no longer uses the 2s per-call timeout.** The trailing
+  `HTTPConnectionPool … Read timed out (read timeout=2.0)` was the Tier-3 handoff `/capture` — which,
+  per the spec, is BLOCKING and MOVES the arm to an inspection pose first (seconds, esp. after a failed
+  tap when the arm is away from that pose). New `settings.capture_timeout_s` (30s, `CAPTURE_TIMEOUT_S`)
+  used by `capture_screen`, so the leading-verify + Tier-3 captures don't spuriously read-time-out. The
+  robot still returns 504 if its internal capture genuinely times out. Tests 24/24 fast + imports clean.
+
 ### Tier architecture clarified + real-robot 0-LLM plan + Tier-3 cost (analysis only, 2026-07-23)
 
 Operator questions after the phone-photo test. **No code changed** — this records the architecture

@@ -630,12 +630,20 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
         if not run_id:
             return
         st   = ev.get("state", "?")
-        dist = ev.get("distance_remaining")
         ep   = ev.get("endpoint", "")
         cmd  = ev.get("cmd_id", "")
-        msg  = (f"[ROBOT AGV] {ev.get('response_time','')} {ep}"
-                f"{(' (' + cmd + ')') if cmd else ''} @ {ev.get('controller','')} — state='{st}'"
-                + (f", {dist:.2f}m remaining" if isinstance(dist, (int, float)) else ""))
+        ts   = ev.get("response_time", "")
+        ctrl = ev.get("controller", "")
+        # Arm ticks carry an 'operation' label + elapsed; base ticks carry distance/nav feedback.
+        if ep.startswith("/arm") or "operation" in ev:
+            op   = ev.get("operation") or ep
+            el   = ev.get("elapsed_s")
+            msg  = (f"[ROBOT ARM] {ts} {op}{(' (' + cmd + ')') if cmd else ''} @ {ctrl} — "
+                    f"state='{st}'" + (f" ({el:.0f}s)" if isinstance(el, (int, float)) else ""))
+        else:
+            dist = ev.get("distance_remaining")
+            msg  = (f"[ROBOT AGV] {ts} {ep}{(' (' + cmd + ')') if cmd else ''} @ {ctrl} — "
+                    f"state='{st}'" + (f", {dist:.2f}m remaining" if isinstance(dist, (int, float)) else ""))
         broadcaster.emit(run_id, {"event": "log", "run_id": run_id, "test_id": test_id,
                                   "message": msg, "robot_api": ev})
     if hasattr(robot, "set_event_sink"):
@@ -947,9 +955,22 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 else:
                     print(f"    {i:>2}. type  (no coords on step — relying on prior tap's focus)")
                 print(f"    {i:>2}. type  {value!r}")
-                robot.type_text(value, clear_first=True)
+                type_res = robot.type_text(value, clear_first=True)
             except Exception as exc:
                 _robot_fail(i, f"type: {value[:30]}", exc)
+                return step_results, "failed", captured
+            # type_text reports success=False when it could NOT actually enter the value (real robot:
+            # no keyboard_map loaded, or none of the characters exist in the map).  Fail the step so
+            # the run never falsely PASSES a login it never typed — it hands off to Tier-3 vision
+            # instead of silently continuing to the next field with an empty input.  (playwright/demo
+            # always return success=True, so this is a no-op for them.)
+            if isinstance(type_res, dict) and type_res.get("success") is False:
+                reason = type_res.get("error") or "type did not enter the value"
+                print(f"    {i:>2}. ✗ type — {reason} → failing step (hand off to Tier-3 vision)")
+                sr = {"step": f"type: {value[:30]}", "success": False, "method": "type_failed",
+                      "observation": f"Could not type {value!r}: {reason}"}
+                step_results.append(sr)
+                if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
                 return step_results, "failed", captured
             time.sleep(0.3)
             after_shot = ""

@@ -87,7 +87,13 @@ def merge_explored_app(existing: Optional[dict], new_map: dict, app_id: str,
         "explored_at":  stamp,
         "screen_count": len(new_screens),
     }
-    return {
+    merged = {
+        # Preserve every OTHER top-level key already on the combined map (keyboard_map, and any
+        # future top-level data) so a multi-app merge never silently drops it.  Previously this
+        # return listed only app_name/explored_at/entry_screen/screens/apps, which discarded the
+        # top-level `keyboard_map` produced by the explorer — leaving real-robot type_text with no
+        # keys to tap (observed: TC-RPS-001 typed nothing).
+        **{k: v for k, v in base.items() if k not in ("screens", "apps")},
         "app_name":     base.get("app_name") or "Multi-App Environment",
         "explored_at":  stamp,
         # Prefer the just-explored app's entry over a stale seeded one; per-app entries live
@@ -96,6 +102,12 @@ def merge_explored_app(existing: Optional[dict], new_map: dict, app_id: str,
         "screens":      screens,
         "apps":         apps,
     }
+    # The virtual-keyboard map is environment-wide (one shared on-screen keyboard).  A fresh
+    # exploration that mapped it wins; otherwise keep whatever the combined map already had.
+    new_kb = new_map.get("keyboard_map")
+    if new_kb:
+        merged["keyboard_map"] = new_kb
+    return merged
 
 
 def remove_app(existing: Optional[dict], app_id: str) -> Optional[dict]:
