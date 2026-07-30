@@ -51,12 +51,56 @@ def _to_bgr_from_path(path: str) -> Optional[np.ndarray]:
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
 
-def template_match_score(page_bgr: np.ndarray, template_bgr: np.ndarray) -> float:
-    """Full-frame normalized-cross-correlation score in [-1.0, 1.0] (higher = more similar).
+def _center_crop(img: np.ndarray, center_crop: Optional[tuple]) -> np.ndarray:
+    """Crop `img` to a centered (fx·w × fy·h) rectangle. `None` or (1.0, 1.0) → unchanged.
 
-    Both images are converted to grayscale; the template is resized to the page's dimensions
-    so the whole layout is correlated. Returns the peak `TM_CCOEFF_NORMED` value.
+    Real arm cameras return LOOSELY-framed frames — even the rectified /capture keeps desk/bezel/
+    taskbar margins around the centered kiosk box, and that shared, screen-agnostic background
+    dominates a full-frame TM_CCOEFF_NORMED correlation (a login frame then scores order_history/
+    payment_successful ABOVE sign_in). Cropping BOTH the live frame and every reference to the central
+    app region before correlating removes the shared margin so the actual screen content decides.
     """
+    if not center_crop:
+        return img
+    fx, fy = center_crop
+    if fx >= 0.999 and fy >= 0.999:
+        return img
+    fx = max(0.1, min(1.0, float(fx)))
+    fy = max(0.1, min(1.0, float(fy)))
+    h, w = img.shape[:2]
+    cw, ch = max(1, int(round(w * fx))), max(1, int(round(h * fy)))
+    x0, y0 = (w - cw) // 2, (h - ch) // 2
+    return img[y0:y0 + ch, x0:x0 + cw]
+
+
+def settings_center_crop() -> Optional[tuple]:
+    """The configured center-crop (fx, fy) for real-robot template matching, or None when disabled.
+
+    Reads settings.template_match_center_crop_x/y. Returns None (full-frame, legacy behaviour) when
+    both are ~1.0 or settings are unavailable, so pure-function callers that don't pass a crop — and
+    the unit tests — are byte-identical to before.
+    """
+    try:
+        from vision_agent.config import settings
+        fx = float(getattr(settings, "template_match_center_crop_x", 1.0) or 1.0)
+        fy = float(getattr(settings, "template_match_center_crop_y", 1.0) or 1.0)
+    except Exception:
+        return None
+    if fx >= 0.999 and fy >= 0.999:
+        return None
+    return (fx, fy)
+
+
+def template_match_score(page_bgr: np.ndarray, template_bgr: np.ndarray,
+                         center_crop: Optional[tuple] = None) -> float:
+    """Normalized-cross-correlation score in [-1.0, 1.0] (higher = more similar).
+
+    Both images are (optionally center-cropped, then) converted to grayscale; the template is resized
+    to the page's dimensions so the whole layout is correlated. Returns the peak `TM_CCOEFF_NORMED`
+    value. `center_crop=None` (default) preserves the original full-frame behaviour exactly.
+    """
+    page_bgr = _center_crop(page_bgr, center_crop)
+    template_bgr = _center_crop(template_bgr, center_crop)
     page_gray = cv2.cvtColor(page_bgr, cv2.COLOR_BGR2GRAY)
     tmpl_gray = cv2.cvtColor(template_bgr, cv2.COLOR_BGR2GRAY)
     ph, pw = page_gray.shape[:2]
@@ -128,11 +172,13 @@ def build_references(app_map: dict, template_ref_dir: str = "") -> dict[str, str
 
 # ── Ranking + verdict ────────────────────────────────────────────────────────
 
-def rank_references(image_bytes: bytes, references: dict[str, str]) -> list[dict]:
+def rank_references(image_bytes: bytes, references: dict[str, str],
+                    center_crop: Optional[tuple] = None) -> list[dict]:
     """Score the frame against every reference. Returns [{screen_id, score}] best-first.
 
     `references` maps screen_id → image path (see build_references). Unreadable references
-    are skipped.
+    are skipped. `center_crop` (fx, fy) focuses the correlation on the central app region (see
+    `_center_crop`); None = full-frame (default, legacy behaviour).
     """
     page = _to_bgr_from_bytes(image_bytes)
     rows: list[dict] = []
@@ -141,7 +187,8 @@ def rank_references(image_bytes: bytes, references: dict[str, str]) -> list[dict
         if tmpl is None:
             continue
         try:
-            rows.append({"screen_id": sid, "score": round(template_match_score(page, tmpl), 4)})
+            rows.append({"screen_id": sid,
+                         "score": round(template_match_score(page, tmpl, center_crop), 4)})
         except Exception:
             continue
     rows.sort(key=lambda r: r["score"], reverse=True)
@@ -154,6 +201,7 @@ def identify_screen(
     expected_screen: str = "",
     threshold: float = 0.55,
     margin: float = 0.06,
+    center_crop: Optional[tuple] = None,
 ) -> dict:
     """Decide, from template scores, whether the frame is the expected screen (or which screen it is).
 
@@ -165,7 +213,7 @@ def identify_screen(
       method (str): 'template_match' | 'template_mismatch' | 'template_inconclusive' | 'template_no_reference'.
       ranking (list): full [{screen_id, score}] best-first (for diagnostics).
     """
-    ranking = rank_references(image_bytes, references)
+    ranking = rank_references(image_bytes, references, center_crop)
     if not ranking:
         return {"success": None, "actual_screen": "", "score": None,
                 "method": "template_no_reference", "ranking": []}

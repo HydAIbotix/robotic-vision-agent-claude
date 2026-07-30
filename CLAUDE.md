@@ -1155,6 +1155,161 @@ tight for their planner.
   used by `capture_screen`, so the leading-verify + Tier-3 captures don't spuriously read-time-out. The
   robot still returns 504 if its internal capture genuinely times out. Tests 24/24 fast + imports clean.
 
+### Arm-reachable layout fallout: template mis-match on raw frames + walkthrough skipped purchase flow (2026-07-30)
+
+After the arm-reachable layout switch + re-exploration, two regressions surfaced. Both root-caused and
+fixed with **live-app validation** (Playwright at 1920×1080 arm-reachable); full suite 69 passed; all
+edited modules import clean. No playwright/demo regression (fixes are real-robot-template-only or
+exploration-DOM-only).
+
+**Issue 1 — Camera Vision Test template matching identified the LOGIN screen as `order_history`.** The
+operator re-captured camera references (`reference_screens/*.png`) at the new layout and ran "run
+detection" on a login frame; it scored order_history 0.79 / payment_successful 0.80 ABOVE sign_in 0.73
+→ mismatch. Root cause: the arm's `/capture` (even `type=screen`) returns **LOOSELY-framed** frames —
+they still include the desk, monitor bezel, gray screen margins and the Windows taskbar around the
+~40%-centered kiosk box (confirmed: raw frames 1280×720, "screen" frames 1441–1561 px wide and still
+showing desk/taskbar → the AprilTag rectification is loose, not cropped to the screen). With the app now
+a small centered region, that shared, screen-agnostic background DOMINATES the full-frame
+TM_CCOEFF_NORMED correlation, and small pose differences between reference captures (the operator's
+`sign_in.png` was shot at a closer pose than the login test frame) swamp the actual content signal.
+- ✅ **Fix — focus the correlation on the CENTER app region before scoring** (`vision/template_match.py`).
+  New `_center_crop(img, (fx,fy))` crops BOTH the live frame and every reference to a centered fraction;
+  `template_match_score`/`rank_references`/`identify_screen` gained an optional `center_crop` param
+  (default None = full-frame = byte-identical legacy, so existing tests/pure callers are unchanged). New
+  `settings.template_match_center_crop_x/y` (**default 0.6 × 0.92**; 1.0×1.0 disables) + helper
+  `settings_center_crop()`. Wired into the THREE real-robot template paths only: `validate_pipeline`
+  (live verify), `real_robot.verify_current_screen`, and the Camera Vision Test analyze endpoint —
+  playwright uses DOM, demo is always-true, so blast radius is real-robot camera frames exactly where it
+  helps. **Validated on two labelled real frames at different poses:** the crop flips login from rank #4
+  (`template_mismatch → payment_successful`) to #1 (`template_match → sign_in`, margin +0.02) while the
+  products frame stays #1. 45%/global fail; 0.6×0.92 is the sweet spot.
+- **This is a discrimination AID, not the root cure.** The real levers remain: (a) tighten the arm's
+  rectification so `/capture type=screen` crops to just the screen (then the app fills the frame and no
+  crop is needed → set the crop toward 1.0); (b) capture ALL references AND live frames at ONE consistent
+  close "observe" pose so they share geometry. Tune `template_match_center_crop_*` per the actual framing.
+
+**Issue 2 — App Explorer stopped completing the product-purchase flow** (app_map had 9 nav screens but
+NO cart/payment; earlier runs reached them). The exploration log showed the commerce walkthrough DID
+log in → products → tapped `nexora_phone_increase_button` + `nexora_phone_add_to_cart_button`, then
+tapped `cart_checkout_tab` and got **DOM 'products' → 'products' (NO CHANGE)** → "item likely not added
+— skipping payment flow", and the cart read "(0)".
+- **Root cause (reproduced live):** the app_map's stepper coordinate was **73 px too low** —
+  `nexora_phone_increase_button` stored at (727,649) but the real `quantity-increase` button is at
+  (719,576). In the TIGHT single-column arm-reachable box, (727,649) falls INSIDE the large
+  `add-to-cart` button directly below (its box spans y≈610–658), so `elementFromPoint(727,649)` returns
+  Add-to-Cart. Add-to-Cart is `disabled={quantity===0}`, so the "increase" tap hit a disabled button →
+  quantity stayed 0 → Add-to-Cart stayed disabled → cartCount stayed 0 → `cart-checkout-button`
+  (`disabled={cartCount===0}`) never enabled → walkthrough bailed. Why the coord was wrong: the DOM
+  coordinate-correction (`explore_screen._dom_correct_elements`) matches Claude's elements to DOM
+  elements by TEXT, but the "+"/"−" steppers' `textContent` is a single char — excluded by the
+  `len(dom_text) < 2` guard — and their vision `label` ("+") doesn't overlap any rich DOM string, so the
+  steppers were NEVER DOM-corrected and kept the raw (imprecise) vision estimate. The OLD wide multi-
+  column layout tolerated the 73 px error (buttons were far apart); the narrow layout does not.
+- ✅ **Fix — semantic id ↔ DOM testid/aria token fallback** (`explore_screen.py`). `get_dom_element_centers`
+  now also returns each element's **`aria`** (aria-label) separately. In `_dom_correct_elements`, when the
+  text pass finds no match, a fallback matches the element's semantic id tokens (`nexora_phone_increase_button`
+  → {nexora, phone, increase}) against each unused DOM element's **testid + aria** tokens
+  (`quantity-increase-nexora-phone-x2` + "Increase Nexora Phone X2 quantity" → {nexora, phone, increase, x2}),
+  requiring **≥2 shared identity tokens** (so only the correct product's control matches), then snaps to
+  the DOM centre. New `_meaningful_tokens()` drops boilerplate ({button, quantity, value, …}).
+  **Validated live:** the stepper now snaps (727,649)→(719,576) with testid `quantity-increase-…`; the
+  add-to-cart/nav still snap via the existing text path; and tapping the CORRECTED coords increments
+  qty→1, adds to cart (count→1), and enables checkout. Because `_dom_correct_elements` runs DURING
+  exploration before the walkthrough reads the map, the fix takes effect within one exploration run — so
+  the NEXT exploration completes cart→payment→success. This also fixes real TEST execution (a test
+  tapping the stepper now gets the correct coordinate). Fallback fires only in playwright (DOM present);
+  real robot returns [] → skipped. Guarded ≥2-token threshold prevents false snaps.
+- ✅ **Also fixed a stale validator** (`validate_map.py`): `_check_coordinate_bounds` hard-coded
+  `1400×900`, so every valid 1920×1080 coord logged a false "outside viewport" WARN. Now reads
+  `settings.viewport_width/height`. Warning-only (never dropped elements), but misleading.
+- **Tests:** new `tests/test_dom_correct.py` (4: token extraction, stepper snaps to the correct product's
+  control via fallback, ≥2-token threshold blocks false snaps, no-DOM returns unchanged); template-crop
+  tests added to `tests/test_template_match.py` (now 19). Full suite 69 passed.
+- **User:** re-explore both kiosks (the walkthrough now completes the purchase flow → cart/payment/success
+  re-appear in app_map), regenerate plans, and re-run the Camera Vision Test (login now template-matches
+  with the center crop). See [[camera-vision-test-2026-07-16]], [[agv-hardware-test-2026-07-13]].
+
+**Issue 3 (found on the re-explore) — a malformed vision `center` crashed the WHOLE explorer** (exit 1:
+`ValueError: too many values to unpack (expected 2)` at `analyze._log_screen` `cx, cy = el["center"]`).
+Claude's vision occasionally returns a `center` with the wrong arity — a 4-value bbox `[x1,y1,x2,y2]` or
+a 3-value point — and `_norm_to_px` preserves the length, so the wrong-length center blew up the first
+`cx, cy = el["center"]` unpack and took the entire exploration down (nothing saved). Pre-existing latent
+fragility, newly triggered; unrelated to Issues 1–2. Fix (`vision_agent/nodes/analyze.py`): new
+`_center2()` coerces any center to exactly `[x, y]` (4-value → bbox midpoint, 3-value → first two,
+garbage → frame centre `[0.5,0.5]`), applied at THREE points — right after the Pass-1 parse (so the
+Pass-2 correction loop + all downstream can't see a bad center), on the Pass-2 correction result, and
+defensively in `_log_screen` (logging must never crash a run). All app_map centers are therefore always
+2-value, so the many downstream `cx, cy = el["center"]` sites are safe. New `tests/test_analyze_center.py`
+(2). See [[camera-vision-test-2026-07-16]].
+
+### Arm-reachable kiosk layout → exploration viewport = physical MONITOR resolution (2026-07-30)
+
+The robotics team could not get the arm to reliably touch UI across the whole 21″ screen (myCobot 280,
+~0.28 m reach), so they shrank BOTH kiosk apps (RPS + VPS) to the arm's reachable area. The
+`robotics-kiosk-pos` repo (`../Kiosk_App/robotics-kiosk-pos`, commit `0f6250e` "Arm reachable area
+changes") added a **`screenLayout` mode, now defaulting to `arm-reachable`**: the whole kiosk UI renders
+as a **CENTERED FIXED-PX box** — `--reachable-ui-width: clamp(620px, 40vw, 780px)`,
+`--reachable-ui-height: min(100dvh − 32px, 900px)` — surrounded by a light calibration background
+(`#d7e6f5`). (`?screenLayout=standard` restores the legacy full-width layout for manual demos.) This
+broke our coordinate pipeline, because the OLD viewport rule was wrong for a centered box. **No robot
+hardware was touched (operator was mid-test); changes are config + docs + a stale-reference cleanup,
+all verified by measuring the live app in Playwright.**
+
+- **Root cause of the wrong tap: a centered fixed-px box has a viewport-DEPENDENT fractional position.**
+  app_map coords are pixels in the exploration viewport; `real_robot._scale` maps them per-axis to the
+  camera frame (`u_cam = u_map · cam_w/viewport_w`). That places taps correctly ONLY when the app renders
+  at the SAME fractional element positions during exploration as on the physical kiosk monitor. With the
+  OLD full-width layout the app filled the frame at any resolution, so fractions were viewport-independent
+  and the prior rule ("match the viewport to the rectified-camera aspect", 1291×547) worked. The new box
+  has ABSOLUTE px breakpoints (620/780/900), so its fraction shifts with viewport. **Measured live** (email
+  field): at **1291×547** → box 48% wide, email center **y-frac 0.635**; at **1920×1080** → box **40%** wide
+  (the CSS design target: 40vw = exactly 40%), email center **y-frac 0.513**. Exploring at 1291×547 (the
+  stale .env value) therefore put the real-robot tap **~12% too LOW** vertically. Horizontal is always
+  centered (x-frac 0.500) so only Y was badly off — consistent with taps landing above/below the field.
+- ✅ **Fix — exploration viewport = the physical kiosk monitor's fullscreen resolution** (NOT the camera
+  resolution). The CSS is authored for **1920×1080**, so `.env` now sets `VIEWPORT_WIDTH=1920`,
+  `VIEWPORT_HEIGHT=1080` (with a long comment explaining why). At the monitor resolution the app renders
+  IDENTICALLY to the physical kiosk (40%-centered box), and `real_robot.capture_screen` auto-measures the
+  camera resolution → per-axis `_scale` maps monitor→camera. **The camera aspect need NOT match** (it
+  measured ~2.5:1 vs the monitor's 16:9): per-axis scaling maps monitor fractions to camera fractions
+  regardless of aspect, so a centered element stays centered and a y-frac-0.513 element stays at 0.513 of
+  the camera frame — exact, provided the rectified frame spans the full monitor. **If a kiosk's monitor is
+  a different resolution, set the viewport to THAT.** Code default stays 1400×900 for pure-playwright
+  targets (no regression); only `.env` (the real-robot config) changed.
+- ⚠️ **Do NOT use Robot Setup → "Match viewport to measured camera" for this layout** — it sets the
+  viewport to the camera resolution, which reintroduces the ~12% vertical drift. That button was correct
+  only for the old full-width layout. (Left in place for that case; documented on the page/here.)
+- ✅ **Deterministic layout during exploration.** New `settings.kiosk_screen_layout` (default
+  `"arm-reachable"`; `.env`-overridable) is appended by `playwright_stubs._kiosk_url()` as
+  `?screenLayout=arm-reachable`. The app reads `query ?? localStorage`, so the query param WINS — exploration
+  always renders the arm-reachable layout regardless of stale browser localStorage. Set it to `"standard"`
+  (or blank) for a pure-playwright full-width demo. Real-robot faces the physical kiosk directly (no URL), so
+  the operator must ensure the physical kiosk is in arm-reachable mode (it is the app default).
+- ✅ **Stale template references moved aside.** All `reference_screens/*.png` were CAMERA photos of the OLD
+  full-width layout (2026-07-28) and would mis-score against the new centered box. Moved to
+  `reference_screens/_stale_full_width_backup_20260730/` (kept, not deleted). `build_references` scans
+  top-level only (`iterdir()` + `is_file()`), so the backup subfolder is ignored. With no overrides,
+  Tier-1 template matching now falls back to the app_map `reference_screenshot` (the freshly-explored,
+  new-layout browser shots). On the real camera those browser refs score below the 0.55 floor → inconclusive
+  → Claude-vision verify (~1 LLM/verify — correct, just not 0-LLM). **To restore 0-LLM Tier-1, re-capture
+  camera-domain references AFTER re-exploring** via Camera Vision Test → "Save captured frame as reference"
+  or `python capture_reference.py --screen login` (name them exactly `login.png`, `products.png`, …).
+- **No code-logic change to the tap/scale pipeline** — it was already correct; only its INPUTS (viewport +
+  which layout to explore) were wrong. `real_robot._scale`, template matching, and the backends are
+  untouched. Regression suite green: `test_arm_poll` 9, `test_keyboard_typing` 15, `test_agv_gate` 7,
+  `test_template_match` 15, `test_camera_vision` 15 = **61 passed**; config + playwright_stubs import clean;
+  `_kiosk_url()` → `…?screenLayout=arm-reachable`.
+- **Files:** `.env` (viewport 1291×547→1920×1080 + comment), `vision_agent/config.py`
+  (`kiosk_screen_layout`), `vision_agent/robot/playwright_stubs.py` (`_kiosk_url` appends the param),
+  `reference_screens/` (stale PNGs → backup).
+- **User re-steps (in order):** (1) confirm the physical kiosk monitor resolution — if not 1920×1080, set
+  `VIEWPORT_WIDTH/HEIGHT` to it; (2) ensure the physical kiosk is in **arm-reachable** mode (app default, or
+  Developer settings → Screen layout); (3) **re-explore BOTH kiosks** (RPS + VPS) at the new viewport so
+  app_map coords + keyboard_map are re-learned at the centered layout; (4) **regenerate the test plans**
+  (Test Intake → force) so cached px/py refresh; (5) optionally re-capture camera-domain template references
+  for 0-LLM Tier-1; (6) restart the backend, then run TC-RPS-001. See [[agv-hardware-test-2026-07-13]],
+  [[camera-vision-test-2026-07-16]].
+
 ### Tier architecture clarified + real-robot 0-LLM plan + Tier-3 cost (analysis only, 2026-07-23)
 
 Operator questions after the phone-photo test. **No code changed** — this records the architecture

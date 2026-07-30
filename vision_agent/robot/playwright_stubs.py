@@ -37,13 +37,19 @@ def _vp() -> tuple[int, int]:
 
 def _kiosk_url() -> str:
     """The kiosk URL to open, with the shared card service appended when configured so the
-    kiosk apps share balances across machines. No-op (bare kiosk_url) when unset."""
+    kiosk apps share balances across machines, and the forced screen layout appended so
+    exploration always renders the SAME layout the physical kiosk shows (see
+    settings.kiosk_screen_layout). No-op (bare kiosk_url) when both are unset."""
     from vision_agent.config import settings
     url = settings.kiosk_url
     svc = (getattr(settings, "card_service_url", "") or "").strip()
     if svc:
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}cardServiceUrl={svc}"
+    layout = (getattr(settings, "kiosk_screen_layout", "") or "").strip()
+    if layout:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}screenLayout={layout}"
     return url
 
 
@@ -492,6 +498,10 @@ def get_dom_element_centers() -> list[dict]:
                 ).trim().slice(0, 80);
                 results.push({
                     text:   text,
+                    // aria-label kept SEPARATELY so bare-symbol controls ("+"/"−") — whose textContent
+                    // is too short to text-match — can still be identified by their semantic id via
+                    // the DOM-correction token fallback (aria "Increase … quantity" + testid tokens).
+                    aria:   (el.getAttribute('aria-label') || '').trim().slice(0, 120),
                     cx:     Math.round(r.left + r.width  / 2),
                     cy:     Math.round(r.top  + r.height / 2),
                     tag:    el.tagName.toLowerCase(),

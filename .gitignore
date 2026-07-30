@@ -52,3 +52,4 @@ reference_screens/*.jpeg
 reference_screens/*.bmp
 reference_screens/*.webp
 !reference_screens/README.md
+/reference_screens

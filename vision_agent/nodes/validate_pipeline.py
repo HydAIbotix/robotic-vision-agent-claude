@@ -261,7 +261,9 @@ def _match_by_template(image_path: str, app_map: dict, expected_screen: str) -> 
     if not image_path or not Path(image_path).exists():
         return {"success": None, "method": "template_no_image", "actual_screen": ""}
     try:
-        from vision_agent.vision.template_match import build_references, identify_screen
+        from vision_agent.vision.template_match import (
+            build_references, identify_screen, settings_center_crop,
+        )
     except Exception as exc:
         print(f"  [TEMPLATE] import error: {exc}")
         return {"success": None, "method": "template_no_reference", "actual_screen": ""}
@@ -278,6 +280,7 @@ def _match_by_template(image_path: str, app_map: dict, expected_screen: str) -> 
     res = identify_screen(
         img_bytes, refs, expected_screen,
         settings.template_match_threshold, settings.template_match_margin,
+        center_crop=settings_center_crop(),
     )
     top = ", ".join(f"{r['screen_id']}={r['score']}" for r in (res.get("ranking") or [])[:3])
     print(f"  [TEMPLATE] expected='{expected_screen}' -> {res['method']} "

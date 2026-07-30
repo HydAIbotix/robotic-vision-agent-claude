@@ -1254,11 +1254,14 @@ def vision_test_analyze(req: VisionAnalyzeRequest):
     # aHash, it bridges the camera↔browser domain gap, so this is the primary real-robot Tier-1.
     template_match = None
     try:
-        from vision_agent.vision.template_match import build_references, identify_screen
+        from vision_agent.vision.template_match import (
+            build_references, identify_screen, settings_center_crop,
+        )
         t_refs = build_references(app_map, settings.template_ref_dir)
         t_res  = identify_screen(
             proc_bytes, t_refs, req.expected_screen or "",
             settings.template_match_threshold, settings.template_match_margin,
+            center_crop=settings_center_crop(),
         )
         template_match = {
             "method":          t_res.get("method"),

@@ -91,11 +91,34 @@ def _norm_to_px(vals: list[float], img_w: int, img_h: int) -> list[int]:
     return out
 
 
+def _center2(vals) -> list:
+    """Coerce a model-returned `center` to EXACTLY two coordinates [x, y].
+
+    Claude's vision occasionally returns a `center` with the wrong arity — a 4-value bbox
+    (`[x1,y1,x2,y2]`), a 3-value point, or a stray extra number. `_norm_to_px` preserves the length,
+    so a wrong-length center then crashes downstream unpacking (`cx, cy = el["center"]`) and takes the
+    whole exploration down. This normalizes at the source: a 4-value bbox becomes its midpoint, any
+    other odd length is truncated/padded, and garbage falls back to the frame centre [0.5, 0.5].
+    Works in normalized OR pixel space (it's a pure length coercion).
+    """
+    try:
+        v = [float(x) for x in vals]
+    except (TypeError, ValueError):
+        return [0.5, 0.5]
+    if len(v) == 2:
+        return v
+    if len(v) == 4:                       # looks like a bbox → use its midpoint
+        return [(v[0] + v[2]) / 2.0, (v[1] + v[3]) / 2.0]
+    if len(v) >= 2:
+        return v[:2]
+    return [0.5, 0.5]
+
+
 def _log_screen(screen: dict) -> None:
     print(f"\n  [SCREEN] {screen['screen_id']} — {screen['description']}")
     print(f"  {'ID':<30} {'TYPE':<10} {'CENTER':<14} CONF")
     for el in screen["elements"]:
-        cx, cy = el["center"]
+        cx, cy = (int(v) for v in _center2(el.get("center", [0, 0])))
         print(f"  {el['id']:<30} {el['type']:<10} [{cx:4d},{cy:4d}]   {el.get('confidence', 1.0):.2f}")
 
 
@@ -144,6 +167,11 @@ def analyze_image_elements(image_bytes: bytes) -> ScreenAnalysis:
         HumanMessage(content=[image_block]),
     ]).content)
     elements: list[dict] = analysis.get("elements") or []
+    # Normalize every center to exactly [x, y] up front so a malformed model response (bbox-as-center,
+    # 3-value point) can't crash the correction loop, the log, or any downstream coordinate unpacking.
+    for el in elements:
+        if "center" in el:
+            el["center"] = _center2(el["center"])
 
     # ── Pass 2: self-correction for low-confidence coordinates ────────────────
     threshold = settings.coordinate_confidence_threshold
@@ -171,7 +199,7 @@ def analyze_image_elements(image_bytes: bytes) -> ScreenAnalysis:
                 ]),
             ]).content)
             old_center       = list(el["center"])
-            el["center"]     = correction["center"]
+            el["center"]     = _center2(correction["center"])
             el["confidence"] = correction.get("confidence", el["confidence"])
             tag = "CONFIRMED" if correction.get("confirmed") else "CORRECTED"
             print(f"    [{tag}] {el['id']:30s}  {old_center} -> {el['center']}  ({correction.get('reason', '')})")

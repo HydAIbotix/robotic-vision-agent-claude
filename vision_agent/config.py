@@ -37,6 +37,16 @@ class Settings(BaseSettings):
     # (?cardServiceUrl=…) so the kiosk apps share smart-card balances/transactions
     # across machines. Blank → apps use per-browser localStorage (single-machine default).
     card_service_url: str = ""
+    # Kiosk display layout forced during Playwright EXPLORATION (and playwright test runs) via a
+    # ?screenLayout=… query param, so app_map coordinates are always learned at the SAME layout the
+    # physical kiosk shows — immune to stale browser localStorage. The robotics-kiosk-pos app supports:
+    #   "arm-reachable" (default) — the ~40%-width centered box that fits the robot arm's reachable
+    #                                area (the mode the physical kiosk runs in for real-robot tests).
+    #   "standard"                — the legacy full-width kiosk layout (manual/pure-playwright demos).
+    #   ""                        — do not append the param (use whatever the app/localStorage decides).
+    # The query param wins over the app's localStorage, so this is deterministic. See CLAUDE.md
+    # "Arm-reachable kiosk layout".
+    kiosk_screen_layout: str = "arm-reachable"
 
     # Agent behaviour
     max_retries: int = 3
@@ -82,6 +92,19 @@ class Settings(BaseSettings):
     template_match_threshold: float = 0.55
     template_match_margin: float = 0.06
     template_ref_dir: str = "./reference_screens"
+    #   template_match_center_crop_x / _y — focus the correlation on the CENTER of the frame before
+    #        scoring (fraction of width / height kept, centered). Real arm cameras return LOOSELY-framed
+    #        frames: even the rectified /capture keeps desk/bezel/taskbar margins around the ~40%-centered
+    #        arm-reachable kiosk box, and that shared background dominates a full-frame correlation — a
+    #        real login frame then scored order_history/payment_successful ABOVE sign_in. Cropping BOTH
+    #        the live frame and every reference to the central app region (validated: flips login from
+    #        rank #4 → #1 while products stays #1) removes the shared margin so screen CONTENT decides.
+    #        1.0×1.0 = full-frame (legacy). Applied ONLY to the real-robot camera template paths
+    #        (playwright/demo use DOM/always-true). Best paired with a consistent close "observe" pose so
+    #        references and live frames share geometry. Tune toward 1.0 if the /capture is tightly cropped
+    #        to the screen (then the app already fills the frame and less/no crop is needed).
+    template_match_center_crop_x: float = 0.6
+    template_match_center_crop_y: float = 0.92
 
     # App Explorer mode:
     #   "claude"          — screenshot → Claude vision → elements (default; works for all backends)

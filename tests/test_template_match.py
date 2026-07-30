@@ -189,6 +189,54 @@ def test_pipeline_no_reference_falls_back(tmp_path, monkeypatch):
     assert r["success"] is None
 
 
+# ── center-crop (raw-frame discrimination, 2026-07-30) ───────────────────────
+
+def test_center_crop_identity_and_shrink():
+    import numpy as np
+    img = np.zeros((100, 200, 3), dtype=np.uint8)
+    assert tm._center_crop(img, None).shape == img.shape          # None → unchanged
+    assert tm._center_crop(img, (1.0, 1.0)).shape == img.shape    # 1.0×1.0 → unchanged
+    c = tm._center_crop(img, (0.6, 0.9))                          # centered sub-rect
+    assert c.shape[0] == 90 and c.shape[1] == 120
+
+
+def test_settings_center_crop_toggle(monkeypatch):
+    from vision_agent.config import settings
+    monkeypatch.setattr(settings, "template_match_center_crop_x", 1.0)
+    monkeypatch.setattr(settings, "template_match_center_crop_y", 1.0)
+    assert tm.settings_center_crop() is None                      # disabled → legacy full-frame
+    monkeypatch.setattr(settings, "template_match_center_crop_x", 0.6)
+    monkeypatch.setattr(settings, "template_match_center_crop_y", 0.92)
+    assert tm.settings_center_crop() == (0.6, 0.92)
+
+
+def test_template_score_center_crop_none_is_legacy():
+    # center_crop=None must be byte-identical to the pre-change full-frame score (no regression).
+    if not _has_uploads():
+        import pytest; pytest.skip("uploads not present")
+    a = tm._to_bgr_from_path(str(_LOGIN))
+    b = tm._to_bgr_from_path(str(_PRODS))
+    assert tm.template_match_score(a, b) == tm.template_match_score(a, b, None)
+
+
+def test_center_crop_fixes_login_on_real_camera_frame():
+    """On a REAL loosely-framed arm-camera login photo, the full-frame score mis-ranks it (desk/
+    bezel/taskbar background dominates); the center crop restores the correct screen. Self-skips
+    when the captured frames / camera references aren't present on this machine."""
+    from vision_agent.config import settings
+    ref_dir = Path(settings.template_ref_dir)
+    frame = Path("camera_captures/vision_test_screen_1785414428756.png")
+    if not (ref_dir / "sign_in.png").exists() or not frame.exists():
+        import pytest; pytest.skip("real camera frames / references not present")
+    stems = [p.stem for p in ref_dir.glob("*.png")]
+    refs = tm.build_references({"screens": {s: {} for s in stems}}, str(ref_dir))
+    img = frame.read_bytes()
+    no_crop = tm.identify_screen(img, refs, "sign_in", 0.55, 0.06, center_crop=None)
+    cropped = tm.identify_screen(img, refs, "sign_in", 0.55, 0.06, center_crop=(0.6, 0.92))
+    assert no_crop["success"] is not True                          # full-frame can't confirm login
+    assert cropped["success"] is True and cropped["actual_screen"] == "sign_in"
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))

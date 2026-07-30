@@ -667,9 +667,13 @@ def verify_current_screen(expected_screen_id: str, app_map: dict, save_path: str
 
     # Primary: TM_CCOEFF_NORMED template matching (robust to camera↔browser domain gap).
     try:
-        from vision_agent.vision.template_match import build_references, rank_references
+        from vision_agent.vision.template_match import (
+            build_references, rank_references, settings_center_crop,
+        )
         refs    = build_references(app_map or {}, settings.template_ref_dir)
-        ranking = rank_references(Path(current_path).read_bytes(), refs) if refs else []
+        ranking = (rank_references(Path(current_path).read_bytes(), refs,
+                                   center_crop=settings_center_crop())
+                   if refs else [])
         if ranking:
             best_screen = ranking[0]["screen_id"]
             best_score  = ranking[0]["score"]

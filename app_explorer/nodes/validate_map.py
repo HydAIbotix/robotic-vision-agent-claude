@@ -22,9 +22,7 @@ Prints a human-readable correction report before the final save.
 import time
 from app_explorer.state import ExplorerState
 from app_explorer.nodes.explore_screen import _dom_correct_elements
-
-_VIEWPORT_W = 1400
-_VIEWPORT_H = 900
+from vision_agent.config import settings
 
 
 # ── 1. Deduplication ──────────────────────────────────────────────────────────
@@ -197,14 +195,18 @@ def _revalidate_coordinates(app_map: dict, approach_paths: dict, credentials: di
 
 def _sanity_warnings(app_map: dict) -> list[str]:
     """Return warnings for elements whose centers are outside the viewport bounds."""
+    # Read the ACTUAL exploration viewport (was hard-coded 1400×900, which flagged every valid
+    # coordinate as "outside" once the viewport moved to the physical monitor resolution, e.g.
+    # 1920×1080 for the arm-reachable layout).
+    vw, vh = settings.viewport_width, settings.viewport_height
     warnings: list[str] = []
     for sid, sc in (app_map.get("screens") or {}).items():
         for el in (sc.get("elements") or []):
             cx, cy = el.get("center") or [0, 0]
-            if not (0 <= cx <= _VIEWPORT_W and 0 <= cy <= _VIEWPORT_H):
+            if not (0 <= cx <= vw and 0 <= cy <= vh):
                 warnings.append(
                     f"  WARN  {sid}/{el.get('id')}: center ({cx},{cy}) is outside"
-                    f" {_VIEWPORT_W}×{_VIEWPORT_H} viewport"
+                    f" {vw}×{vh} viewport"
                 )
     return warnings
 

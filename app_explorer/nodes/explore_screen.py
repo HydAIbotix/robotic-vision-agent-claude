@@ -13,6 +13,7 @@ API call budget per screen:
 import io
 import json
 import math
+import re
 import time
 import base64
 from pathlib import Path
@@ -182,6 +183,29 @@ def _collect_scrolled_elements(base_elements: list, image_path: str, screen_id: 
     return _dedup_elements(all_elements)
 
 
+# Generic tokens that carry no identity — dropped before comparing a semantic element id to a DOM
+# testid/aria-label, so the match keys on the meaningful words (product + action), not boilerplate.
+_GENERIC_ID_TOKENS = {
+    "button", "btn", "link", "input", "field", "icon", "control", "tab", "the", "a", "an",
+    "of", "to", "for", "value", "quantity", "qty", "item", "el", "element", "screen", "id",
+}
+
+
+def _meaningful_tokens(*strings: str) -> set:
+    """Lowercase alphanumeric tokens from the given strings, minus generic boilerplate.
+
+    Splits on any non-alphanumeric boundary so `nexora_phone_increase_button`,
+    `quantity-increase-nexora-phone-x2` and `Increase Nexora Phone X2 quantity` all reduce to the
+    same identity tokens {nexora, phone, increase}.
+    """
+    toks: set = set()
+    for s in strings:
+        for t in re.split(r"[^a-z0-9]+", (s or "").lower()):
+            if t and len(t) >= 2 and t not in _GENERIC_ID_TOKENS:
+                toks.add(t)
+    return toks
+
+
 def _dom_correct_elements(elements: list) -> list:
     """Correct Claude's element coordinates using live DOM positions.
 
@@ -248,6 +272,33 @@ def _dom_correct_elements(elements: list) -> list:
                 (el_type == "link"   and dom_tag in ("a", "button"))
             )
             matches.append((0 if type_match else 1, dist, idx, dom_el))
+
+        # Fallback — semantic id ↔ DOM testid/aria token match. The text pass above misses controls
+        # whose DOM text is a bare symbol ("+"/"−") or whose vision label doesn't overlap the DOM text
+        # (quantity steppers, icon-only buttons). Their coordinates then keep the raw vision estimate,
+        # which in a TIGHT single-column layout can land inside an ADJACENT element — observed: the "+"
+        # stepper estimate fell inside the Add-to-Cart button just below it, so the walkthrough tapped a
+        # disabled button and the whole purchase flow (cart → payment → success) never got explored.
+        # The app_map element id is Claude's reliable semantic name; match its tokens against each unused
+        # DOM element's testid + aria-label (layout-independent ground truth) and snap to the DOM centre.
+        if not matches:
+            id_tokens = _meaningful_tokens(el.get("id", ""), label)
+            if len(id_tokens) >= 2:
+                tok_matches = []
+                for idx, dom_el in enumerate(dom_els):
+                    if idx in used:
+                        continue
+                    dom_tokens = _meaningful_tokens(dom_el.get("testid", ""), dom_el.get("aria", ""))
+                    overlap = id_tokens & dom_tokens
+                    # Require a strong, specific overlap (≥2 shared identity tokens) so only the
+                    # correct product's control matches — {nexora, phone, increase} is unique to it.
+                    if len(overlap) >= 2:
+                        dist = math.hypot(dom_el["cx"] - cx, dom_el["cy"] - cy)
+                        tok_matches.append((-len(overlap), dist if plausible else idx, idx, dom_el))
+                if tok_matches:
+                    tok_matches.sort(key=lambda m: (m[0], m[1]))   # most overlap, then nearest/DOM-order
+                    _, _, t_idx, t_dom = tok_matches[0]
+                    matches = [(0, math.hypot(t_dom["cx"] - cx, t_dom["cy"] - cy), t_idx, t_dom)]
 
         if matches:
             # Rank type-match first. Among equal type-rank, prefer the closest to Claude's
