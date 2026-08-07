@@ -24,7 +24,13 @@ from dotenv import load_dotenv
 
 # ── Stdout → both console and a timestamped log file ──────────────────────────
 # Must happen before any other import that might print.
-_log_path = f"explorer_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+# App Explorer run logs live in a dedicated project-root folder (explorer_logs/) with a clear name,
+# so they are not scattered at the repo root mixed with source. Anchored to THIS file's directory so
+# it lands in the project root regardless of the caller's cwd (the API spawns run_explorer.py as a
+# subprocess). The folder is gitignored via the existing "*.log" rule.
+_log_dir = Path(__file__).resolve().parent / "explorer_logs"
+_log_dir.mkdir(parents=True, exist_ok=True)
+_log_path = str(_log_dir / f"explorer_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
 _log_file = open(_log_path, "w", encoding="utf-8")
 
 class _Tee:

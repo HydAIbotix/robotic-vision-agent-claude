@@ -1380,6 +1380,159 @@ edits. All edited modules import clean; frontend `tsc -b` clean.
   under `results/<run_id>/`. If the descend still fails, it's the physical reach limit — nudge the base
   closer/lower. See [[agv-hardware-test-2026-07-13]].
 
+**Follow-up (same live run, 2026-08-07) — run status, sent-coordinate logging, and TAP-CENTRE accuracy.**
+Three more observations from the run; all fixed no-regression (48 tests green incl. the affected suites;
+imports clean; live-validated against the running kiosk). The 4 pre-existing `test_template_match`
+failures on this box are still the external-`uploads`-folder artefact, unrelated.
+
+- ✅ **#1 — a run STOPPED by a robot error showed "Done" (green), should be "Failed".** The run finished
+  the suite normally (status `completed` → StatusBadge renders "Done" green) even though every test failed
+  and a defect was filed. Fix (`api/main._execute_run`): the terminal status is now
+  `"failed" if run.failed > 0 else "completed"` — any failing test (incl. a `robot_error` hard stop) lands
+  the run on `failed` (red "Failed"); an all-pass run stays `completed`. Safe with the UI: `LiveMonitor`
+  already treats `failed` as terminal and only shows an error banner when `run.error` is set (a crash), so
+  a completed-with-failures run reads as Failed WITHOUT a false crash banner; the Dashboard's `failing`
+  filter (`failed>0 || status==='failed'`) and `passing` filter (`completed && failed===0`) both still hold.
+- ✅ **#2 — the `[ROBOT ARM] tap …` monitor line showed the app-map VIEWPORT point, not the camera pixel
+  actually sent to `/screen/click`.** Now the arm status label shows BOTH:
+  `tap (959,554)->cam(690,293)` (and swipe likewise) — `(u,v)` is the exact camera pixel in the
+  `points:[{u,v}]` payload, so the monitor shows precisely what the robot was told to touch
+  (`real_robot.tap`/`swipe` label). The `[ROBOT] tap viewport(x,y) → camera(u,v)` print already existed;
+  this surfaces it in the live monitor tick too.
+- ✅ **#3 — the tap landed on the TOP EDGE of the email field, not its centre (~67px too high).** ROOT-
+  CAUSED with a live measurement + the arm's own on-screen `(689,290) px` overlay. TWO stacking causes,
+  BOTH fixed:
+  - **Wrong exploration viewport (the dominant cause).** The arm-reachable box is a CENTERED FIXED-PX box
+    (`clamp(620px,40vw,780px)`), so an element's fractional position is **CLAMP-SENSITIVE — it changes with
+    the exact resolution, not just the aspect** (measured signin-email y-frac: 1382×571→**0.630**,
+    1440×595→0.609, 1920×793→0.494, 1920×1080→0.471). A real `/capture type=screen` reports the rectified
+    screen as **1382×571** (aspect ~2.42:1, NOT 16:9), and the arm overlay put the true email centre at
+    camera y-frac ~0.63 — matching Playwright at 1382×571 EXACTLY. So the physical monitor RENDERS at
+    ~1382×571; exploring at 1920×1080 stored the email at frac 0.513 → scaled to camera y=293 = the field's
+    TOP (true centre y≈360). **This CORRECTS the 2026-07-30 guidance**: the monitor is NOT 1920×1080, and
+    Robot Setup → "Match viewport to measured camera" IS the right action here. `.env` VIEWPORT
+    1920×1080 → **1382×571**; per-axis auto-calibration absorbs small per-capture variation (all in the same
+    clamp-620 regime). USER MUST RE-EXPLORE both kiosks + regenerate plans at the new viewport.
+  - **The email/password inputs were never DOM-corrected**, so they kept the raw (top-biased) vision
+    estimate. `_dom_correct_elements`'s token fallback required ≥2 shared identity tokens, but app-map id
+    `email_input` vs DOM testid `signin-email` share only `email` (`input` is a generic token) → no snap.
+    Fix (`explore_screen._dom_correct_elements`): a SINGLE shared SPECIFIC token now snaps IFF it is
+    UNAMBIGUOUS — exactly one unused, TYPE-COMPATIBLE (`input↔input`, `button↔button`, `link↔a/button`) DOM
+    element shares it. Safe: two `add` buttons sharing `add` → >1 candidate → no snap (keeps vision); a
+    stepper (`stepper` type) vs a `button` → type-mismatch → no snap (the ≥2 rule still governs steppers).
+    **Live-validated**: at viewport 1382×571 the fix snaps `email_input` (690,310)→**(691,360)** and
+    `password_input`→(691,480) = their true DOM centres; combined with the viewport fix, `_scale` (~1:1)
+    lands the tap dead-centre. New `tests/test_dom_correct.py` cases (7 total): single-token input snap,
+    ambiguous-two-buttons no-snap, wrong-type no-snap; existing stepper/threshold cases unchanged.
+- **Files:** `api/main.py` (run status), `vision_agent/robot/real_robot.py` (arm/swipe labels),
+  `app_explorer/nodes/explore_screen.py` (single-distinctive-token DOM snap), `.env` (viewport
+  1920×1080→1382×571 + corrected comment), `tests/test_dom_correct.py`.
+- **User re-steps:** RESTART backend; **RE-EXPLORE both kiosks at the new 1382×571 viewport** (or confirm
+  via Robot Setup → "Match viewport to measured camera"); **regenerate plans** (Test Intake → force); re-run
+  TC-RPS-001 — the email tap should now land in the CENTRE of the field, the monitor shows the sent camera
+  pixel, and a stopped/failed run shows "Failed". See [[agv-hardware-test-2026-07-13]],
+  [[camera-vision-test-2026-07-16]].
+
+### Exploration BROKE at viewport 1382×571 → viewport is 1920×1080; explorer logs foldered (2026-08-07)
+
+**⚠️ This SUPERSEDES the "1382×571" conclusion in the section just above.** The operator re-explored at
+`1382×571` (my prior recommendation) and it FAILED: exploration finished with **only the login screen, and
+even that incomplete** (`explorer_run_20260807_203243.log`: login had just 3 elements — email, password,
+card-sharing toggle — with **no Sign In button**; valid-login "stayed on login"; the commerce walkthrough
+then reported "No login screen (email + sign-in) found in app_map — skipping"). Root-caused live; all fixes
+no-regression (17 affected tests green; `run_explorer.py` syntax-checked; 1920×1080 render verified live).
+
+- ✅ **Why 1382×571 broke it — the viewport was TOO SHORT and clipped the app.** The arm-reachable auth
+  card sizes with viewport (`clamp(620,40vw,780)` wide; height `min(100dvh-32,900)`; auth controls/gaps are
+  `vh`-clamped). MEASURED: the **Sign In button is clipped below the fold at any height ≤ ~600px**
+  (`signin_bottom 597/571 CLIPPED` at 571; VISIBLE from 620 up). With Sign In off-screen, vision never
+  detects it → no `signin` element → the login action can't submit → the crawl dead-ends on login and the
+  whole purchase flow (products/cart/payment/success) is never explored.
+- ✅ **1382×571 was also horizontally wrong, and the prior "monitor renders at 1382×571" claim was a
+  COINCIDENCE.** The physical camera frame showed the login box at **~40% of the frame width** — that is
+  `40vw` UN-clamped, which only occurs at viewport width ≥ ~1550 (at **1920** the box is 768px = **40%**;
+  at 1382 it clamps to 620px = **45%**, a different layout). So the monitor is ~1920-wide, NOT 1382. The
+  571px value only matched the camera's *vertical* email position (y-frac 0.63) — and THAT mismatch is a
+  **camera rectification distortion** (`/capture type=screen` is not fully fronto-parallel vertically),
+  NOT the monitor's true layout. Chasing it with the viewport is what broke everything.
+- ✅ **Fix — `.env` VIEWPORT back to `1920×1080`** (the physical monitor's fullscreen resolution). Verified
+  live at 1920×1080: card width **39.2%** (matches the camera's ~40% → horizontal layout correct), **Sign
+  In VISIBLE** (bottom 840/1080 → exploration completes the full flow), email centre (960,508). If a kiosk
+  monitor is a different resolution, set THAT — the rule is "viewport = physical monitor native res", and
+  the camera resolution is explicitly NOT it (it clips the app). The residual ~67px VERTICAL tap offset is
+  now correctly attributed to the **camera `/capture type=screen` rectification** (robotics-side: verify it
+  deskews the screen to a true rectangle), decoupled from exploration. The DOM single-token snap from the
+  section above still applies (inputs snap to true DOM centres at whatever viewport).
+- ✅ **Browser "not fullscreen" during exploration — expected.** Playwright renders at the exact
+  `VIEWPORT_WIDTH×HEIGHT` (the app_map coordinate space); the window is that size, not maximised. It looked
+  tiny because 1382×571 is small AND it clipped the app. At 1920×1080 it fills a 1080p screen and renders
+  the full app. (Making the window "maximised" would NOT change the viewport/coordinate space, so it's not
+  a fix — the viewport size is the real lever.)
+- ✅ **Explorer run logs moved to a dedicated folder.** `run_explorer.py` now writes
+  `explorer_logs/explorer_run_<ts>.log` (anchored to the repo root via `__file__`, so the API subprocess
+  writes there too) instead of scattering `explorer_run_*.log` at the repo root. The **46 existing logs
+  were moved into `explorer_logs/`**. Covered by the existing `*.log` gitignore rule; nothing reads these
+  logs programmatically, so no regression.
+- **Files:** `.env` (VIEWPORT 1382×571 → 1920×1080 + rewritten comment), `run_explorer.py` (log folder),
+  `explorer_logs/` (new; 46 logs relocated).
+- **User re-steps:** confirm the physical kiosk monitor's native resolution (set VIEWPORT to it if not
+  1920×1080); **RE-EXPLORE both kiosks** at 1920×1080 (the full purchase flow should now map:
+  login→products→cart→payment→success); **regenerate plans**. The vertical tap-centre offset is now a
+  robotics-side rectification item (or a future per-axis calibration correction), NOT a viewport tweak.
+  See [[agv-hardware-test-2026-07-13]], [[camera-vision-test-2026-07-16]].
+
+### Email tap landed on the LABEL — camera-crop calibration (per-axis affine) (2026-08-07)
+
+Re-exploration at 1920×1080 WORKED (full app_map: login→products→cart→payment→success; email DOM-corrected
+to the true `[960,508]`), but the real-robot email tap still landed on the **"Email" LABEL**, ~67px above
+the input-box centre. ROOT-CAUSED precisely from the run log + the arm's on-screen overlay + a pixel
+measurement of the camera frame; fixed with a calibration (no-regression: default is a byte-identical
+no-op). 48 affected tests green; imports clean.
+
+- ✅ **Root cause — the arm `/capture type=screen` frame is a VERTICAL CROP of the display, not a faithful
+  full-screen deskew.** Measured (run-1-211705): camera **1405×579**, we sent email `cam(702,272)` =
+  `_scale(960,508)`. Pixel-measuring the camera frame, the email input BOX centre is at y≈**328** and
+  password at y≈**432** (the sent 272/358 were on the label/gap above). So the monitor→camera vertical
+  mapping is **affine but NOT the assumed `camera_h/viewport_h`**: fitting the two boxes gives
+  `camera_frac_y = 1.212·monitor_frac_y − 0.0034` (equivalently the frame spans only monitor rows ~3..894
+  of 1080 — full WIDTH, ~81% of the HEIGHT). Horizontal measured FAITHFUL (email x 702 vs true ~705, a=1).
+  This is a **robotics-side rectification limitation** (the AprilTag-bounded rectified region ≠ the full
+  display), which our per-axis `_scale` (assuming a faithful full-frame) could not model.
+- ✅ **Fix — a per-axis AFFINE calibration in `_scale`, in FRACTION space** (resolution-independent, so it
+  survives per-capture size variation 1405↔1382). New `settings.camera_calib_ax/bx/ay/by`
+  (`camera_frac = a·monitor_frac + b`); `_scale` applies it after the viewport→camera scale. **Defaults
+  `a=1,b=0` are a NO-OP** — byte-identical to the old scale, so playwright/demo and any un-calibrated real
+  rig are unchanged (verified by `test_scale_calib.test_default_calibration_is_noop`). `.env` sets this
+  kiosk's pose: `CAMERA_CALIB_AX=1.0 BX=0.0 AY=1.212 BY=-0.0034`. Verified: `_scale(960,508)`→`(702,328)`
+  (was 272 → now the box centre), password→432, sign-in→513 — all on their true camera box centres.
+- ✅ **Re-calibration tool — `python calibrate_tap.py`** (real backend, arm at the LOGIN screen). Captures
+  the login frame, and from the email+password box CENTRES vs the app_map monitor centres computes AY/BY;
+  `--write` saves them into `.env`. **Manual `--email-y <N> --password-y <N>` is the RELIABLE path** (read
+  the two box-centre pixels off the saved `screenshots/calibrate_login.png` / Camera Vision Test); auto-
+  detection is a best-effort HINT only (real camera frames are glary/vignetted, so the dim lower box is
+  often missed — do not trust it blindly). **Re-run after ANY arm/camera/screen pose change** — the
+  calibration is pose-specific. A single global calibration fits ONE physical setup; a multi-kiosk rig with
+  different per-kiosk camera geometry would need per-kiosk values (future; auto-inline calibration from the
+  login boxes is the eventual "just works" path once detection is robust enough).
+- **Operator Q2 — "type says 19 taps but the email is 18 characters."** `tester@kiosk.local` = 18 chars;
+  `real_robot.type_text` batches all char taps **plus the on-screen keyboard's Done/dismiss key** into one
+  `/screen/click`, so 18 + 1 (Done) = **19 taps**. (Uppercase letters would add a Shift tap each; this
+  email is all-lowercase, so none.) Working as intended — the Done tap closes the keyboard so it doesn't
+  cover the next field.
+- **Operator Q3 — the plan step just says "Enter email"; does it tap the field first to focus?** YES. A
+  structured `type` step carries the field's `px/py` (here `960,508`); `run_vision_step`'s type handler
+  **taps that point to FOCUS the field, then types** (the run log shows `focus 'email_input' @ (960,508)
+  (focus before type)` immediately before the type). A controlled React input drops text typed while
+  unfocused, so the focus-tap is essential and is done automatically — the plan need not carry a separate
+  tap step. (Login-style plans that DO emit a separate tap are also fine; the type step self-focuses only
+  when it carries coords.)
+- **Files:** `vision_agent/config.py` (camera_calib_*), `vision_agent/robot/real_robot.py` (`_scale`
+  affine), `.env` (CAMERA_CALIB_* for this pose), new `calibrate_tap.py`, new `tests/test_scale_calib.py`.
+- **User:** RESTART the backend (loads `CAMERA_CALIB_*`), re-run TC-RPS-001 — the email tap should hit the
+  box CENTRE. If you later move the arm/camera, run `calibrate_tap.py` (ideally manual `--email-y/
+  --password-y` from the saved frame) to re-derive. See [[agv-hardware-test-2026-07-13]],
+  [[camera-vision-test-2026-07-16]].
+
 ### Tier architecture clarified + real-robot 0-LLM plan + Tier-3 cost (analysis only, 2026-07-23)
 
 Operator questions after the phone-photo test. **No code changed** — this records the architecture

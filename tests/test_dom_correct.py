@@ -65,6 +65,56 @@ def test_token_fallback_requires_two_shared_tokens(monkeypatch):
     assert "testid" not in fixed[0]
 
 
+def _login_dom():
+    # signin screen: email + password inputs (testid shares only ONE token with the app_map id),
+    # plus a Sign In button. Mirrors the real robotics-kiosk-pos signin screen.
+    return [
+        {"text": "", "aria": "", "cx": 691, "cy": 360, "tag": "input", "testid": "signin-email"},
+        {"text": "", "aria": "", "cx": 691, "cy": 480, "tag": "input", "testid": "signin-password"},
+        {"text": "Sign In", "aria": "", "cx": 691, "cy": 560, "tag": "button", "testid": "signin-button"},
+    ]
+
+
+def test_login_input_snaps_on_single_distinctive_token(monkeypatch):
+    # 'email_input' vs 'signin-email' share only {email} ('input' is generic) — the vision estimate is
+    # ~50px too high; a single UNAMBIGUOUS type-compatible token must snap it to the true DOM centre.
+    monkeypatch.setattr(es.robot, "get_dom_element_centers", _login_dom, raising=False)
+    elements = [
+        {"id": "email_input", "type": "input", "label": "Email", "center": [690, 310]},
+        {"id": "password_input", "type": "input", "label": "Password", "center": [690, 430]},
+    ]
+    fixed = {e["id"]: e for e in es._dom_correct_elements(elements)}
+    assert fixed["email_input"]["center"] == [691, 360]
+    assert fixed["email_input"].get("testid") == "signin-email"
+    assert fixed["password_input"]["center"] == [691, 480]
+    assert fixed["password_input"].get("testid") == "signin-password"
+
+
+def test_single_token_ambiguous_does_not_snap(monkeypatch):
+    # Two 'add to cart' buttons share {add}: a single-token match is AMBIGUOUS → must NOT snap
+    # (keeps the vision estimate) to avoid tapping the wrong product's button.
+    monkeypatch.setattr(es.robot, "get_dom_element_centers", lambda: [
+        {"text": "Add", "aria": "", "cx": 300, "cy": 400, "tag": "button", "testid": "add-nexora"},
+        {"text": "Add", "aria": "", "cx": 300, "cy": 700, "tag": "button", "testid": "add-orion"},
+    ], raising=False)
+    elements = [{"id": "add_button", "type": "button", "label": "Add", "center": [305, 402]}]
+    fixed = es._dom_correct_elements(elements)
+    # NOTE: the text pass matches "Add" first (label==dom text). Assert it does NOT land on the far one.
+    assert fixed[0]["center"] in ([305, 402], [300, 400])
+    assert fixed[0]["center"] != [300, 700]
+
+
+def test_single_token_wrong_type_does_not_snap(monkeypatch):
+    # A single shared token whose only candidate is a TYPE-MISMATCH must not snap (stepper vs button).
+    monkeypatch.setattr(es.robot, "get_dom_element_centers",
+                        lambda: [{"text": "x", "aria": "Increase widget", "cx": 500, "cy": 500,
+                                  "tag": "button", "testid": "increase-widget"}], raising=False)
+    elements = [{"id": "nexora_increase", "type": "stepper", "label": "+", "center": [727, 649]}]
+    fixed = es._dom_correct_elements(elements)
+    assert fixed[0]["center"] == [727, 649]
+    assert "testid" not in fixed[0]
+
+
 def test_no_dom_access_returns_unchanged(monkeypatch):
     def _raise():
         raise AttributeError("real robot has no DOM")

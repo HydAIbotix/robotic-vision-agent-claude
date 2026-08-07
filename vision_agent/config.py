@@ -151,6 +151,29 @@ class Settings(BaseSettings):
     robot_camera_width: int = 1280
     robot_camera_height: int = 720
 
+    # ── Camera tap calibration (per-axis AFFINE in FRACTION space) ──────────────────────────────
+    # real_robot._scale maps an app_map viewport pixel → camera pixel. By default it assumes the
+    # rectified /capture frame is a FAITHFUL full-screen image (camera_frac == monitor_frac). Measured
+    # on hardware 2026-08-07, it is NOT: the arm /capture type=screen frame is a VERTICAL CROP of the
+    # display (it spans only the AprilTag region, ~monitor rows 3..894 of 1080 — full width but partial
+    # height), so an element's camera_frac_y is a linear-but-DIFFERENT function of its monitor_frac_y.
+    # Concretely the email field (monitor y-frac 0.470) landed at camera y-frac 0.470 (tap on the
+    # "Email" LABEL) when its TRUE camera y-frac was ~0.566 (the input box centre) — ~67px too high.
+    # The mapping is AFFINE and stable for a fixed arm/camera/screen pose:
+    #     camera_frac_axis = calib_a_axis * monitor_frac_axis + calib_b_axis
+    # These 4 knobs apply that correction in _scale. DEFAULTS (a=1, b=0) are a NO-OP — byte-identical to
+    # the old behaviour, so playwright/demo and any un-calibrated real setup are unchanged. Horizontal
+    # measured faithful (a=1, b=0); only vertical needs correction on this rig. Values are FRACTIONS, so
+    # they are resolution-independent (work whether /capture is 1405×579 or 1382×571). Re-derive with
+    # `python calibrate_tap.py` after ANY change to the arm/camera pose or the kiosk screen. NB: a single
+    # global calibration fits ONE physical setup — a multi-kiosk rig where each kiosk has a different
+    # camera geometry would need per-kiosk values (future). ROOT cause is the robot rectification not
+    # being a faithful full-screen deskew; this compensates for it on our side. See CLAUDE.md.
+    camera_calib_ax: float = 1.0
+    camera_calib_bx: float = 0.0
+    camera_calib_ay: float = 1.0
+    camera_calib_by: float = 0.0
+
     # Physical kiosk screen dimensions (meters). NOT consumed by our code — the ROBOT converts the
     # pixel (u,v) we send into a 3D stylus point using its OWN per-kiosk screen pose (AprilTag) and
     # physical dims from ITS /setup config. Kept here (and on Robot Setup) as forward-looking values

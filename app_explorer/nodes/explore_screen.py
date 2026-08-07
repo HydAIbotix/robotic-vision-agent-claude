@@ -283,21 +283,46 @@ def _dom_correct_elements(elements: list) -> list:
         # DOM element's testid + aria-label (layout-independent ground truth) and snap to the DOM centre.
         if not matches:
             id_tokens = _meaningful_tokens(el.get("id", ""), label)
-            if len(id_tokens) >= 2:
-                tok_matches = []
+            el_type   = el.get("type", "")
+            if id_tokens:
+                cands = []   # (overlap_count, type_match, idx, dom_el) for every unused DOM element sharing ≥1 token
                 for idx, dom_el in enumerate(dom_els):
                     if idx in used:
                         continue
                     dom_tokens = _meaningful_tokens(dom_el.get("testid", ""), dom_el.get("aria", ""))
                     overlap = id_tokens & dom_tokens
-                    # Require a strong, specific overlap (≥2 shared identity tokens) so only the
-                    # correct product's control matches — {nexora, phone, increase} is unique to it.
-                    if len(overlap) >= 2:
-                        dist = math.hypot(dom_el["cx"] - cx, dom_el["cy"] - cy)
-                        tok_matches.append((-len(overlap), dist if plausible else idx, idx, dom_el))
-                if tok_matches:
-                    tok_matches.sort(key=lambda m: (m[0], m[1]))   # most overlap, then nearest/DOM-order
-                    _, _, t_idx, t_dom = tok_matches[0]
+                    if not overlap:
+                        continue
+                    dom_tag = dom_el.get("tag", "")
+                    type_match = (
+                        (el_type == "input"  and dom_tag == "input")  or
+                        (el_type == "button" and dom_tag == "button") or
+                        (el_type == "link"   and dom_tag in ("a", "button"))
+                    )
+                    cands.append((len(overlap), type_match, idx, dom_el))
+
+                pick = None
+                strong = [c for c in cands if c[0] >= 2]
+                if strong:
+                    # ≥2 shared identity tokens → unambiguous (e.g. {nexora, phone, increase} is unique
+                    # to that one product's control). Prefer most overlap, then a type match, then nearest.
+                    strong.sort(key=lambda c: (-c[0], not c[1],
+                                               math.hypot(c[3]["cx"] - cx, c[3]["cy"] - cy) if plausible else c[2]))
+                    pick = strong[0]
+                else:
+                    # A SINGLE shared SPECIFIC token is enough ONLY when it is UNAMBIGUOUS: exactly one
+                    # unused, TYPE-COMPATIBLE DOM element shares it. This snaps login inputs — app_map id
+                    # 'email_input'/'password_input' vs DOM testid 'signin-email'/'signin-password' share
+                    # only 'email'/'password' ('input' is generic) — to their TRUE DOM centre, which the
+                    # raw vision estimate placed ~40-70px too high (observed: the arm tapped the TOP edge
+                    # of the email field, not its centre). Safe: if two elements share the token (e.g. two
+                    # 'add' buttons) there is >1 candidate → stays ambiguous → no snap (keeps vision).
+                    typed_single = [c for c in cands if c[1]]
+                    if len(typed_single) == 1:
+                        pick = typed_single[0]
+
+                if pick:
+                    _, _, t_idx, t_dom = pick
                     matches = [(0, math.hypot(t_dom["cx"] - cx, t_dom["cy"] - cy), t_idx, t_dom)]
 
         if matches:

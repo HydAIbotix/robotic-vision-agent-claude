@@ -476,10 +476,25 @@ def _annotate_click(src_path: str, points: list[tuple[int, int]], save_path: str
 
 
 def _scale(x: int, y: int) -> tuple[int, int]:
-    """Scale viewport pixel (x,y) → robot camera (u,v)."""
+    """Map an app_map viewport pixel (x,y) → robot camera pixel (u,v).
+
+    Two stages:
+      1. viewport→camera resolution scale (sx, sy = measured_camera / viewport), auto-calibrated from
+         each /capture response.
+      2. a per-axis AFFINE correction in FRACTION space (settings.camera_calib_a*/b*) that compensates
+         for the rectified /capture frame NOT being a faithful full-screen deskew (it is a vertical crop
+         of the display — see config.py). With the default a=1,b=0 this stage is a NO-OP and the result
+         is byte-identical to the old plain scale, so playwright/demo and un-calibrated rigs are unchanged.
+
+    camera_frac_axis = a_axis * (coord/viewport_axis) + b_axis ;  pixel = camera_frac_axis * camera_axis
+    Fraction space keeps the calibration resolution-independent (works at 1405×579 or 1382×571)."""
     sx = _calibration.get("scale_x") or (settings.robot_camera_width  / settings.viewport_width)
     sy = _calibration.get("scale_y") or (settings.robot_camera_height / settings.viewport_height)
-    return int(round(x * sx)), int(round(y * sy))
+    cam_w = sx * settings.viewport_width    # measured (or seed) camera resolution
+    cam_h = sy * settings.viewport_height
+    fx = settings.camera_calib_ax * (x / settings.viewport_width)  + settings.camera_calib_bx
+    fy = settings.camera_calib_ay * (y / settings.viewport_height) + settings.camera_calib_by
+    return int(round(fx * cam_w)), int(round(fy * cam_h))
 
 
 def _ensure_localized() -> None:
@@ -650,8 +665,10 @@ def tap(x: int, y: int) -> dict:
         "capture_after_last": True,
         "delay_between_ms":   800,
     })
+    # Label shows BOTH the app-map viewport point AND the ACTUAL camera pixel (u,v) sent in the
+    # /screen/click payload, so the live monitor shows exactly what the robot was told to touch.
     state = _poll("/arm/state", cmd_id, settings.arm_move_timeout_s, abort_ep="/arm/abort",
-                  initial_state=post_resp.get("state", ""), label=f"tap ({x},{y})")
+                  initial_state=post_resp.get("state", ""), label=f"tap ({x},{y})->cam({u},{v})")
     # The arm can report a TERMINAL state even when the touch itself failed to land (e.g. a linear
     # descend that could not be planned) — verify the click_result actually completed, else raise so
     # the runner fails this step and hands off to Tier-3 instead of typing into an unfocused field.
@@ -871,7 +888,8 @@ def swipe(x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> dict:
         "delay_between_ms": duration_ms,
     })
     state = _poll("/arm/state", cmd_id, settings.arm_move_timeout_s, abort_ep="/arm/abort",
-                  initial_state=swipe_resp.get("state", ""), label=f"swipe ({x1},{y1})->({x2},{y2})")
+                  initial_state=swipe_resp.get("state", ""),
+                  label=f"swipe ({x1},{y1})->({x2},{y2}) cam({u1},{v1})->({u2},{v2})")
     _check_click_completed(state, swipe_resp, cmd_id)
     return {"success": True}
 

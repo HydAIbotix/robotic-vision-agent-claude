@@ -2480,7 +2480,12 @@ def _execute_run(run_id: str, req: RunRequest):
         run.total        = len(test_results)
         run.passed       = sum(1 for r in test_results if r.get("outcome") == "passed")
         run.failed       = run.total - run.passed
-        run.status       = "completed"
+        # A suite that finished but had ANY failing test (incl. a robot-error hard stop that files a
+        # defect) is a FAILED run, not "Done" — the StatusBadge shows 'completed' as green "Done", so a
+        # run with failures must land on 'failed' (red "Failed"). Only an all-pass run stays 'completed'.
+        # LiveMonitor already treats 'failed' as terminal and shows an error banner only when run.error
+        # is set (crash), so a completed-with-failures run reads as Failed WITHOUT a false crash banner.
+        run.status       = "failed" if run.failed > 0 else "completed"
         run.completed_at = datetime.utcnow()
         db.commit()
         _broadcast(run_id, {"event": "run_completed", "run_id": run_id,
