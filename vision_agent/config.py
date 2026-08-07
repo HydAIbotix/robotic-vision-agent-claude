@@ -223,6 +223,28 @@ class Settings(BaseSettings):
     # fail the step gracefully (see run_vision_step's try/except → Tier-3/fail path). Kept small and
     # configurable so a hung robot never stalls a whole suite. Applies to every real-robot API call.
     robot_response_timeout_s: float = 2.0
+    # Max time to keep RETRYING a state poll while the robot REST API is UNREACHABLE (connection
+    # refused / read timeout on every GET). _poll otherwise swallows transient read errors and retries
+    # until the (possibly long) command deadline — observed 2026-08-07: when the robot machine's API
+    # was DOWN mid-run, a 19-key type poll (deadline 60 + 19*15 = 345s) kept retrying for the FULL
+    # 345s before giving up. This caps the "API is down" case: once the poll has seen only connection
+    # errors for this long, it fails fast with a clear "robot unreachable" error. A robot that is UP
+    # and genuinely moving (successful 'moving' reads) is unaffected — it uses the full command
+    # deadline. Configurable via ROBOT_UNREACHABLE_TIMEOUT_S.
+    robot_unreachable_timeout_s: float = 60.0
+    # When a real-robot ACTION fails with a genuine ROBOT/HARDWARE fault (a motion-planning failure
+    # like DESCEND_LIN_FAILED / HOVER_FAILED, a click that did-not-land, an API timeout, or the API
+    # being unreachable), STOP the run instead of handing off to Tier-3 vision. Tier-3 would just
+    # drive the SAME faulted arm — which may be stuck and unable to return home — so retrying is
+    # pointless and potentially unsafe. Coordinate/plan misses (wrong/absent coords, screen mismatch)
+    # are NOT robot faults and still fall through to Tier-3. Real backend only (playwright/demo keep
+    # the Tier-3 handoff). Set False to restore the old always-Tier-3 behaviour. See CLAUDE.md.
+    robot_error_stops_run: bool = True
+    # Save an annotated BEFORE screenshot (the last camera frame with a crosshair at the exact camera
+    # pixel the arm will touch) and the AFTER frame (the /screen/click response image) for every real
+    # tap, into the run's per-run screenshots folder with identifiable names (before_<cmd>_at_<u>-<v>.png
+    # / after_<cmd>.jpg). Diagnostic aid for verifying tap accuracy; real backend only. Set False to skip.
+    save_click_screenshots: bool = True
     # POST /capture is BLOCKING and runs the full perception pipeline — which per the spec MOVES the
     # arm to an inspection pose first, then does AprilTag detection + rectification. That arm move can
     # take several seconds (much longer than the 2s per-call timeout), especially right after a failed

@@ -18,6 +18,23 @@ from test_runner.state import TestRunnerState, TestResult
 from test_runner import broadcaster
 
 
+# Substrings that mark a genuine ROBOT/HARDWARE fault (as opposed to a plan/coordinate miss). When a
+# real-robot action fails for one of these reasons the arm may be stuck / unable to return home, so
+# Tier-3 (which would drive the SAME arm) is pointless — the run STOPS instead (see run_vision_step).
+_ROBOT_FAULT_MARKERS = (
+    "did not land", "descend", "hover", "move_action", "moveit", "motion",
+    "error_code", "unreachable", "not responding", "connection", "refused",
+    "timed out", "timeout", "ptp", "planning",
+)
+
+
+def _is_robot_fault(reason: str) -> bool:
+    """True when a failure reason looks like a physical robot fault (motion planning / reachability /
+    API unreachable) rather than a coordinate or data issue that Tier-3 vision could recover."""
+    r = (reason or "").lower()
+    return any(m in r for m in _ROBOT_FAULT_MARKERS)
+
+
 # ── Tier 1/2: structured plan execution ──────────────────────────────────────
 
 def _resolve_credentials(value: str, credential_scenario: str, credentials: dict) -> str:
@@ -553,11 +570,13 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             val = val.replace(f"{{{{captured.{name}}}}}", str(cv))
         return val
 
-    def _robot_fail(idx: int, step_label: str, exc: Exception) -> None:
-        """Record a robot-action failure (e.g. a real-robot API timeout) as a normal failed step
-        so the run follows the EXISTING failure path (hand off to Tier-3, then fail) instead of
-        crashing the whole suite. Applies to every backend — playwright errors and real-robot
-        timeouts alike."""
+    def _robot_fail(idx: int, step_label: str, exc: Exception) -> str:
+        """Record a robot-action EXCEPTION (real-robot API timeout, unreachable, a click that
+        did-not-land, a motion-planning failure) as a failed step and return the outcome string
+        "robot_error". The caller returns that outcome so run_vision_step STOPS the run on a genuine
+        robot fault (real backend) instead of handing off to Tier-3 — Tier-3 would just drive the
+        same faulted arm, which may be stuck/unable to return home. Backend-agnostic recording; the
+        stop decision itself is scoped to the real backend in run_vision_step."""
         reason = f"{type(exc).__name__}: {exc}"
         print(f"    {idx:>2}. ✗ robot action failed — {reason}")
         sr = {"step": step_label, "success": False, "method": "robot_error", "note": reason,
@@ -566,6 +585,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
         if run_id:
             broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id,
                                       "test_id": test_id, "step_index": idx, **sr})
+        return "robot_error"
 
     def _cap(tag: str, idx: int) -> str:
         """Capture the current screen into the run's screenshot folder. Returns the
@@ -693,8 +713,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                         # Playwright: point the browser at this kiosk's app URL. (No-op on real.)
                         _switch_browser_to(dev_cfg, target_kid, target_kid)
                     except Exception as exc:
-                        _robot_fail(i, f"switch to kiosk {target_kid}", exc)
-                        return step_results, "failed", captured
+                        return step_results, _robot_fail(i, f"switch to kiosk {target_kid}", exc), captured
                     current_kiosk = target_kid
                 else:
                     print(f"    [CROSS-KIOSK] ⚠ no device/URL for kiosk '{target_kid}' — cannot switch; "
@@ -887,9 +906,9 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             try:
                 tap_result = robot.tap(px, py)
             except Exception as exc:
-                # e.g. real-robot API timeout (robot_response_timeout_s) — fail gracefully → Tier-3.
-                _robot_fail(i, f"tap: {eid} @ ({px},{py})", exc)
-                return step_results, "failed", captured
+                # Robot fault (API timeout/unreachable, click did-not-land, motion-plan failure) →
+                # STOP on the real backend (no Tier-3); playwright/demo still fall through to Tier-3.
+                return step_results, _robot_fail(i, f"tap: {eid} @ ({px},{py})", exc), captured
             time.sleep(0.5)
             # Fresh post-tap image for the next verify step.
             #   playwright → cheap browser screenshot; also saved as step evidence (UI).
@@ -897,7 +916,8 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             #                (tap_result["image_path"]); reuse it — no extra /capture cycle.
             #                Not surfaced as UI step evidence for real-robot runs.
             #   demo       → verify always passes; no image needed.
-            after_shot = ""
+            after_shot  = ""
+            before_shot = ""
             if settings.robot_backend == "playwright":
                 after_shot = _cap("after", i)
                 if after_shot:
@@ -913,6 +933,13 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                     tap_img = snap_path
                 if tap_img:
                     last_screenshot = tap_img
+                # Real backend: surface the annotated BEFORE (crosshair at the tapped camera pixel)
+                # and the AFTER (post-tap /screen/click frame) as this step's evidence, so an operator
+                # can verify tap accuracy in the monitor/results. real_robot saved both into the run's
+                # per-run screenshots folder.
+                if settings.robot_backend == "real":
+                    before_shot = (tap_result or {}).get("before_image_path", "") or ""
+                    after_shot  = (tap_result or {}).get("after_image_path", "") or tap_img
             # Navigation prediction from app_map transitions
             sc_data  = (app_map or {}).get("screens", {}).get(sid, {})
             predicted = (sc_data.get("transitions") or {}).get(eid)
@@ -920,6 +947,8 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 print(f"         → nav prediction: '{predicted}' [app_map transitions]")
             sr = {"step": f"tap: {eid} @ ({px},{py})", "success": True, "method": "app_map",
                   "screen_id": sid, "element_id": eid, "screenshot_after": after_shot}
+            if before_shot:
+                sr["screenshot_before"] = before_shot
             step_results.append(sr)
             if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
             continue
@@ -957,8 +986,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 print(f"    {i:>2}. type  {value!r}")
                 type_res = robot.type_text(value, clear_first=True)
             except Exception as exc:
-                _robot_fail(i, f"type: {value[:30]}", exc)
-                return step_results, "failed", captured
+                return step_results, _robot_fail(i, f"type: {value[:30]}", exc), captured
             # type_text reports success=False when it could NOT actually enter the value (real robot:
             # no keyboard_map loaded, or none of the characters exist in the map).  Fail the step so
             # the run never falsely PASSES a login it never typed — it hands off to Tier-3 vision
@@ -966,12 +994,19 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             # always return success=True, so this is a no-op for them.)
             if isinstance(type_res, dict) and type_res.get("success") is False:
                 reason = type_res.get("error") or "type did not enter the value"
-                print(f"    {i:>2}. ✗ type — {reason} → failing step (hand off to Tier-3 vision)")
-                sr = {"step": f"type: {value[:30]}", "success": False, "method": "type_failed",
+                # A partial type on the real robot fails via a click that did-not-land (DESCEND/HOVER
+                # etc.) — that is a robot FAULT (stop, no Tier-3). A "keyboard_map not loaded"/"no
+                # characters" reason is a DATA issue → keep the Tier-3 handoff so vision can try.
+                fault  = _is_robot_fault(reason)
+                method = "robot_error" if fault else "type_failed"
+                tail   = "→ STOPPING (robot fault)" if fault else "→ failing step (hand off to Tier-3 vision)"
+                print(f"    {i:>2}. ✗ type — {reason} {tail}")
+                sr = {"step": f"type: {value[:30]}", "success": False, "method": method,
+                      "note": reason if fault else "",
                       "observation": f"Could not type {value!r}: {reason}"}
                 step_results.append(sr)
                 if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
-                return step_results, "failed", captured
+                return step_results, ("robot_error" if fault else "failed"), captured
             time.sleep(0.3)
             after_shot = ""
             if settings.robot_backend == "playwright":
@@ -1066,8 +1101,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                     current_kiosk = target or _kid_of_dev(target_alias)
             except Exception as exc:
                 _flush_robot_events()
-                _robot_fail(i, f"move: AGV → {target_alias or target}", exc)
-                return step_results, "failed", captured
+                return step_results, _robot_fail(i, f"move: AGV → {target_alias or target}", exc), captured
             _flush_robot_events()
             note = f"AGV moved to {target}" + (" (simulated)" if (res or {}).get("simulated") else "")
             sr = {"step": f"move: AGV → {target_alias or target}", "success": True, "method": "robot_base",
@@ -1106,8 +1140,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                     st = {}
             except Exception as exc:
                 _flush_robot_events()
-                _robot_fail(i, f"check_state: {target}", exc)
-                return step_results, "failed", captured
+                return step_results, _robot_fail(i, f"check_state: {target}", exc), captured
             _flush_robot_events()
             actual = str((st or {}).get("state", "")).lower()
             # The AGV base reports "ready" when it has arrived and is holding position — that IS the
@@ -1494,6 +1527,35 @@ def run_vision_step(state: TestRunnerState) -> dict:
             start_kiosk=tc.get("kiosk_id", ""),
         )
         passed = sum(1 for r in step_results if r["success"])
+
+        # ── ROBOT / HARDWARE FAULT — STOP, do NOT hand off to Tier-3 ──────────────
+        # A genuine robot fault (motion-planning failure like DESCEND_LIN_FAILED / HOVER_FAILED, a
+        # click that did-not-land, an API timeout, or the robot API being unreachable) means the arm
+        # may be stuck and unable to return to its home position. Tier-3 would just issue MORE taps to
+        # the SAME faulted arm — pointless and potentially unsafe — so we stop the run and report the
+        # fault. Scoped to the real backend (playwright/demo faults still fall through to Tier-3), and
+        # gated by settings.robot_error_stops_run so the old always-Tier-3 behaviour can be restored.
+        if outcome == "robot_error":
+            if settings.robot_backend == "real" and settings.robot_error_stops_run:
+                last_sr = step_results[-1] if step_results else {}
+                why = last_sr.get("observation") or last_sr.get("note") or "robot fault"
+                print(f"\n  [RUN] TIER-1/2 EXECUTION: ROBOT ERROR at step {len(step_results)} — {why}")
+                print("  [RUN] → STOPPING run (Tier-3 SKIPPED): a physical robot fault means the arm may be "
+                      "unable to recover / return home; retrying via vision would drive the same faulted arm.")
+                if run_id:
+                    broadcaster.emit(run_id, {"event": "log", "run_id": run_id, "test_id": tc["test_id"],
+                                              "message": f"[ROBOT ERROR] {why} — run STOPPED (Tier-3 skipped)"})
+                test_result: TestResult = {
+                    "test_id":        tc["test_id"],
+                    "summary":        tc["summary"],
+                    "outcome":        "failed",
+                    "step_results":   step_results,
+                    "vision_summary": f"ROBOT ERROR [{backend}] — run STOPPED, Tier-3 skipped: {why}",
+                    "robot_error":    True,
+                }
+                return {"test_results": [*(state.get("test_results") or []), test_result]}
+            # playwright/demo, or the stop-gate is disabled → treat like a normal failure (Tier-3).
+            outcome = "failed"
 
         # On failure: hand off to Tier-3, ALWAYS resuming from the current screen.
         if outcome in ("failed", "vision_required"):

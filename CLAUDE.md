@@ -1310,6 +1310,76 @@ all verified by measuring the live app in Playwright.**
   for 0-LLM Tier-1; (6) restart the backend, then run TC-RPS-001. See [[agv-hardware-test-2026-07-13]],
   [[camera-vision-test-2026-07-16]].
 
+### Live RPS sign-in fault run — unreachable timeout, robot-error stop, click screenshots, per-run results (2026-08-07)
+
+The operator ran TC-RPS-001 on the real robot; four issues raised. All fixed no-regression (real-robot
+paths + a per-run artifact writer; playwright/demo unchanged). New `tests/test_robot_faults.py` 8/8; the
+prior suites still green (`test_arm_poll` 9, `test_keyboard_typing` 15, `test_agv_gate` 7,
+`test_camera_vision` 15, `test_dom_correct` 4, `test_analyze_center` 2). The 4 `test_template_match`
+failures on this box are PRE-EXISTING/ENVIRONMENTAL — they assert a filename in the external
+`Image_processor/uploads` folder where the operator added new `login__*.png` captures; unrelated to these
+edits. All edited modules import clean; frontend `tsc -b` clean.
+
+- ✅ **#1 — a DOWN robot API made the poll wait the whole 345s command deadline.** When the robot
+  machine's REST API isn't running, every `GET /arm/state` connection-refuses; `_poll` swallowed the
+  read error and RETRIED until the command deadline — and a 19-key type's deadline is
+  `arm_move_timeout_s + N*arm_key_tap_timeout_s = 60 + 19*15 = 345s`, so it waited ~345s (the operator's
+  log: `TimeoutError … timed out after 345.0s … last state 'moving'`, then a `/capture` connection-
+  refused). Fix (`real_robot._poll`): track the first connection failure and, once the poll has seen
+  ONLY connection errors for `settings.robot_unreachable_timeout_s` (**new, default 60s**,
+  `ROBOT_UNREACHABLE_TIMEOUT_S`), raise `ConnectionError("robot REST API not responding")` immediately —
+  recovery is skipped (abort/home would hit the same dead API). A robot that is UP and genuinely moving
+  (successful `moving` reads reset the timer) still uses the full command deadline, so slow real typing
+  is unaffected. `_poll_base` already fails fast (its `_get_quiet` isn't wrapped). Tested: unreachable →
+  raises in ~1s with a 1s cap (not 300s); a flaky API that recovers → poll still returns `ready`.
+- ✅ **#2 — a genuine robot fault handed off to Tier-3 (should STOP).** `DESCEND_LIN_FAILED` (the arm
+  couldn't plan the linear descend to touch) surfaced correctly via `_check_click_completed`
+  (`completed 0/1`), but the runner treated it like any Tier-1/2 failure and handed off to TIER-3.
+  **Why Tier-3 was used at all (answering the operator's Q):** by design ANY Tier-1/2 step failure →
+  Tier-3, because MOST failures are stale/wrong coordinates or an uncharted screen, which Claude vision
+  can recover by re-reading the live screen. The code did NOT distinguish a *coordinate/plan miss* from a
+  *physical robot fault*. For a hardware fault that distinction matters: the arm may be stuck / unable to
+  return home, and Tier-3 would just drive the SAME faulted arm (more taps, possibly unsafe) — pointless.
+  Fix: robot-action EXCEPTIONS and did-not-land click results now yield a distinct outcome
+  **`robot_error`** (`run_vision_step`: `_robot_fail` returns it; the tap/type/move/check_state/cross-
+  kiosk catch sites propagate it; a `type_text` `success:False` is classified by `_is_robot_fault` —
+  DESCEND/HOVER/move_action/timeout/unreachable/planning → `robot_error`, while a DATA issue like
+  `keyboard_map not loaded` stays `failed` → Tier-3). On the REAL backend a `robot_error` **STOPS the
+  run** (no Tier-3) with a clear `[ROBOT ERROR] … run STOPPED (Tier-3 skipped)` monitor log and a
+  `robot_error:true` test result; playwright/demo still fall through to Tier-3 (no regression). Gated by
+  `settings.robot_error_stops_run` (**new, default True**; False restores always-Tier-3). NB the
+  underlying descend/hover failure is a PHYSICAL reach/planning limit (myCobot 280) — remedies unchanged:
+  keep the base close, shrink the app, or fix robot-side MoveIt; our fix just DETECTS+STOPS instead of
+  futilely retrying.
+- ✅ **#3 — before/after click screenshots.** Every real `tap` now saves an annotated **BEFORE** image —
+  the most recent camera frame with a red crosshair + the exact camera pixel `(u,v)` the arm will touch —
+  and the **AFTER** frame (the `/screen/click` response image the API already returns). Both land in the
+  run's per-run screenshots folder with identifiable names `before_<cmd>_at_<u>-<v>.png` /
+  `after_<cmd>.jpg` (`real_robot._annotate_click`, pure PIL, never raises). No extra `/capture` cycle —
+  the BEFORE uses a cached `_last_frame_path` (updated by every capture AND by the previous tap's returned
+  frame, which IS the current screen). `run_vision_step` surfaces both on the tap step result
+  (`screenshot_before`/`screenshot_after`, real backend); the Studio `StepShots.tsx` now renders both
+  thumbnails (`client.ts` `StepResult` gained `screenshot_before`). Toggle `settings.save_click_screenshots`
+  (default True). Playwright/demo unchanged (playwright still saves its browser "after").
+- ✅ **#4 — every run's results are now PRESERVED (was overwriting).** `_execute_run` writes a per-run
+  folder **`results/<run_id>/`** containing `results.json` (run metadata + full step-by-step results incl.
+  tapped coordinates + robot telemetry), a rendered **`run.log`** (deterministic, thread-safe: each test,
+  each step with action/coords/result/observation, then the `[ROBOT API]` telemetry with the exact camera
+  pixels + latency/status), and **`run_console.log`** (the full teed stdout of the run — every action,
+  tier routing, verdict). Unique per `run_id`, so a later run can never overwrite an earlier one. The
+  legacy `results/suite_<ts>.json` (`finalize_tests`) is kept for the CLI path. The stdout tee is guarded
+  (`_run_tee_active`) so overlapping runs can't corrupt the global streams; artifact-writing runs in the
+  `finally` so even a failed/errored run is preserved.
+- **Config added** (`vision_agent/config.py`): `robot_unreachable_timeout_s` (60), `robot_error_stops_run`
+  (True), `save_click_screenshots` (True). **Files:** `config.py`, `vision_agent/robot/real_robot.py`,
+  `test_runner/nodes/run_vision_step.py`, `api/main.py`, sibling `kiosk-test-studio` `StepShots.tsx` +
+  `client.ts`, new `tests/test_robot_faults.py`.
+- **User: RESTART the backend** (free port 8001, relaunch) so these load, then re-run TC-RPS-001. Expected:
+  if the robot API is down the step fails within ~60s (not 345s); a real DESCEND/HOVER fault STOPS the run
+  (no Tier-3 wandering); each tap shows a before(crosshair)/after pair in the monitor; and the run is saved
+  under `results/<run_id>/`. If the descend still fails, it's the physical reach limit — nudge the base
+  closer/lower. See [[agv-hardware-test-2026-07-13]].
+
 ### Tier architecture clarified + real-robot 0-LLM plan + Tier-3 cost (analysis only, 2026-07-23)
 
 Operator questions after the phone-photo test. **No code changed** — this records the architecture

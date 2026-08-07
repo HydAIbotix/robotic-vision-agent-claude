@@ -44,6 +44,12 @@ _keyboard_map: dict = {}
 _calibration:  dict = {}          # {"scale_x": float, "scale_y": float}
 _current_kiosk_id: str = ""
 
+# Path of the most recent camera frame we have on disk (set by every capture_screen success and by
+# the post-tap /screen/click frame). Used to build the annotated "before click" screenshot — the
+# frame the arm is about to touch — WITHOUT an extra /capture arm cycle (the previous tap's returned
+# frame IS the current screen, since tap reuses capture_after_last).
+_last_frame_path: str = ""
+
 # Screen-localization latch. Per the Robot API spec, /screen/click and every /card/* op REQUIRE at
 # least one successful screen capture (type:"screen") since the LAST base motion — the kiosk's screen
 # pose is derived from that capture, and calling before it returns 409. The base move clears this;
@@ -336,6 +342,8 @@ def _poll(
     seen_moving   = False
     last_tick     = 0.0
     last_state: dict = {}
+    first_conn_err: float = 0.0   # when the API first became unreachable during this poll (0 = reachable)
+    unreachable_after = settings.robot_unreachable_timeout_s
     if label:
         _arm_status(state_ep, cmd_id, str(initial_state or "moving"), label, 0.0)
         last_tick = time.time()
@@ -343,9 +351,23 @@ def _poll(
     while time.time() < deadline:
         try:
             last_state = _get_quiet(state_ep)
+            first_conn_err = 0.0   # reachable again → reset the unreachable timer
         except Exception as exc:
-            # A transient state-read error shouldn't abort the whole command; retry until deadline.
-            print(f"    [ROBOT ARM] state read error (retrying): {exc}")
+            # A transient state-read error shouldn't abort the whole command; retry — BUT if the robot
+            # API stays UNREACHABLE (connection refused / read timeout on every poll) beyond
+            # robot_unreachable_timeout_s, fail fast instead of retrying for the whole (possibly long,
+            # e.g. 345s for a 19-key type) command deadline. Recovery is skipped — abort/home would
+            # only hit the same dead API. This is the "REST API not running on the robot machine" case.
+            now = time.time()
+            if first_conn_err == 0.0:
+                first_conn_err = now
+            waited = now - first_conn_err
+            if waited >= unreachable_after:
+                raise ConnectionError(
+                    f"Robot {state_ep} unreachable for {waited:.0f}s (>= {unreachable_after:.0f}s) "
+                    f"for {label or cmd_id} — robot REST API not responding: {exc}"
+                )
+            print(f"    [ROBOT ARM] state read error (retrying, unreachable {waited:.0f}/{unreachable_after:.0f}s): {exc}")
             time.sleep(settings.robot_poll_interval_s)
             continue
         s       = str(last_state.get("state", "")).lower()
@@ -431,6 +453,28 @@ def _poll_base(cmd_id: str, timeout_s: float, initial_state: str = "") -> dict:
     )
 
 
+def _annotate_click(src_path: str, points: list[tuple[int, int]], save_path: str) -> str:
+    """Draw a crosshair + circle (and the pixel coordinate) at each camera-space (u,v) the arm will
+    touch, on a COPY of the given camera frame. Returns save_path on success, "" on any failure.
+    Pure PIL (already a dep); never raises — a screenshot aid must not break a tap."""
+    try:
+        from PIL import Image, ImageDraw
+        im = Image.open(src_path).convert("RGB")
+        d  = ImageDraw.Draw(im)
+        r  = 16
+        for (u, v) in points:
+            d.ellipse([u - r, v - r, u + r, v + r], outline=(255, 0, 0), width=3)
+            d.line([u - r - 10, v, u + r + 10, v], fill=(255, 0, 0), width=2)
+            d.line([u, v - r - 10, u, v + r + 10], fill=(255, 0, 0), width=2)
+            d.text((u + r + 4, v + 4), f"({u},{v})", fill=(255, 0, 0))
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        im.save(save_path)
+        return save_path
+    except Exception as exc:
+        print(f"    [ROBOT] before-click annotation failed: {exc}")
+        return ""
+
+
 def _scale(x: int, y: int) -> tuple[int, int]:
     """Scale viewport pixel (x,y) → robot camera (u,v)."""
     sx = _calibration.get("scale_x") or (settings.robot_camera_width  / settings.viewport_width)
@@ -510,7 +554,7 @@ def capture_screen(save_path: str) -> dict:
     Blocking — robot API returns image directly (not a poll pattern).
     Auto-updates calibration scale factors from the returned image dimensions.
     """
-    global _screen_localized
+    global _screen_localized, _last_frame_path
     cmd_id = _new_cmd_id("capture")
     t0   = time.time()
     resp = requests.post(
@@ -531,6 +575,7 @@ def capture_screen(save_path: str) -> dict:
     Path(save_path).write_bytes(img_bytes)
     # A successful type:"screen" capture establishes the screen pose used by /screen/click & /card/*.
     _screen_localized = True
+    _last_frame_path  = save_path   # newest camera frame — source for the next "before click" image
 
     # Update calibration whenever we learn new camera dimensions
     w, h = data.get("width"), data.get("height")
@@ -580,10 +625,21 @@ def tap(x: int, y: int) -> dict:
     decode and save it, then surface it as image_path so callers can reuse it for
     verification without a separate /capture round-trip (saves an arm cycle).
     """
+    global _last_frame_path
     _ensure_localized()   # /screen/click 409s without a capture since the last base motion
     u, v   = _scale(x, y)
     cmd_id = _new_cmd_id("arm-click")
     print(f"    [ROBOT] tap viewport({x},{y}) → camera({u},{v})")
+
+    # BEFORE screenshot: mark the exact camera pixel the arm is about to touch on the most recent
+    # frame, so an operator can verify tap accuracy. Uses the cached last frame (no extra /capture) —
+    # after _ensure_localized() this is guaranteed to exist for the first tap.
+    before_path = ""
+    if settings.save_click_screenshots and _last_frame_path and Path(_last_frame_path).exists():
+        before_path = _annotate_click(
+            _last_frame_path, [(u, v)],
+            str(Path(settings.screenshots_dir) / f"before_{cmd_id}_at_{u}-{v}.png"),
+        )
     # capture_after_last:true → the completion (GET /arm/state) carries a fresh rectified frame
     # (click_result.image_b64) taken delay_between_ms after the tap. We reuse it for verification
     # without a separate /capture arm cycle. delay_between_ms doubles as the post-tap settle so the
@@ -606,6 +662,8 @@ def tap(x: int, y: int) -> dict:
     time.sleep(0.8)
 
     result = {"success": True, "x": x, "y": y, "u": u, "v": v}
+    if before_path:
+        result["before_image_path"] = before_path
     # The camera frame may arrive in the click ack or in the completion state — check both.
     click_result = state.get("click_result") or post_resp.get("click_result") or {}
     b64 = click_result.get("image_b64")
@@ -613,10 +671,13 @@ def tap(x: int, y: int) -> dict:
         try:
             fmt = (click_result.get("format") or "jpeg").lower()
             ext = "jpg" if fmt in ("jpg", "jpeg") else fmt
-            save_path = str(Path(settings.screenshots_dir) / f"click_{cmd_id}.{ext}")
+            # AFTER screenshot = the frame the /screen/click response returned (post-tap, post-settle).
+            save_path = str(Path(settings.screenshots_dir) / f"after_{cmd_id}.{ext}")
             Path(save_path).parent.mkdir(parents=True, exist_ok=True)
             Path(save_path).write_bytes(base64.b64decode(b64))
-            result["image_path"] = save_path
+            result["image_path"]       = save_path   # back-compat: callers reuse this for the next verify
+            result["after_image_path"] = save_path
+            _last_frame_path           = save_path    # this IS the current screen → next tap's "before"
             w, h = click_result.get("width"), click_result.get("height")
             if w and h:
                 _calibration["scale_x"] = w / settings.viewport_width

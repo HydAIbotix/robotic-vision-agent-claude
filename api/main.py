@@ -120,6 +120,102 @@ def _run_screens_dir(run_id: str) -> Path:
     return _base_screens_dir() / run_id
 
 
+def _run_results_dir(run_id: str) -> Path:
+    """Per-run results folder: results/<run_id>/ — holds results.json + run.log so every run's
+    output is PRESERVED (unique per run_id, never overwritten by a later run)."""
+    return Path(settings.results_dir) / run_id
+
+
+class _Tee:
+    """Write to several streams at once (console + a per-run log file). Robust: a failing stream is
+    skipped so logging never breaks a run. Used to capture the full console log of one run to
+    results/<run_id>/run.log while still printing to the server console."""
+    def __init__(self, *streams):
+        self._streams = [s for s in streams if s is not None]
+
+    def write(self, data):
+        for s in self._streams:
+            try:
+                s.write(data)
+            except Exception:
+                pass
+        return len(data)
+
+    def flush(self):
+        for s in self._streams:
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        return False
+
+
+def _render_run_log(run_id: str, run, test_results: list, robot_events: list) -> str:
+    """Human-readable per-run action log rebuilt from the structured results — each test, each step
+    (action + coordinates + result + observation), plus the robot API telemetry (exact camera pixels
+    tapped, latency, HTTP status). Deterministic and thread-safe (does not rely on captured stdout)."""
+    lines: list[str] = []
+    lines.append(f"Run {run_id}")
+    lines.append(f"  backend={getattr(run, 'mode', '')}  kiosk={getattr(run, 'kiosk_id', '')}  "
+                 f"started={getattr(run, 'started_at', '')}  finished={datetime.utcnow().isoformat()}Z")
+    lines.append("")
+    for tr in test_results:
+        lines.append(f"[{tr.get('outcome','?').upper()}] {tr.get('test_id','')}  {tr.get('summary','')}")
+        for n, s in enumerate(tr.get("step_results") or [], 1):
+            ok = "PASS" if s.get("success") else "FAIL"
+            extra = []
+            for k in ("method", "screen_id", "element_id", "expected_screen", "actual_screen",
+                      "expected_text", "screenshot_before", "screenshot_after"):
+                if s.get(k):
+                    extra.append(f"{k}={s[k]}")
+            lines.append(f"   {n:>2}. [{ok}] {s.get('step','')}" + (("  (" + ", ".join(extra) + ")") if extra else ""))
+            if s.get("observation"):
+                lines.append(f"        → {s['observation']}")
+            if s.get("note"):
+                lines.append(f"        note: {s['note']}")
+        lines.append(f"   summary: {tr.get('vision_summary','')}")
+        lines.append("")
+    if robot_events:
+        lines.append("── Robot API telemetry (endpoint, cmd, camera coords, status, latency) ──")
+        for ev in robot_events:
+            coords = ""
+            if ev.get("u") is not None and ev.get("v") is not None:
+                coords = f" @cam({ev['u']},{ev['v']})"
+            lines.append(f"   {ev.get('request_time','')} {ev.get('event_type','')} {ev.get('endpoint','')}"
+                         f"{(' (' + ev.get('cmd_id','') + ')') if ev.get('cmd_id') else ''}{coords}"
+                         f" → {ev.get('http_status','?')} in {ev.get('latency_ms','?')}ms @ {ev.get('controller','')}")
+    return "\n".join(lines) + "\n"
+
+
+def _write_run_artifacts(run_id: str, run, test_results: list, robot_events: list) -> None:
+    """Persist this run's results to results/<run_id>/ (results.json + run.log). Never raises —
+    an artifact-write failure must not fail the run. Preserves EVERY run (unique per run_id)."""
+    try:
+        out_dir = _run_results_dir(run_id)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        doc = {
+            "run_id":       run_id,
+            "backend":      getattr(run, "mode", ""),
+            "kiosk_id":     getattr(run, "kiosk_id", ""),
+            "started_at":   str(getattr(run, "started_at", "")),
+            "finished_at":  datetime.utcnow().isoformat() + "Z",
+            "total":        getattr(run, "total", 0),
+            "passed":       getattr(run, "passed", 0),
+            "failed":       getattr(run, "failed", 0),
+            "status":       getattr(run, "status", ""),
+            "test_results": test_results,
+            "robot_events": robot_events,
+        }
+        (out_dir / "results.json").write_text(json.dumps(doc, indent=2, default=str), encoding="utf-8")
+        (out_dir / "run.log").write_text(_render_run_log(run_id, run, test_results, robot_events),
+                                         encoding="utf-8")
+        print(f"  [RUN] Results preserved → {out_dir}")
+    except Exception as exc:
+        print(f"  [RUN] could not write per-run results artifacts: {exc}")
+
+
 def _next_run_number() -> int:
     """Monotonic run counter persisted in results/.run_seq.  Reset deletes it → restarts at 1."""
     p = Path(settings.results_dir) / ".run_seq"
@@ -2182,6 +2278,10 @@ def _broadcast(run_id: str, data: dict):
             pass
 
 
+# Guards the global stdout/stderr tee so two overlapping runs can't clobber each other's streams.
+_run_tee_active = False
+
+
 def _execute_run(run_id: str, req: RunRequest):
     """Background thread: execute one test suite and write results to DB."""
     db = next(get_db())
@@ -2191,11 +2291,32 @@ def _execute_run(run_id: str, req: RunRequest):
 
     _prev_screens_dir = settings.screenshots_dir
     _prev_kiosk_url   = settings.kiosk_url
+    _prev_stdout, _prev_stderr = sys.stdout, sys.stderr
+    _log_fh = None
+    _teeing = False
+    test_results: list = []
     try:
         # Route this run's step screenshots into a per-run folder: screenshots/<run_id>/
         _run_dir = _run_screens_dir(run_id)
         _run_dir.mkdir(parents=True, exist_ok=True)
         settings.screenshots_dir = str(_run_dir)
+
+        # Preserve this run's FULL console log (every action, tapped coordinate, robot API call,
+        # tier routing, verdict) to results/<run_id>/run_console.log by teeing stdout/stderr. Guarded
+        # by _run_tee_active so overlapping runs don't corrupt the global streams (rare — the Studio
+        # runs sequentially); a run that can't tee still gets results.json + the rendered run.log.
+        global _run_tee_active
+        try:
+            _res_dir = _run_results_dir(run_id)
+            _res_dir.mkdir(parents=True, exist_ok=True)
+            if not _run_tee_active:
+                _log_fh = open(_res_dir / "run_console.log", "w", encoding="utf-8", errors="replace")
+                sys.stdout = _Tee(_prev_stdout, _log_fh)
+                sys.stderr = _Tee(_prev_stderr, _log_fh)
+                _run_tee_active = True
+                _teeing = True
+        except Exception:
+            _log_fh = None
 
         # SINGLE SOURCE OF TRUTH for the execution backend is the Configuration page's Robot
         # Connection setting (settings.robot_backend).  Record it on the run so the history
@@ -2392,6 +2513,30 @@ def _execute_run(run_id: str, req: RunRequest):
         # isn't misdirected by this run's per-kiosk overrides.
         settings.screenshots_dir = _prev_screens_dir
         settings.kiosk_url       = _prev_kiosk_url
+
+        # Preserve this run's results (results.json + rendered run.log) under results/<run_id>/ so
+        # every run is kept and never overwritten by a later one. Runs for BOTH pass and fail paths.
+        try:
+            _events: list = []
+            try:
+                from vision_agent import robot as _rb
+                if hasattr(_rb, "get_events"):
+                    _events = list(_rb.get_events() or [])
+            except Exception:
+                _events = []
+            _write_run_artifacts(run_id, run, test_results, _events)
+        except Exception as _ae:
+            print(f"  [RUN] artifact write skipped: {_ae}")
+
+        # Restore stdout/stderr and close the per-run console log.
+        if _teeing:
+            sys.stdout, sys.stderr = _prev_stdout, _prev_stderr
+            _run_tee_active = False
+        if _log_fh is not None:
+            try:
+                _log_fh.close()
+            except Exception:
+                pass
 
 
 def _run_defect_agent(run_id: str, kiosk_id: str, failed_results: list):
