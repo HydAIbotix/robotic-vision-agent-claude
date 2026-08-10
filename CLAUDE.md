@@ -2083,6 +2083,105 @@ identical for playwright AND real robot; no VPS/RPS-specific code.**
   give a cleaner `expected_screen` on the result verifies, but is not required — the runtime rescue
   handles the current cached plan.
 
+### Camera Vision Test — show each element's CONVERTED click coordinate (u,v) (2026-08-10)
+
+Operator ask: on the Camera Vision Test page, for a frame captured via `/capture type=screen`, show
+the CENTER coordinates of every UI element as CONVERTED — i.e. the exact camera pixels already
+calculated and sent to the Robotics Click API during a real run. Added, no-regression, no change to
+the live tap path. New `tests/test_camera_vision.py` coord tests (3) + all prior camera tests green
+(18/18); `api.main` imports clean; frontend `tsc -b` clean.
+
+- **The runtime tap math was NOT touched.** The user declined an edit to `vision_agent/robot/real_robot.py`
+  (the live `_scale`), so the diagnostic computes the same result independently: new
+  `api/main._diag_scale_point(x, y, cam_w, cam_h)` is a documented MIRROR of `real_robot._scale` —
+  identical fraction-space per-axis affine using the SAME `settings.camera_calib_*` knobs, times the
+  frame's camera dims. Proven byte-identical to `_scale` for every test point (incl. the calibrated
+  axis) in `test_diag_scale_point_matches_runtime_scale`. `cam_w/cam_h` = the captured frame's measured
+  size, which is exactly what `real_robot.capture_screen` sets the live calibration from, so for a
+  `/capture`-derived frame the reported (u,v) equals what the runtime would send.
+- **How the (u,v) is derived (same pipeline as a real tap):** app_map element CENTER (exploration-
+  viewport pixels) → viewport→camera scale (`frame_dim ÷ exploration viewport`) → per-axis affine
+  calibration (`CAMERA_CALIB_*`). Element COORDINATES always come from the app_map (learned in
+  Playwright) — the camera image is only the resolution reference — so this is the tap coordinate
+  regardless of camera legibility.
+- **Backend (`api/main.py`, under `/api`):**
+  - `_element_coords_for_screen(screen, screen_id, source, cam_w, cam_h)` — converts every element's
+    center (and `bbox`, if present) via `_diag_scale_point`; skips malformed centers; returns
+    `{screen_id, source, camera_width/height, viewport_width/height, calibration{ax,bx,ay,by},
+    elements:[{id,type,label,center_viewport,center_camera,bbox_camera}], note}`.
+  - `POST /vision-test/analyze` now also returns an **`element_coords`** block for the auto-resolved
+    screen (resolution order: request `screen_id` → `expected_screen` → template-match best → aHash
+    best). `VisionAnalyzeRequest` gained optional `screen_id`.
+  - New **`POST /vision-test/element-coords {filename, screen_id}`** — fast, 0-LLM companion that
+    converts a CHOSEN screen's elements for the frame, so the operator can switch screens without
+    re-running the whole detection pipeline (404 on unknown screen).
+- **Frontend (`kiosk-test-studio` `CameraVisionTest.tsx` + `client.ts`):** a new **"UI element click
+  coordinates · exact pixels sent to the Robotics Click API"** card renders a per-element table
+  (id/type/label/viewport-center → **click (u,v)** in green), a screen selector (defaults to the
+  resolved screen; switching calls `/element-coords`), the frame/viewport/calibration context, and the
+  note. GREEN crosshair markers overlay each element's converted center on the frame (toggle in the
+  legend + card). `client.ts` gained `VisionElementCoord`/`VisionElementCoords`/`VisionElementCoordsResponse`
+  types, `element_coords` on `VisionAnalysis`, `screen_id` on the analyze body, and
+  `visionTestElementCoords()`.
+- **No-regression:** the analyze response only ADDS `element_coords` (existing fields intact); the new
+  endpoint is additive; `real_robot.py` and every backend tap path are untouched; playwright/demo
+  unaffected. Note the shown (u,v) are accurate only when the frame resolution + arm/camera pose match
+  the run's (same caveat as the live calibration) — re-capture after moving the arm/camera/kiosk. See
+  [[camera-vision-test-2026-07-16]], [[agv-hardware-test-2026-07-13]].
+
+### Self-calibrating vertical tap mapping — taps land on element CENTRES per pose (2026-08-10)
+
+Operator tested the Click API with the coordinates from the Camera Vision Test tool: on a real
+`/capture type=screen` login frame the email click landed **~2 cm BELOW the field** (in the gap above
+password); password and Sign In were likewise ~2 cm low. Root-caused and fixed generically (real tap
+path + the diagnostic tool share the fix); new `tests/test_screen_calibrate.py` 7/7 + all prior suites
+green; `api.main`/`real_robot`/`screen_calibrate` import clean; frontend `tsc -b` clean.
+
+- **Root cause — a STATIC per-axis calibration cannot track the robot's rectification.** app_map coords
+  are learned in the exploration viewport and scaled to the arm's rectified `/capture` frame. That scale
+  is exact only if the rectified frame is a faithful full-screen deskew — but it is a VERTICAL CROP whose
+  extent **varies per arm/camera pose**: two captures of the SAME login screen came back at aspect
+  **2.42:1 (1405×579)** and **1.06:1 (491×462)**. The `CAMERA_CALIB_AY=1.212` fit to the 2.42:1 pose
+  overshot on the 1.06:1 frame — it mapped email monitor-frac 0.470 to camera-frac 0.567 (y=262) when the
+  true email box centre was frac 0.429 (y=198). Horizontal stayed faithful (x centred). So no fixed AY/BY
+  can be right for the next pose.
+- **Fix — derive the vertical affine at RUN TIME from the login screen's own input boxes** (self-
+  calibrating per pose). New `vision_agent/vision/screen_calibrate.py`: `detect_form_field_fracs`
+  (luminance row-profile over the central column → the email+password box centre fractions, 0 LLM),
+  `fit_vertical_affine` (solves `camera_frac_y = ay·monitor_frac_y + by` from the two boxes, bounded
+  `ay∈[0.7,1.8], by∈[-0.45,0.2]`), `derive_login_vertical`, `find_login_anchors`. On the REAL login
+  frame it derives **ay≈1.373, by≈-0.216** and sends email→(246,**198**), password→(246,292),
+  sign_in→(246,365) — dead on the box centres (was 262 in the gap).
+- **Real tap path** (`vision_agent/robot/real_robot.py`): `_scale` now prefers per-pose overrides
+  `_calibration["calib_ay"/"calib_by"]` over the static `settings.camera_calib_ay/by` (horizontal
+  unchanged). New `calibrate_vertical_from_login(image_path, email_center_y, password_center_y)` derives
+  + stores them (gated by `settings.auto_tap_calibration`, bounded, low-confidence → keeps config, never
+  raises). Base motion (`navigate_to_kiosk`/`move_to_position`) CLEARS the per-pose calibration (pose
+  changed → re-derive at the next login). `test_runner/nodes/run_vision_step.py` calls it ONCE on the
+  leading login `verify` capture (real backend only), so the whole test — email→password→Sign In→next
+  screens — uses the pose-correct mapping (the base doesn't move mid-single-kiosk-test).
+- **Diagnostic tool** (`api/main.py` + `CameraVisionTest.tsx`): `_element_coords_for_screen` derives the
+  SAME per-pose affine from the analyzed frame for login screens (via `screen_calibrate`), so the tool
+  SHOWS the corrected click points that match what the robot will tap; the coordinates card reports the
+  vertical calibration + whether it was **self-calibrated from this login frame** (green) or the static
+  fallback. `_diag_scale_point` gained optional `ay/by`. This is why the operator could "see the
+  deviation in the tool" — and now sees it fixed there too.
+- **Config / .env:** new `auto_tap_calibration` (default True; `AUTO_TAP_CALIBRATION=true`). `.env`
+  `CAMERA_CALIB_AY/BY` RESET from the stale `1.212/-0.0034` to **identity `1.0/0.0`** — now only a
+  FALLBACK (used when auto-calibration is off, the test has no login screen, or a detection is low-
+  confidence). Identity = the unbiased faithful-rectification default.
+- **No-regression:** self-calibration is real-backend only + gated + bounded + falls back to config, so
+  it can never do worse than the static calibration; playwright/demo untouched (`_scale` is real-only,
+  the run hook is `robot_backend == "real"`). `_diag_scale_point` default args reproduce the old math.
+  Scope limited to the vertical axis (the one that drifts). For a screen with no login anchors the
+  login-derived calibration from earlier in the same test still applies (pose is fixed). See
+  [[camera-vision-test-2026-07-16]], [[agv-hardware-test-2026-07-13]].
+- **User: RESTART the backend** (loads the new code + `AUTO_TAP_CALIBRATION`), then re-run TC-RPS-001 —
+  the leading login verify self-calibrates and the email/password/Sign In taps should land on the box
+  centres. In the Camera Vision Test the coordinates card now reads "self-calibrated from this login
+  frame". If a login test ever can't self-calibrate (odd lighting), it falls back to identity; you can
+  still `python calibrate_tap.py` to set a static AY/BY, but you normally won't need to.
+
 ### Studio / infrastructure (sibling `kiosk-test-studio`)
 
 - ✅ **`fetch` had no timeout** — dashboard hung on "Loading…", Reset froze uncancellably, readiness

@@ -215,6 +215,90 @@ def test_analyze_returns_enhanced_block_and_saves_frame():
     saved.unlink(missing_ok=True)
 
 
+# ── Element camera coordinates — the (u,v) sent to the Robotics Click API (2026-08-10) ──────────
+
+def test_diag_scale_point_matches_runtime_scale(monkeypatch):
+    """The diagnostic mirror MUST equal vision_agent.robot.real_robot._scale for any point, so the
+    Camera Vision Test shows the exact coordinates the runtime sends to the Click API."""
+    from vision_agent.config import settings
+    from vision_agent.robot import real_robot as rr
+    monkeypatch.setattr(settings, "viewport_width", 1920)
+    monkeypatch.setattr(settings, "viewport_height", 1080)
+    monkeypatch.setattr(settings, "camera_calib_ax", 1.0)
+    monkeypatch.setattr(settings, "camera_calib_bx", 0.0)
+    monkeypatch.setattr(settings, "camera_calib_ay", 1.212)
+    monkeypatch.setattr(settings, "camera_calib_by", -0.0034)
+    fw, fh = 1405, 579
+    rr._calibration["scale_x"] = fw / settings.viewport_width
+    rr._calibration["scale_y"] = fh / settings.viewport_height
+    try:
+        for x, y in [(960, 508), (960, 668), (960, 792), (0, 0), (1920, 1080), (463, 286)]:
+            assert m._diag_scale_point(x, y, fw, fh) == rr._scale(x, y), (x, y)
+    finally:
+        rr._calibration.clear()
+
+
+def test_element_coords_for_screen_converts_centers_and_bbox(monkeypatch):
+    from vision_agent.config import settings
+    monkeypatch.setattr(settings, "viewport_width", 1920)
+    monkeypatch.setattr(settings, "viewport_height", 1080)
+    monkeypatch.setattr(settings, "camera_calib_ax", 1.0)
+    monkeypatch.setattr(settings, "camera_calib_bx", 0.0)
+    monkeypatch.setattr(settings, "camera_calib_ay", 1.212)
+    monkeypatch.setattr(settings, "camera_calib_by", -0.0034)
+    screen = {"elements": [
+        {"id": "email_input",  "type": "input",  "label": "Email",    "center": [960, 508], "bbox": [800, 480, 1120, 536]},
+        {"id": "sign_in_button", "type": "button", "label": "Sign In", "center": [960, 792]},
+        {"id": "broken", "type": "text", "label": "x", "center": [960]},   # malformed → skipped
+    ]}
+    # No image_bytes → no self-calibration → uses the (monkeypatched) static config calibration.
+    ec = m._element_coords_for_screen(screen, "login", "requested", 1405, 579)
+    assert ec["screen_id"] == "login" and ec["source"] == "requested"
+    assert ec["camera_width"] == 1405 and ec["camera_height"] == 579
+    assert ec["calibration"]["ax"] == 1.0 and ec["calibration"]["bx"] == 0.0
+    assert ec["calibration"]["ay"] == 1.212 and ec["calibration"]["by"] == -0.0034
+    assert ec["calibration"]["source"] == "config"
+    ids = [e["id"] for e in ec["elements"]]
+    assert ids == ["email_input", "sign_in_button"]          # malformed center dropped
+    email = ec["elements"][0]
+    assert email["center_camera"] == [702, 328]              # the true email-box centre (see _scale)
+    assert email["bbox_camera"] == [m._diag_scale_point(800, 480, 1405, 579)[0],
+                                    m._diag_scale_point(800, 480, 1405, 579)[1],
+                                    m._diag_scale_point(1120, 536, 1405, 579)[0],
+                                    m._diag_scale_point(1120, 536, 1405, 579)[1]]
+    assert ec["elements"][1]["bbox_camera"] is None          # no bbox on the button
+
+
+def test_element_coords_endpoint(monkeypatch, tmp_path):
+    """POST /vision-test/element-coords returns per-element camera coords for a chosen screen, and
+    404s for an unknown screen — without running any LLM/OCR."""
+    import json
+    from fastapi.testclient import TestClient
+    from vision_agent.config import settings
+
+    # Point app_map_path into a temp dir; _vision_test_dir() derives camera_captures/ from its parent,
+    # so frames and the app map live together and don't touch real project data.
+    fake_map_path = tmp_path / "app_map.json"
+    fake_map_path.write_text(json.dumps({"screens": {"login": {"app_id": "RPS", "elements": [
+        {"id": "email_input", "type": "input", "label": "Email", "center": [960, 508]},
+    ]}}}), encoding="utf-8")
+    monkeypatch.setattr(settings, "app_map_path", str(fake_map_path))
+    frame = m._vision_test_dir() / "unittest_coords.png"       # now under tmp_path/camera_captures
+    Image.new("RGB", (1405, 579), "navy").save(frame)
+
+    client = TestClient(m.app)
+    r = client.post("/api/vision-test/element-coords",
+                    json={"filename": "unittest_coords.png", "screen_id": "login"})
+    assert r.status_code == 200, r.text
+    ec = r.json()["element_coords"]
+    assert ec["screen_id"] == "login" and len(ec["elements"]) == 1
+    assert ec["elements"][0]["id"] == "email_input"
+    assert len(ec["elements"][0]["center_camera"]) == 2
+    bad = client.post("/api/vision-test/element-coords",
+                      json={"filename": "unittest_coords.png", "screen_id": "nope"})
+    assert bad.status_code == 404
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))

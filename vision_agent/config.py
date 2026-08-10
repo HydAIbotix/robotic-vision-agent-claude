@@ -174,6 +174,16 @@ class Settings(BaseSettings):
     camera_calib_ay: float = 1.0
     camera_calib_by: float = 0.0
 
+    # Runtime SELF-CALIBRATION of the vertical mapping (real backend). A fixed camera_calib_ay/by fit to
+    # one pose mis-places taps at the next pose, because the robot's rectified /capture crop VARIES per
+    # arm/camera pose (captures of the same login screen have come back at aspect 2.42:1 AND 1.06:1). When
+    # ON, the login screen's own email+password input boxes are detected in the live camera frame and the
+    # per-pose vertical affine is derived from them (see vision/screen_calibrate.py), overriding
+    # camera_calib_ay/by for that pose. Strictly bounded + confidence-gated: a low-confidence detection is
+    # rejected and the configured camera_calib_ay/by is used instead, so this can never do worse than the
+    # static calibration. Set False to force the static camera_calib_* only. Playwright/demo ignore it.
+    auto_tap_calibration: bool = True
+
     # Physical kiosk screen dimensions (meters). NOT consumed by our code — the ROBOT converts the
     # pixel (u,v) we send into a 3D stylus point using its OWN per-kiosk screen pose (AprilTag) and
     # physical dims from ITS /setup config. Kept here (and on Robot Setup) as forward-looking values

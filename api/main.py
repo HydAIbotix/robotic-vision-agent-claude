@@ -1253,12 +1253,115 @@ class VisionAnalyzeRequest(BaseModel):
     filename:        str
     expected_screen: Optional[str] = None   # optional: also report the phash distance to this screen
     use_claude:      bool = False           # also run the Tier-3 Claude-vision element analysis
+    screen_id:       Optional[str] = None   # optional: force which screen's element coords to convert
+
+
+class ElementCoordsRequest(BaseModel):
+    filename:  str
+    screen_id: str                          # which app_map screen's elements to convert for this frame
 
 
 # aHash distance thresholds — mirror validate_pipeline._match_by_phash so the verdict here matches
 # what a real run's Tier-1 screen check would conclude.
 _PHASH_MATCH_THRESHOLD    = 8
 _PHASH_MISMATCH_THRESHOLD = 20
+
+
+def _diag_scale_point(x: int, y: int, cam_w: float, cam_h: float,
+                      ay: Optional[float] = None, by: Optional[float] = None) -> tuple[int, int]:
+    """Mirror of vision_agent.robot.real_robot._scale (viewport→camera + per-axis affine calibration),
+    for the Camera Vision Test diagnostic ONLY — computed here so the live tap path (real_robot.py) is
+    never touched. Kept in LOCKSTEP with _scale: fraction-space affine, times the frame's camera dims.
+
+    The vertical affine (ay, by) defaults to settings.camera_calib_ay/by, but the caller passes the
+    PER-POSE values derived from the frame's login boxes (the same self-calibration the runtime does),
+    so the tool shows exactly what the robot would tap. cam_w/cam_h = the captured frame's measured
+    size (what real_robot.capture_screen calibrates the scale from)."""
+    ay = settings.camera_calib_ay if ay is None else ay
+    by = settings.camera_calib_by if by is None else by
+    fx = settings.camera_calib_ax * (x / settings.viewport_width)  + settings.camera_calib_bx
+    fy = ay * (y / settings.viewport_height) + by
+    return int(round(fx * cam_w)), int(round(fy * cam_h))
+
+
+def _element_coords_for_screen(screen: dict, screen_id: str, source: str,
+                               cam_w: int, cam_h: int, image_bytes: Optional[bytes] = None) -> dict:
+    """Convert every app_map element CENTER (and bbox, if present) of `screen` from the exploration
+    viewport to this camera frame, using the SAME math the runtime uses to build a Click-API tap.
+    These (u,v) are the exact pixels sent to the robot for each element on this screen.
+
+    When the screen is a login-type screen (email + password inputs) and auto_tap_calibration is on,
+    the vertical affine is DERIVED from this frame's own input boxes (self-calibration) — matching what
+    the real backend does per pose — instead of the static CAMERA_CALIB_AY/BY, so the shown coordinates
+    land on element centres regardless of how the rectification cropped this particular frame."""
+    # Per-pose vertical self-calibration (login screens only; falls back to config when not confident).
+    ay = by = None
+    calib_source = "config"
+    calib_extra: dict = {}
+    if settings.auto_tap_calibration and image_bytes:
+        try:
+            from vision_agent.vision.screen_calibrate import find_login_anchors, derive_login_vertical
+            anchors = find_login_anchors(screen)
+            if anchors:
+                res = derive_login_vertical(image_bytes,
+                                            anchors[0] / settings.viewport_height,
+                                            anchors[1] / settings.viewport_height)
+                if res:
+                    ay, by = res["ay"], res["by"]
+                    calib_source = "auto"
+                    calib_extra = {"email_cam_frac": round(res["email_cam_frac"], 4),
+                                   "password_cam_frac": round(res["password_cam_frac"], 4)}
+        except Exception:
+            pass
+    eff_ay = settings.camera_calib_ay if ay is None else ay
+    eff_by = settings.camera_calib_by if by is None else by
+
+    elements = []
+    for e in (screen.get("elements") or []):
+        c = e.get("center")
+        if not c or len(c) < 2:
+            continue
+        cx, cy = int(round(float(c[0]))), int(round(float(c[1])))
+        u, v = _diag_scale_point(cx, cy, cam_w, cam_h, ay, by)
+        bbox_camera = None
+        bb = e.get("bbox")
+        if bb and len(bb) >= 4:
+            u1, v1 = _diag_scale_point(int(round(float(bb[0]))), int(round(float(bb[1]))), cam_w, cam_h, ay, by)
+            u2, v2 = _diag_scale_point(int(round(float(bb[2]))), int(round(float(bb[3]))), cam_w, cam_h, ay, by)
+            bbox_camera = [u1, v1, u2, v2]
+        elements.append({
+            "id":              e.get("id", ""),
+            "type":            e.get("type", ""),
+            "label":           e.get("label", ""),
+            "center_viewport": [cx, cy],
+            "center_camera":   [u, v],
+            "bbox_camera":     bbox_camera,
+        })
+    note = ("These (u,v) are the exact camera pixels the live runtime sends to the Robotics Click API "
+            "for each element on this screen: app_map viewport center → viewport→camera scale (frame "
+            "size ÷ exploration viewport) → per-axis vertical calibration. ")
+    note += ("The vertical calibration was AUTO-DERIVED from this login frame's own email/password "
+             "boxes (self-calibrating per arm/camera pose — the same thing the robot does at run "
+             "time), so taps land on element centres regardless of how this frame was cropped."
+             if calib_source == "auto" else
+             "The vertical calibration is the STATIC CAMERA_CALIB_AY/BY (this screen has no login "
+             "boxes to self-calibrate from, or auto-calibration is off) — accurate only when this "
+             "frame's pose matches the one those constants were derived for.")
+    return {
+        "screen_id":         screen_id,
+        "source":            source,
+        "camera_width":      cam_w,
+        "camera_height":     cam_h,
+        "viewport_width":    settings.viewport_width,
+        "viewport_height":   settings.viewport_height,
+        "calibration": {
+            "ax": settings.camera_calib_ax, "bx": settings.camera_calib_bx,
+            "ay": round(eff_ay, 4), "by": round(eff_by, 4),
+            "source": calib_source, **calib_extra,
+        },
+        "elements": elements,
+        "note": note,
+    }
 
 
 @app.post("/api/vision-test/analyze")
@@ -1473,6 +1576,26 @@ def vision_test_analyze(req: VisionAnalyzeRequest):
                          "or explore the app so reference_screenshot images exist.")
     recommendation = template_reco + "  " + recommendation
 
+    # ── 5. Element camera coordinates (the exact (u,v) sent to the Robotics Click API) ────────────
+    # For the identified/selected screen, convert each app_map element CENTER from the exploration
+    # viewport to THIS camera frame with the same math the runtime uses, so the operator can see the
+    # precise pixel the robot would tap for every UI element on the screen. Resolution order:
+    #   explicit request screen_id → expected_screen → template-match best → aHash best.
+    element_coords = None
+    if img_w and img_h and screens:
+        coord_sid, coord_src = "", ""
+        if req.screen_id and req.screen_id in screens:
+            coord_sid, coord_src = req.screen_id, "requested"
+        elif req.expected_screen and req.expected_screen in screens:
+            coord_sid, coord_src = req.expected_screen, "expected"
+        elif _tb and _tb.get("screen_id") in screens:
+            coord_sid, coord_src = _tb["screen_id"], "template_match"
+        elif best and best.get("screen_id") in screens:
+            coord_sid, coord_src = best["screen_id"], "ahash"
+        if coord_sid:
+            element_coords = _element_coords_for_screen(screens[coord_sid], coord_sid, coord_src,
+                                                        img_w, img_h, image_bytes=img_bytes)
+
     return {
         "status":       "ok",
         "filename":     req.filename,
@@ -1480,6 +1603,7 @@ def vision_test_analyze(req: VisionAnalyzeRequest):
         "height":       img_h,
         "current_hash": current_hash,
         "template_match": template_match,
+        "element_coords": element_coords,
         "tier1": {
             "verdict":           tier1_verdict,
             "detail":            tier1_detail,
@@ -1499,6 +1623,39 @@ def vision_test_analyze(req: VisionAnalyzeRequest):
         "enhanced":       enhanced,
         "claude":         claude,
         "recommendation": recommendation,
+    }
+
+
+@app.post("/api/vision-test/element-coords")
+def vision_test_element_coords(req: ElementCoordsRequest):
+    """Convert a chosen app_map screen's element centers to camera pixels for a captured frame.
+
+    A fast, 0-LLM companion to /vision-test/analyze: given the frame + a screen_id, returns the exact
+    (u,v) the Robotics Click API would receive for each UI element on that screen (same conversion the
+    live runtime uses). Lets the operator switch which screen's coordinates to inspect without re-running
+    the whole detection pipeline."""
+    from app_map import store as app_map_store
+
+    path = _vision_test_dir() / Path(req.filename).name
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, f"Frame {req.filename!r} not found — capture or upload first")
+    img_bytes = path.read_bytes()
+    img_w, img_h = _img_dims(img_bytes)
+    if not img_w or not img_h:
+        raise HTTPException(400, "Could not read the frame dimensions")
+
+    app_map = app_map_store.load(settings.app_map_path) if Path(settings.app_map_path).exists() else {"screens": {}}
+    screens = app_map.get("screens") or {}
+    if req.screen_id not in screens:
+        raise HTTPException(404, f"Screen {req.screen_id!r} is not in the app map")
+
+    return {
+        "status": "ok",
+        "filename": req.filename,
+        "width": img_w,
+        "height": img_h,
+        "element_coords": _element_coords_for_screen(screens[req.screen_id], req.screen_id, "requested",
+                                                     img_w, img_h, image_bytes=img_bytes),
     }
 
 

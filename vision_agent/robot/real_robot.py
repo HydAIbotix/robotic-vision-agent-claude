@@ -487,14 +487,51 @@ def _scale(x: int, y: int) -> tuple[int, int]:
          is byte-identical to the old plain scale, so playwright/demo and un-calibrated rigs are unchanged.
 
     camera_frac_axis = a_axis * (coord/viewport_axis) + b_axis ;  pixel = camera_frac_axis * camera_axis
-    Fraction space keeps the calibration resolution-independent (works at 1405×579 or 1382×571)."""
+    Fraction space keeps the calibration resolution-independent (works at 1405×579 or 1382×571).
+
+    The VERTICAL affine (ay, by) prefers a per-pose value DERIVED at runtime from the login screen's
+    input boxes (see calibrate_vertical_from_login) when one has been set this pose — that self-corrects
+    for the rectification crop varying per pose. Absent a derived value it falls back to the configured
+    settings.camera_calib_ay/by. Horizontal always uses the configured ax/bx (measured faithful)."""
     sx = _calibration.get("scale_x") or (settings.robot_camera_width  / settings.viewport_width)
     sy = _calibration.get("scale_y") or (settings.robot_camera_height / settings.viewport_height)
     cam_w = sx * settings.viewport_width    # measured (or seed) camera resolution
     cam_h = sy * settings.viewport_height
+    ay = _calibration.get("calib_ay", settings.camera_calib_ay)   # per-pose override if derived, else config
+    by = _calibration.get("calib_by", settings.camera_calib_by)
     fx = settings.camera_calib_ax * (x / settings.viewport_width)  + settings.camera_calib_bx
-    fy = settings.camera_calib_ay * (y / settings.viewport_height) + settings.camera_calib_by
+    fy = ay * (y / settings.viewport_height) + by
     return int(round(fx * cam_w)), int(round(fy * cam_h))
+
+
+def calibrate_vertical_from_login(image_path: str, email_center_y: float, password_center_y: float) -> dict:
+    """Derive the per-pose VERTICAL viewport→camera affine from a login camera frame and store it so all
+    subsequent taps this pose use it (overriding the static settings.camera_calib_ay/by).
+
+    Gated by settings.auto_tap_calibration; a low-confidence detection is REJECTED (keeps the configured
+    calibration) so it can never worsen taps. `email_center_y`/`password_center_y` are the app_map
+    element CENTER y-pixels (exploration viewport). Returns {applied, ay, by, ...}; applied=False when
+    disabled or not confident. Real backend only — never called for playwright/demo."""
+    if not settings.auto_tap_calibration:
+        return {"applied": False, "reason": "auto_tap_calibration disabled"}
+    try:
+        from vision_agent.vision.screen_calibrate import derive_login_vertical
+        img = Path(image_path)
+        if not img.exists():
+            return {"applied": False, "reason": "frame missing"}
+        em = email_center_y / settings.viewport_height
+        pm = password_center_y / settings.viewport_height
+        res = derive_login_vertical(img.read_bytes(), em, pm)
+        if not res:
+            return {"applied": False, "reason": "no confident 2-box fit"}
+        _calibration["calib_ay"] = res["ay"]
+        _calibration["calib_by"] = res["by"]
+        print(f"  [ROBOT] auto-calibrated vertical tap mapping from login frame: "
+              f"ay={res['ay']:.4f} by={res['by']:.4f} "
+              f"(email→cam_frac {res['email_cam_frac']:.3f}, password→cam_frac {res['password_cam_frac']:.3f})")
+        return {"applied": True, **res}
+    except Exception as e:
+        return {"applied": False, "reason": f"{type(e).__name__}: {e}"}
 
 
 def _ensure_localized() -> None:
@@ -928,6 +965,8 @@ def navigate_to_kiosk(kiosk_id: str, timeout_s: Optional[float] = None) -> dict:
     reserved "home". x/y/theta are not needed here (see move_to_position for the pose fallback)."""
     global _current_kiosk_id, _screen_localized
     _screen_localized = False   # base motion invalidates the screen pose → must re-capture before taps
+    _calibration.pop("calib_ay", None)   # pose changed → drop the per-pose vertical auto-calibration
+    _calibration.pop("calib_by", None)   # (re-derived from the next login frame; else config fallback)
     t = timeout_s or settings.base_move_timeout_s
     cmd_id = _new_cmd_id(f"goto-{kiosk_id}")
     print(f"  [ROBOT] navigate_to_kiosk({kiosk_id!r})  timeout={t}s")
@@ -957,6 +996,8 @@ def move_to_position(x: float, y: float, theta: float, target: Optional[str] = N
     base_move_timeout_s. A timeout raises, which the runner catches and fails the step gracefully."""
     global _screen_localized
     _screen_localized = False   # base motion invalidates the screen pose → must re-capture before taps
+    _calibration.pop("calib_ay", None)   # pose changed → drop the per-pose vertical auto-calibration
+    _calibration.pop("calib_by", None)   # (re-derived from the next login frame; else config fallback)
     cmd_id = _new_cmd_id("base-goto")
     if target:
         print(f"  [ROBOT] move_to_position(target={target!r})")

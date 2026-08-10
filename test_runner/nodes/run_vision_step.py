@@ -733,6 +733,20 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             # capture would consume a scripted demo screenshot.
             if not last_screenshot and settings.robot_backend != "demo":
                 last_screenshot = _cap("verify", i)
+                # Self-calibrate the vertical tap mapping from the login screen's OWN input boxes (real
+                # backend, one-shot on the leading verify). The robot's rectified /capture crop varies
+                # per arm/camera pose, so a static camera_calib_ay/by mis-places taps (email tap landed
+                # ~2 cm below the field). Deriving (ay,by) from this freshly-captured login frame makes
+                # taps land on element CENTERS for THIS pose; a low-confidence detect keeps the config.
+                if settings.robot_backend == "real" and last_screenshot and app_map:
+                    try:
+                        from vision_agent.vision.screen_calibrate import find_login_anchors
+                        _cal_sc = (app_map.get("screens") or {}).get(step.get("expected_screen", "")) or {}
+                        _anch = find_login_anchors(_cal_sc)
+                        if _anch:
+                            robot.calibrate_vertical_from_login(last_screenshot, _anch[0], _anch[1])
+                    except Exception as _ce:
+                        print(f"    [ROBOT] auto-calibration skipped: {_ce}")
             expected      = step.get("expected_screen", "")
             # Accept both field names: PLAN_FROM_MAP emits "expected_text", the UI planner
             # (_TC_PLAN_PROMPT) emits "expected_value".  Reading only one silently skipped the
