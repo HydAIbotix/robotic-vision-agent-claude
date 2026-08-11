@@ -76,6 +76,11 @@ CREDENTIALS = {
 from vision_agent.config import settings
 from vision_agent import robot
 
+# Exploration-only: pre-fill the RPS mock-card field with the always-available demo card so the
+# card-payment flow can be completed during the commerce walkthrough (see config.explore_demo_card).
+# This is set ONLY here (the exploration entrypoint), so test execution never gets ?demoCard=1.
+settings.explore_demo_card = True
+
 screenshots_dir = Path(settings.screenshots_dir)
 screenshots_dir.mkdir(parents=True, exist_ok=True)
 
@@ -403,35 +408,71 @@ def _commerce_walkthrough(app_map: dict) -> dict:
         print(f"  [WALKTHROUGH] payment explore error: {_e}")
     _set_transition(cart_sid, pay_btn["id"], payment_sid)
 
-    # ── Complete the order: up to 2 hops (optional 'start card reader' → mock approval) ──
-    # Some apps insert an intermediate 'Start card reader session' screen before the mock
-    # approval.  Ask Opus at each screen for the single next action that advances toward a
-    # completed order, capturing every screen we land on.
-    for hop in range(3):
+    # ── Complete the order — up to 5 hops (mock-card path is TWO STEPS on the SAME screen) ──
+    # The RPS card payment is a two-step reveal: "Use Mock Card" reveals a card-number entry ON the
+    # SAME screen (no navigation), then "Confirm Mock Card Payment" completes the order and navigates.
+    # So we must NOT stop when a tap doesn't change the screen (that's the reveal); instead we re-explore
+    # the payment screen each hop to pick up the newly-revealed controls, TYPE the demo card into the
+    # mock-card input (the exploration URL also pre-fills it via ?demoCard=1 — this is a belt-and-braces
+    # backup), and tap the next NEW button. A `tapped` set prevents re-tapping the same button, so a
+    # genuinely dead button can't loop. Some apps also insert a 'Start card reader session' hop first.
+    demo_card = settings.demo_card_number
+    tapped_ids: set = set()
+    for hop in range(5):
+        # Re-map the payment screen so any controls revealed by the previous tap (e.g. the mock-card
+        # entry field + confirm button) are available to choose from.
+        try:
+            app_map = _explore(_snap(f"payment_hop{hop}"), payment_sid)
+        except Exception as _e:
+            print(f"  [WALKTHROUGH] payment hop{hop} explore error: {_e}")
         pay_els = (app_map.get("screens", {}).get(payment_sid, {}).get("elements")) or []
+
+        # If a mock-card number input is present, focus + type the demo card (idempotent with the
+        # ?demoCard=1 pre-fill). Generic: any input whose id/label mentions card/mock/number.
+        card_input = next(
+            (e for e in pay_els
+             if e.get("type") == "input" and e.get("center")
+             and any(k in (e.get("id", "") + " " + (e.get("label") or "")).lower()
+                     for k in ("card", "mock", "number"))),
+            None,
+        )
+        if card_input:
+            try:
+                _tap(card_input)
+                robot.type_text(demo_card, clear_first=True)
+                _time.sleep(0.3)
+                print(f"  [WALKTHROUGH] entered demo mock card into '{card_input['id']}'")
+            except Exception as _e:
+                print(f"  [WALKTHROUGH] demo-card entry skipped: {_e}")
+
         nxt = _pick_sequence(
-            "Advance ONE step toward completing the order/payment: e.g. start the card reader "
-            "session, present/tap the card, or use the mock/test card approval to complete the "
-            "order. Return the single next button to tap on THIS screen (empty if the order looks "
-            "already complete).",
+            "Advance ONE step to COMPLETE the order/payment. If a 'Use Mock Card' option is present, "
+            "tap it to reveal the mock-card entry; otherwise tap Confirm/Complete/Pay to finish the "
+            "mock-card payment, or start the card reader session and approve. Do NOT pick a "
+            "Back/Cancel/edit button. Return the single next button to tap on THIS screen (empty if the "
+            "order already looks complete).",
             pay_els,
         )
-        step_btn = nxt[0] if nxt else None
+        step_btn = next((e for e in nxt if e["id"] not in tapped_ids), None)
         if not step_btn:
-            print(f"  [WALKTHROUGH] No further payment action identified on '{payment_sid}' (hop {hop}) — stopping")
+            print(f"  [WALKTHROUGH] No further NEW payment action on '{payment_sid}' (hop {hop}) — stopping")
             break
+        tapped_ids.add(step_btn["id"])
         next_sid = _nav_tap(step_btn, payment_sid, f"payment hop {hop}: {step_btn['id']}")
         _set_transition(payment_sid, step_btn["id"], next_sid)
         if next_sid == payment_sid:
-            print(f"  [WALKTHROUGH] '{step_btn['id']}' did not navigate — stopping payment flow")
-            break
-        label = "success" if hop >= 1 else "card_reader"
+            # Same screen — a reveal (e.g. Use Mock Card) or an in-place update; keep going (the next
+            # hop re-explores and picks the newly-revealed confirm button). tapped_ids stops a loop.
+            print(f"  [WALKTHROUGH] '{step_btn['id']}' stayed on '{payment_sid}' (likely revealed the "
+                  f"mock-card entry) — continuing")
+            continue
+        label = "success" if any(k in next_sid.lower() for k in ("success", "result", "order")) else f"payment_next{hop}"
         try:
             app_map = _explore(_snap(label), next_sid)
         except Exception as _e:
             print(f"  [WALKTHROUGH] {label} explore error: {_e}")
         payment_sid = next_sid
-        # Heuristic stop: if the screen id/description suggests an order result, we're done.
+        # Heuristic stop: if the screen id suggests an order result, we're done.
         if any(k in next_sid.lower() for k in ("success", "result", "confirm", "complete", "receipt", "order")):
             print(f"  [WALKTHROUGH] Reached order-result screen '{next_sid}' — purchase flow mapped")
             break

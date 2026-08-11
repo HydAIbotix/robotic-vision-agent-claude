@@ -50,6 +50,12 @@ def _kiosk_url() -> str:
     if layout:
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}screenLayout={layout}"
+    # During EXPLORATION only (run_explorer.py sets explore_demo_card), pre-fill the RPS mock-card field
+    # with the always-available demo card so the payment flow can be completed without a human/typed
+    # card. Test execution never sets this flag, so real runs enter their own captured card unaffected.
+    if getattr(settings, "explore_demo_card", False):
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}demoCard=1"
     return url
 
 
@@ -227,6 +233,13 @@ def tap(x: int, y: int) -> dict:
     page.wait_for_timeout(1400)
 
     return {"success": True, "x": x, "y": y}
+
+
+def tap_image_point(px: int, py: int) -> dict:
+    """Tap a point in the last-captured image's pixel space (vision-derived coords). The browser
+    screenshot IS the viewport, so image pixels == viewport pixels — delegate to tap() (which also snaps
+    to the nearest interactive element, helpful for slightly-off vision coordinates)."""
+    return tap(int(px), int(py))
 
 
 def set_keyboard_map(kmap: dict) -> None:

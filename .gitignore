@@ -23,6 +23,7 @@ env/
 # ── Runtime output (generated at run time, not source) ────────────────────────
 screenshots/
 camera_captures/
+coordinate_exports/
 results/
 *.log
 *.db

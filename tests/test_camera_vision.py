@@ -299,6 +299,52 @@ def test_element_coords_endpoint(monkeypatch, tmp_path):
     assert bad.status_code == 404
 
 
+def test_coords_excel_auto_export(monkeypatch, tmp_path):
+    """Each element-coords run auto-saves a NEW timestamped .xlsx under coordinate_exports/, never
+    overwriting, and it is downloadable via the export endpoint."""
+    import json
+    from fastapi.testclient import TestClient
+    from openpyxl import load_workbook
+    from vision_agent.config import settings
+
+    fake_map_path = tmp_path / "app_map.json"
+    fake_map_path.write_text(json.dumps({"screens": {"login": {"app_id": "RPS", "elements": [
+        {"id": "email_input", "type": "input", "label": "Email", "center": [960, 508]},
+        {"id": "sign_in_button", "type": "button", "label": "Sign In", "center": [960, 792]},
+    ]}}}), encoding="utf-8")
+    monkeypatch.setattr(settings, "app_map_path", str(fake_map_path))
+    frame = m._vision_test_dir() / "unittest_xls.png"
+    Image.new("RGB", (1405, 579), "navy").save(frame)
+
+    client = TestClient(m.app)
+    names = []
+    for _ in range(2):
+        r = client.post("/api/vision-test/element-coords",
+                        json={"filename": "unittest_xls.png", "screen_id": "login"})
+        assert r.status_code == 200, r.text
+        fn = r.json()["element_coords"]["excel_export"]
+        assert fn and fn.endswith(".xlsx") and fn.startswith("coords_login_")
+        names.append(fn)
+    # A NEW file each run — never overwritten.
+    assert names[0] != names[1]
+    export_dir = m._coords_export_dir()
+    for fn in names:
+        assert (export_dir / fn).exists()
+    # Contents: a header row + one data row per element.
+    wb = load_workbook(export_dir / names[0]); ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    hdr_i = next(i for i, row in enumerate(rows) if row[0] == "Element ID")
+    data_ids = [rows[i][0] for i in range(hdr_i + 1, len(rows))]
+    assert data_ids == ["email_input", "sign_in_button"]
+    # Downloadable via the endpoint.
+    dl = client.get(f"/api/vision-test/coords-export/{names[0]}")
+    assert dl.status_code == 200
+    assert "spreadsheet" in dl.headers.get("content-type", "")
+    assert client.get("/api/vision-test/coords-export/nope.xlsx").status_code == 404
+    for fn in names:
+        (export_dir / fn).unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))

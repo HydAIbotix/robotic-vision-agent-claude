@@ -103,7 +103,12 @@ def execute_step(state: VisionAgentState) -> dict:
             print(f"    [ERROR] {error}")
         else:
             coordinates = el["center"]
-            robot.tap(*coordinates)
+            # el["center"] is in the analyzed IMAGE's pixel space (the camera frame on the real backend,
+            # the browser screenshot on playwright) — Claude read it off that image. Use tap_image_point
+            # so real-backend camera coords are NOT re-scaled by _scale (which would double-scale them);
+            # on playwright the image IS the viewport, so it clicks the same pixel. Falls back to tap().
+            _tap = getattr(robot, "tap_image_point", robot.tap)
+            _tap(*coordinates)
 
     elif action_type == "type":
         robot.type_text(target)

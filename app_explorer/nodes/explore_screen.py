@@ -190,19 +190,34 @@ _GENERIC_ID_TOKENS = {
     "of", "to", "for", "value", "quantity", "qty", "item", "el", "element", "screen", "id",
 }
 
+# Direction synonyms — Claude names a quantity stepper by the SYMBOL/direction it sees ("plus"/"minus")
+# while the DOM names it by the ACTION ("increase"/"decrease"): app_map `nexora_quantity_plus` vs DOM
+# testid `quantity-increase-<id>` / aria "Increase … quantity". Without canonicalising these to a common
+# token the only shared identity token is the product name (1 token → too weak to snap), so the stepper
+# keeps its raw vision coordinate and — in the tight arm-reachable layout — lands on the Add-to-Cart
+# button just below it (observed: qty never incremented, so Add-to-Cart stayed disabled and the whole
+# cart→payment→success flow was skipped). Mapping plus↔increase / minus↔decrease makes the match
+# {product, increase} = 2 tokens → an unambiguous strong snap. NOTE: "add"/"remove" are deliberately NOT
+# synonyms of increase/decrease — they'd collide with the Add-to-Cart / cart-remove buttons.
+_TOKEN_SYNONYMS = {
+    "plus": "increase", "increment": "increase", "incr": "increase",
+    "minus": "decrease", "decrement": "decrease", "decr": "decrease",
+}
+
 
 def _meaningful_tokens(*strings: str) -> set:
-    """Lowercase alphanumeric tokens from the given strings, minus generic boilerplate.
+    """Lowercase alphanumeric tokens from the given strings, minus generic boilerplate, with direction
+    words canonicalised (plus→increase, minus→decrease).
 
     Splits on any non-alphanumeric boundary so `nexora_phone_increase_button`,
-    `quantity-increase-nexora-phone-x2` and `Increase Nexora Phone X2 quantity` all reduce to the
-    same identity tokens {nexora, phone, increase}.
+    `quantity-increase-nexora-phone-x2`, `Increase Nexora Phone X2 quantity` AND
+    `nexora_quantity_plus` all reduce to the same identity tokens {nexora, …, increase}.
     """
     toks: set = set()
     for s in strings:
         for t in re.split(r"[^a-z0-9]+", (s or "").lower()):
             if t and len(t) >= 2 and t not in _GENERIC_ID_TOKENS:
-                toks.add(t)
+                toks.add(_TOKEN_SYNONYMS.get(t, t))
     return toks
 
 

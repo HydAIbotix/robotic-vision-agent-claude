@@ -98,9 +98,10 @@ def test_type_text_types_and_appends_done(monkeypatch, typing_robot):
     assert res["tapped_keys"] == 2           # 2 chars (Done not counted as a char)
     pts = typing_robot["body"]["points"]
     assert len(pts) == 3                      # a, b, + Done dismiss tap
-    # last point is the Done key
-    assert pts[-1] == {"u": int(0.74 * rr.settings.viewport_width),
-                       "v": int(0.977 * rr.settings.viewport_height)}
+    # last point is the Done key. Keys now route through _scale_key → _scale (which rounds), so allow a
+    # 1px tolerance vs the raw fraction×dim (the mapping reuses the login vmap; identity here).
+    assert abs(pts[-1]["u"] - int(0.74 * rr.settings.viewport_width)) <= 1
+    assert abs(pts[-1]["v"] - int(0.977 * rr.settings.viewport_height)) <= 1
 
 
 def test_type_text_uppercase_taps_shift(monkeypatch, typing_robot):

@@ -500,38 +500,82 @@ def _scale(x: int, y: int) -> tuple[int, int]:
     ay = _calibration.get("calib_ay", settings.camera_calib_ay)   # per-pose override if derived, else config
     by = _calibration.get("calib_by", settings.camera_calib_by)
     fx = settings.camera_calib_ax * (x / settings.viewport_width)  + settings.camera_calib_bx
-    fy = ay * (y / settings.viewport_height) + by
+    # Prefer a per-pose PIECEWISE vertical map (4-anchor: email/password/sign-in/footer) when one was
+    # derived this pose — it anchors the bottom of the screen so footer-row taps land correctly, where a
+    # single affine would extrapolate too high. Absent vknots this is the plain affine (byte-identical).
+    vknots = _calibration.get("vknots")
+    if vknots:
+        from vision_agent.vision.screen_calibrate import eval_vmap
+        fy = eval_vmap(vknots, y / settings.viewport_height)
+    else:
+        fy = ay * (y / settings.viewport_height) + by
     return int(round(fx * cam_w)), int(round(fy * cam_h))
 
 
-def calibrate_vertical_from_login(image_path: str, email_center_y: float, password_center_y: float) -> dict:
-    """Derive the per-pose VERTICAL viewport→camera affine from a login camera frame and store it so all
+def calibrate_vertical_from_login(image_path: str, email_center_y: float, password_center_y: float,
+                                  signin_center_y: float | None = None,
+                                  footer_center_y: float | None = None) -> dict:
+    """Derive the per-pose VERTICAL viewport→camera mapping from a login camera frame and store it so all
     subsequent taps this pose use it (overriding the static settings.camera_calib_ay/by).
 
-    Gated by settings.auto_tap_calibration; a low-confidence detection is REJECTED (keeps the configured
-    calibration) so it can never worsen taps. `email_center_y`/`password_center_y` are the app_map
-    element CENTER y-pixels (exploration viewport). Returns {applied, ay, by, ...}; applied=False when
-    disabled or not confident. Real backend only — never called for playwright/demo."""
+    When `signin_center_y` and `footer_center_y` are also provided, a 4-ANCHOR PIECEWISE map
+    (email/password/sign-in/footer) is attempted first — it anchors the bottom of the screen so footer
+    taps land correctly (a single affine extrapolates them too high). If the full set can't be measured
+    confidently it falls back to the 2-point (email, password) affine — identical to the prior behaviour,
+    so a 2-arg call (or an unmeasurable footer) can never worsen taps.
+
+    Gated by settings.auto_tap_calibration; a low-confidence detection is REJECTED. `*_center_y` are the
+    app_map element CENTER y-pixels (exploration viewport). Returns {applied, kind, ay, by, ...};
+    applied=False when disabled/not confident. Real backend only — never called for playwright/demo."""
     if not settings.auto_tap_calibration:
         return {"applied": False, "reason": "auto_tap_calibration disabled"}
     try:
-        from vision_agent.vision.screen_calibrate import derive_login_vertical
+        from vision_agent.vision.screen_calibrate import derive_login_vmap
         img = Path(image_path)
         if not img.exists():
             return {"applied": False, "reason": "frame missing"}
-        em = email_center_y / settings.viewport_height
-        pm = password_center_y / settings.viewport_height
-        res = derive_login_vertical(img.read_bytes(), em, pm)
+        vh = settings.viewport_height
+        anchors = {
+            "email": email_center_y / vh,
+            "password": password_center_y / vh,
+            "signin": (signin_center_y / vh) if signin_center_y else None,
+            "footer": (footer_center_y / vh) if footer_center_y else None,
+        }
+        res = derive_login_vmap(img.read_bytes(), anchors)
         if not res:
-            return {"applied": False, "reason": "no confident 2-box fit"}
+            return {"applied": False, "reason": "no confident fit"}
         _calibration["calib_ay"] = res["ay"]
         _calibration["calib_by"] = res["by"]
-        print(f"  [ROBOT] auto-calibrated vertical tap mapping from login frame: "
-              f"ay={res['ay']:.4f} by={res['by']:.4f} "
-              f"(email→cam_frac {res['email_cam_frac']:.3f}, password→cam_frac {res['password_cam_frac']:.3f})")
+        if res["kind"] == "vmap4":
+            _calibration["vknots"] = res["knots"]
+            msg = (f"  [ROBOT] auto-calibrated vertical tap mapping (4-anchor piecewise) from login frame: "
+                   f"email->{res['email_cam_frac']:.3f} password->{res['password_cam_frac']:.3f} "
+                   f"sign_in->{res['signin_cam_frac']:.3f} footer->{res['footer_cam_frac']:.3f}")
+        else:
+            _calibration.pop("vknots", None)   # only email/password measurable -> plain affine this pose
+            msg = (f"  [ROBOT] auto-calibrated vertical tap mapping (2-anchor affine) from login frame: "
+                   f"ay={res['ay']:.4f} by={res['by']:.4f} "
+                   f"(email->cam_frac {res['email_cam_frac']:.3f}, password->cam_frac {res['password_cam_frac']:.3f})")
+        try:
+            print(msg)
+        except Exception:
+            pass   # a stdout encoding hiccup must never flip a successful calibration to 'failed'
         return {"applied": True, **res}
     except Exception as e:
         return {"applied": False, "reason": f"{type(e).__name__}: {e}"}
+
+
+def _scale_key(fx: float, fy: float) -> tuple[int, int]:
+    """Map a keyboard_map key's NORMALIZED viewport fraction (0..1) → camera pixel (u, v).
+
+    The virtual keyboard lives in viewport space just like every other element, so it reuses the SAME
+    per-pose calibration as `_scale` (the login vmap): its keys span monitor y≈0.68–0.86, which the login
+    4-anchor vmap already brackets with its sign-in (≈0.72) and footer (≈0.84) knots — the footer knot sits
+    almost exactly on the keyboard's bottom row, so the keyboard's vertical mapping is INTERPOLATED, not a
+    wild extrapolation. Converting the fractional key to a viewport pixel and deferring to `_scale` keeps a
+    single source of truth for both the vmap (vertical) and camera_calib_ax/bx (horizontal). With no
+    calibration set this is byte-identical to the historical raw `frac × camera_dim` scaling."""
+    return _scale(int(round(fx * settings.viewport_width)), int(round(fy * settings.viewport_height)))
 
 
 def _ensure_localized() -> None:
@@ -671,17 +715,29 @@ def _check_click_completed(state: dict, post_resp: dict, cmd_id: str) -> None:
 
 
 def tap(x: int, y: int) -> dict:
-    """Physically tap kiosk touchscreen at viewport pixel (x, y).
+    """Physically tap kiosk touchscreen at APP-MAP VIEWPORT pixel (x, y) — scaled to camera via _scale."""
+    u, v = _scale(x, y)
+    return _tap_camera(u, v, src=f"viewport({x},{y})")
 
-    The /screen/click completion returns the post-tap camera frame (image_b64). We
-    decode and save it, then surface it as image_path so callers can reuse it for
-    verification without a separate /capture round-trip (saves an arm cycle).
-    """
+
+def tap_image_point(px: int, py: int) -> dict:
+    """Tap a point given in the LAST-CAPTURED CAMERA FRAME's own pixel space — i.e. coordinates a vision
+    model read directly OFF the camera image (Tier-3 / inline vision). These are ALREADY camera pixels, so
+    they must NOT go through _scale (which maps app_map viewport→camera and would double-scale them). This
+    is the real-backend counterpart of playwright clicking the screenshot pixel it saw. Use for
+    vision-derived coordinates; use tap() for app_map coordinates."""
+    return _tap_camera(int(px), int(py), src="image-point")
+
+
+def _tap_camera(u: int, v: int, src: str = "") -> dict:
+    """Core physical tap at CAMERA pixel (u, v). The /screen/click completion returns the post-tap camera
+    frame (image_b64), decoded/saved and surfaced as image_path so callers can reuse it for verification
+    without a separate /capture round-trip."""
     global _last_frame_path
     _ensure_localized()   # /screen/click 409s without a capture since the last base motion
-    u, v   = _scale(x, y)
+    x, y   = u, v         # for the result payload / labels (already camera-space here)
     cmd_id = _new_cmd_id("arm-click")
-    print(f"    [ROBOT] tap viewport({x},{y}) → camera({u},{v})")
+    print(f"    [ROBOT] tap {src} → camera({u},{v})" if src else f"    [ROBOT] tap camera({u},{v})")
 
     # BEFORE screenshot: mark the exact camera pixel the arm is about to touch on the most recent
     # frame, so an operator can verify tap accuracy. Uses the cached last frame (no extra /capture) —
@@ -705,7 +761,7 @@ def tap(x: int, y: int) -> dict:
     # Label shows BOTH the app-map viewport point AND the ACTUAL camera pixel (u,v) sent in the
     # /screen/click payload, so the live monitor shows exactly what the robot was told to touch.
     state = _poll("/arm/state", cmd_id, settings.arm_move_timeout_s, abort_ep="/arm/abort",
-                  initial_state=post_resp.get("state", ""), label=f"tap ({x},{y})->cam({u},{v})")
+                  initial_state=post_resp.get("state", ""), label=f"tap {src or ''}->cam({u},{v})")
     # The arm can report a TERMINAL state even when the touch itself failed to land (e.g. a linear
     # descend that could not be planned) — verify the click_result actually completed, else raise so
     # the runner fails this step and hands off to Tier-3 instead of typing into an unfocused field.
@@ -837,10 +893,6 @@ def type_text(text: str, clear_first: bool = False) -> dict:
 
     _ensure_localized()   # keyboard taps go through /screen/click → same capture precondition
 
-    # Derive camera dimensions from calibration (or settings fallback)
-    cam_w = (_calibration.get("scale_x") or (settings.robot_camera_width  / settings.viewport_width)) * settings.viewport_width
-    cam_h = (_calibration.get("scale_y") or (settings.robot_camera_height / settings.viewport_height)) * settings.viewport_height
-
     points: list[dict] = []
     skipped: list[str] = []
 
@@ -849,7 +901,8 @@ def type_text(text: str, clear_first: bool = False) -> dict:
         if char.isupper() and char.isalpha():
             shift = _keyboard_map.get("shift")
             if shift:
-                points.append({"u": int(shift[0] * cam_w), "v": int(shift[1] * cam_h)})
+                su, sv = _scale_key(shift[0], shift[1])
+                points.append({"u": su, "v": sv})
 
         lookup = char.lower() if char.isalpha() else char
         if char == " ":
@@ -857,7 +910,8 @@ def type_text(text: str, clear_first: bool = False) -> dict:
 
         coords = _keyboard_map.get(lookup)
         if coords:
-            points.append({"u": int(coords[0] * cam_w), "v": int(coords[1] * cam_h)})
+            ku, kv = _scale_key(coords[0], coords[1])
+            points.append({"u": ku, "v": kv})
         else:
             skipped.append(char)
 
@@ -882,7 +936,8 @@ def type_text(text: str, clear_first: bool = False) -> dict:
                or _keyboard_map.get("enter"))
     all_points = list(char_points)
     if dismiss:
-        all_points.append({"u": int(dismiss[0] * cam_w), "v": int(dismiss[1] * cam_h)})
+        du, dv = _scale_key(dismiss[0], dismiss[1])
+        all_points.append({"u": du, "v": dv})
 
     if not all_points:
         return {"success": True, "text": text, "tapped_keys": 0}
@@ -967,6 +1022,7 @@ def navigate_to_kiosk(kiosk_id: str, timeout_s: Optional[float] = None) -> dict:
     _screen_localized = False   # base motion invalidates the screen pose → must re-capture before taps
     _calibration.pop("calib_ay", None)   # pose changed → drop the per-pose vertical auto-calibration
     _calibration.pop("calib_by", None)   # (re-derived from the next login frame; else config fallback)
+    _calibration.pop("vknots", None)     # drop the per-pose piecewise vertical map too
     t = timeout_s or settings.base_move_timeout_s
     cmd_id = _new_cmd_id(f"goto-{kiosk_id}")
     print(f"  [ROBOT] navigate_to_kiosk({kiosk_id!r})  timeout={t}s")
@@ -998,6 +1054,7 @@ def move_to_position(x: float, y: float, theta: float, target: Optional[str] = N
     _screen_localized = False   # base motion invalidates the screen pose → must re-capture before taps
     _calibration.pop("calib_ay", None)   # pose changed → drop the per-pose vertical auto-calibration
     _calibration.pop("calib_by", None)   # (re-derived from the next login frame; else config fallback)
+    _calibration.pop("vknots", None)     # drop the per-pose piecewise vertical map too
     cmd_id = _new_cmd_id("base-goto")
     if target:
         print(f"  [ROBOT] move_to_position(target={target!r})")

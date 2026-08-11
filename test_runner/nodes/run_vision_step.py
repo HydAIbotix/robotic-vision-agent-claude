@@ -236,6 +236,13 @@ def _inline_vision_fast(desc: str, captured: dict, run_id: str, test_id: str,
     from vision_agent.storage import get_storage
     from vision_agent.nodes.analyze import _norm_to_px
 
+    # Vision-derived coords are in the CAPTURED IMAGE's pixel space (camera frame on the real backend),
+    # so tap them via tap_image_point → the real backend sends them straight to the Click API instead of
+    # re-scaling app_map viewport→camera (which would double-scale a camera-space point). Playwright's
+    # image IS the viewport, so it clicks the same pixel. Falls back to tap() if a backend lacks it.
+    def _tap_img(px: int, py: int):
+        return getattr(robot, "tap_image_point", robot.tap)(px, py)
+
     def _dom() -> str:
         try:
             return robot.get_dom_screen_id() or ""
@@ -362,7 +369,7 @@ def _inline_vision_fast(desc: str, captured: dict, run_id: str, test_id: str,
                 entry_problem = f"the type action for {label!r} had no field coordinates to focus"
                 continue
             try:
-                robot.tap(px, py); time.sleep(0.3)                    # focus the field first
+                _tap_img(px, py); time.sleep(0.3)                     # focus the field first
                 robot.type_text(value, clear_first=True); time.sleep(0.3)
             except Exception as exc:
                 sr = {"step": f"type: {value[:30]} ({label})", "success": False, "method": "vision_fast",
@@ -406,7 +413,7 @@ def _inline_vision_fast(desc: str, captured: dict, run_id: str, test_id: str,
                 px, py = 0, 0
             label = a.get("label", "")
             try:
-                robot.tap(px, py); time.sleep(0.6)
+                _tap_img(px, py); time.sleep(0.6)
             except Exception as exc:
                 sr = {"step": f"tap: {label}", "success": False, "method": "vision_fast",
                       "observation": f"{type(exc).__name__}: {exc}"}
@@ -740,11 +747,16 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 # taps land on element CENTERS for THIS pose; a low-confidence detect keeps the config.
                 if settings.robot_backend == "real" and last_screenshot and app_map:
                     try:
-                        from vision_agent.vision.screen_calibrate import find_login_anchors
+                        from vision_agent.vision.screen_calibrate import find_login_anchor_fracs
                         _cal_sc = (app_map.get("screens") or {}).get(step.get("expected_screen", "")) or {}
-                        _anch = find_login_anchors(_cal_sc)
-                        if _anch:
-                            robot.calibrate_vertical_from_login(last_screenshot, _anch[0], _anch[1])
+                        _af = find_login_anchor_fracs(_cal_sc, settings.viewport_height)
+                        if _af:
+                            _vh = settings.viewport_height
+                            robot.calibrate_vertical_from_login(
+                                last_screenshot,
+                                _af["email"] * _vh, _af["password"] * _vh,
+                                signin_center_y=(_af["signin"] * _vh) if _af.get("signin") else None,
+                                footer_center_y=(_af["footer"] * _vh) if _af.get("footer") else None)
                     except Exception as _ce:
                         print(f"    [ROBOT] auto-calibration skipped: {_ce}")
             expected      = step.get("expected_screen", "")

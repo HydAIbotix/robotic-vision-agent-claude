@@ -53,6 +53,37 @@ def test_stepper_snaps_via_token_fallback(monkeypatch):
     assert fixed["nexora_phone_add_to_cart_button"]["center"] == [960, 634]
 
 
+def test_stepper_plus_name_snaps_via_direction_synonym(monkeypatch):
+    """2026-08-11 regression: Claude named the stepper `nexora_quantity_plus` (symbol/direction) while the
+    DOM testid is `quantity-increase-nexora-phone-x2` (action). Without plus→increase canonicalisation the
+    only shared token is the product name (1 → too weak), so the stepper kept its raw vision coord and the
+    tap snapped to Add-to-Cart (qty never incremented → cart/payment flow skipped). The synonym makes it a
+    2-token {nexora, increase} strong snap."""
+    monkeypatch.setattr(es.robot, "get_dom_element_centers", _fake_dom, raising=False)
+    elements = [
+        {"id": "nexora_quantity_plus",  "type": "stepper", "label": "+", "center": [718, 544]},
+        {"id": "nexora_quantity_minus", "type": "stepper", "label": "−", "center": [629, 544]},
+        {"id": "nexora_add_to_cart_button", "type": "button", "label": "Add to Cart", "center": [960, 609]},
+    ]
+    fixed = {e["id"]: e for e in es._dom_correct_elements(elements)}
+    # plus → the nexora INCREASE control (719,576); NOT decrease, NOT orionbook, NOT add-to-cart
+    assert fixed["nexora_quantity_plus"]["center"] == [719, 576]
+    assert fixed["nexora_quantity_plus"].get("testid") == "quantity-increase-nexora-phone-x2"
+    # minus → the nexora DECREASE control (631,576) — direction is preserved, no cross-snap
+    assert fixed["nexora_quantity_minus"]["center"] == [631, 576]
+    assert fixed["nexora_quantity_minus"].get("testid") == "quantity-decrease-nexora-phone-x2"
+    # add-to-cart still text-matches its own button
+    assert fixed["nexora_add_to_cart_button"]["center"] == [960, 634]
+
+
+def test_direction_synonym_does_not_collide_with_add_to_cart(monkeypatch):
+    # "add" must NOT be treated as a synonym of "increase" — else Add-to-Cart would share a token with the
+    # plus stepper. app_map id `nexora_add_to_cart_button` tokens must not include 'increase'.
+    assert "increase" not in es._meaningful_tokens("nexora_add_to_cart_button")
+    assert es._meaningful_tokens("nexora_quantity_plus") == {"nexora", "increase"}
+    assert es._meaningful_tokens("nexora_quantity_minus") == {"nexora", "decrease"}
+
+
 def test_token_fallback_requires_two_shared_tokens(monkeypatch):
     # A single shared generic-ish token must NOT trigger a snap (avoids false corrections).
     monkeypatch.setattr(es.robot, "get_dom_element_centers",

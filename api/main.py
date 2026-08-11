@@ -874,6 +874,78 @@ def _vision_test_dir() -> Path:
     return d
 
 
+def _coords_export_dir() -> Path:
+    # Dedicated project-root folder for the Camera Vision Test coordinate exports (one .xlsx per run of
+    # the tool). Sibling to camera_captures/ so an App Explorer "clear all" never touches it.
+    d = Path(settings.app_map_path).parent / "coordinate_exports"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _export_coords_to_excel(coords: dict, frame_filename: str) -> Optional[str]:
+    """Write the element coordinate table to a NEW timestamped .xlsx under coordinate_exports/ every time
+    the Camera Vision Test computes coordinates. Never overwrites (unique timestamp + counter). Returns
+    the saved filename, or None on failure (a diagnostic export must never break the API response)."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+        screen_id = (coords.get("screen_id") or "screen").replace("/", "_")
+        stem = Path(frame_filename).stem[:40]
+        # Millisecond-precision stamp; a counter suffix guarantees a NEW file even on same-ms calls.
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        export_dir = _coords_export_dir()
+        fname = f"coords_{screen_id}_{stem}_{stamp}.xlsx"
+        _n = 1
+        while (export_dir / fname).exists():
+            fname = f"coords_{screen_id}_{stem}_{stamp}_{_n}.xlsx"
+            _n += 1
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Click Coordinates"
+        cal = coords.get("calibration", {})
+        # Header / context block
+        meta = [
+            ("Camera Vision Test — element click coordinates (u,v)", ""),
+            ("Exported", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            ("Screen", f"{coords.get('screen_id','')}  (source: {coords.get('source','')})"),
+            ("Frame", frame_filename),
+            ("Camera frame (px)", f"{coords.get('camera_width','')} x {coords.get('camera_height','')}"),
+            ("Exploration viewport (px)", f"{coords.get('viewport_width','')} x {coords.get('viewport_height','')}"),
+            ("Vertical calibration", f"source={cal.get('source','')}  ay={cal.get('ay','')}  by={cal.get('by','')}"
+                                     + (f"  knots={cal.get('knots')}" if cal.get("knots") else "")),
+        ]
+        r = 0
+        for label, val in meta:
+            r += 1
+            ws.cell(row=r, column=1, value=label).font = Font(bold=True)
+            ws.cell(row=r, column=2, value=val)
+        r += 2   # blank spacer row before the table
+
+        # Table header
+        headers = ["Element ID", "Type", "Label",
+                   "Viewport X", "Viewport Y", "Click U (camera)", "Click V (camera)",
+                   "BBox camera [u1,v1,u2,v2]"]
+        for c, h in enumerate(headers, start=1):
+            ws.cell(row=r, column=c, value=h).font = Font(bold=True)
+        for e in coords.get("elements", []):
+            cv = e.get("center_viewport") or ["", ""]
+            cc = e.get("center_camera") or ["", ""]
+            bb = e.get("bbox_camera")
+            ws.append([e.get("id", ""), e.get("type", ""), e.get("label", ""),
+                       cv[0], cv[1], cc[0], cc[1],
+                       (",".join(str(x) for x in bb) if bb else "")])
+        # Column widths
+        for col, w in zip("ABCDEFGH", (28, 10, 20, 11, 11, 16, 16, 26)):
+            ws.column_dimensions[col].width = w
+
+        wb.save(export_dir / fname)
+        return fname
+    except Exception as e:
+        print(f"  [VISION-TEST] coordinate Excel export skipped: {type(e).__name__}: {e}")
+        return None
+
+
 def _img_dims(img_bytes: bytes) -> tuple[Optional[int], Optional[int]]:
     try:
         from PIL import Image as _Img
@@ -1268,19 +1340,24 @@ _PHASH_MISMATCH_THRESHOLD = 20
 
 
 def _diag_scale_point(x: int, y: int, cam_w: float, cam_h: float,
-                      ay: Optional[float] = None, by: Optional[float] = None) -> tuple[int, int]:
-    """Mirror of vision_agent.robot.real_robot._scale (viewport→camera + per-axis affine calibration),
-    for the Camera Vision Test diagnostic ONLY — computed here so the live tap path (real_robot.py) is
-    never touched. Kept in LOCKSTEP with _scale: fraction-space affine, times the frame's camera dims.
+                      ay: Optional[float] = None, by: Optional[float] = None,
+                      vknots: Optional[list] = None) -> tuple[int, int]:
+    """Mirror of vision_agent.robot.real_robot._scale (viewport→camera + per-axis calibration), for the
+    Camera Vision Test diagnostic ONLY — computed here so the live tap path (real_robot.py) is never
+    touched. Kept in LOCKSTEP with _scale.
 
-    The vertical affine (ay, by) defaults to settings.camera_calib_ay/by, but the caller passes the
-    PER-POSE values derived from the frame's login boxes (the same self-calibration the runtime does),
-    so the tool shows exactly what the robot would tap. cam_w/cam_h = the captured frame's measured
-    size (what real_robot.capture_screen calibrates the scale from)."""
-    ay = settings.camera_calib_ay if ay is None else ay
-    by = settings.camera_calib_by if by is None else by
-    fx = settings.camera_calib_ax * (x / settings.viewport_width)  + settings.camera_calib_bx
-    fy = ay * (y / settings.viewport_height) + by
+    The vertical mapping prefers a per-pose PIECEWISE map (`vknots`: email/password/sign-in/footer
+    knots) when provided — the same 4-anchor self-calibration the runtime derives, so the tool shows the
+    exact (u,v) the robot would tap including the footer fix. Absent vknots it is the affine (ay, by),
+    defaulting to settings.camera_calib_ay/by. cam_w/cam_h = the captured frame's measured size."""
+    fx = settings.camera_calib_ax * (x / settings.viewport_width) + settings.camera_calib_bx
+    if vknots:
+        from vision_agent.vision.screen_calibrate import eval_vmap
+        fy = eval_vmap(vknots, y / settings.viewport_height)
+    else:
+        ay = settings.camera_calib_ay if ay is None else ay
+        by = settings.camera_calib_by if by is None else by
+        fy = ay * (y / settings.viewport_height) + by
     return int(round(fx * cam_w)), int(round(fy * cam_h))
 
 
@@ -1295,22 +1372,29 @@ def _element_coords_for_screen(screen: dict, screen_id: str, source: str,
     the real backend does per pose — instead of the static CAMERA_CALIB_AY/BY, so the shown coordinates
     land on element centres regardless of how the rectification cropped this particular frame."""
     # Per-pose vertical self-calibration (login screens only; falls back to config when not confident).
+    # Prefers the 4-anchor PIECEWISE map (email/password/sign-in/footer) so footer-link coordinates land
+    # on their labels; falls back to the 2-point affine, then to the static config calibration.
     ay = by = None
+    vknots = None
     calib_source = "config"
     calib_extra: dict = {}
     if settings.auto_tap_calibration and image_bytes:
         try:
-            from vision_agent.vision.screen_calibrate import find_login_anchors, derive_login_vertical
-            anchors = find_login_anchors(screen)
+            from vision_agent.vision.screen_calibrate import find_login_anchor_fracs, derive_login_vmap
+            anchors = find_login_anchor_fracs(screen, settings.viewport_height)
             if anchors:
-                res = derive_login_vertical(image_bytes,
-                                            anchors[0] / settings.viewport_height,
-                                            anchors[1] / settings.viewport_height)
+                res = derive_login_vmap(image_bytes, anchors)
                 if res:
                     ay, by = res["ay"], res["by"]
-                    calib_source = "auto"
                     calib_extra = {"email_cam_frac": round(res["email_cam_frac"], 4),
                                    "password_cam_frac": round(res["password_cam_frac"], 4)}
+                    if res["kind"] == "vmap4":
+                        vknots = res["knots"]
+                        calib_source = "auto-vmap4"
+                        calib_extra.update({"signin_cam_frac": round(res["signin_cam_frac"], 4),
+                                            "footer_cam_frac": round(res["footer_cam_frac"], 4)})
+                    else:
+                        calib_source = "auto"
         except Exception:
             pass
     eff_ay = settings.camera_calib_ay if ay is None else ay
@@ -1322,12 +1406,12 @@ def _element_coords_for_screen(screen: dict, screen_id: str, source: str,
         if not c or len(c) < 2:
             continue
         cx, cy = int(round(float(c[0]))), int(round(float(c[1])))
-        u, v = _diag_scale_point(cx, cy, cam_w, cam_h, ay, by)
+        u, v = _diag_scale_point(cx, cy, cam_w, cam_h, ay, by, vknots)
         bbox_camera = None
         bb = e.get("bbox")
         if bb and len(bb) >= 4:
-            u1, v1 = _diag_scale_point(int(round(float(bb[0]))), int(round(float(bb[1]))), cam_w, cam_h, ay, by)
-            u2, v2 = _diag_scale_point(int(round(float(bb[2]))), int(round(float(bb[3]))), cam_w, cam_h, ay, by)
+            u1, v1 = _diag_scale_point(int(round(float(bb[0]))), int(round(float(bb[1]))), cam_w, cam_h, ay, by, vknots)
+            u2, v2 = _diag_scale_point(int(round(float(bb[2]))), int(round(float(bb[3]))), cam_w, cam_h, ay, by, vknots)
             bbox_camera = [u1, v1, u2, v2]
         elements.append({
             "id":              e.get("id", ""),
@@ -1340,13 +1424,27 @@ def _element_coords_for_screen(screen: dict, screen_id: str, source: str,
     note = ("These (u,v) are the exact camera pixels the live runtime sends to the Robotics Click API "
             "for each element on this screen: app_map viewport center → viewport→camera scale (frame "
             "size ÷ exploration viewport) → per-axis vertical calibration. ")
-    note += ("The vertical calibration was AUTO-DERIVED from this login frame's own email/password "
-             "boxes (self-calibrating per arm/camera pose — the same thing the robot does at run "
-             "time), so taps land on element centres regardless of how this frame was cropped."
-             if calib_source == "auto" else
-             "The vertical calibration is the STATIC CAMERA_CALIB_AY/BY (this screen has no login "
-             "boxes to self-calibrate from, or auto-calibration is off) — accurate only when this "
-             "frame's pose matches the one those constants were derived for.")
+    if calib_source == "auto-vmap4":
+        note += ("The vertical mapping was AUTO-DERIVED from this login frame using FOUR anchors it "
+                 "detected — the email box, password box, Sign In button, and the footer link row — and "
+                 "interpolated as a piecewise curve (the same self-calibration the robot does per pose). "
+                 "This anchors the BOTTOM of the screen, so the footer links (Sign up / Forgot password / "
+                 "Developer settings) land on their labels instead of extrapolating too high.")
+    elif calib_source == "auto":
+        note += ("The vertical calibration was AUTO-DERIVED from this login frame's email/password boxes "
+                 "(2-anchor affine; the Sign In / footer anchors weren't confidently measurable on this "
+                 "frame, so footer links use the affine extrapolation and may read slightly high).")
+    else:
+        note += ("The vertical calibration is the STATIC CAMERA_CALIB_AY/BY (this screen has no login "
+                 "boxes to self-calibrate from, or auto-calibration is off) — accurate only when this "
+                 "frame's pose matches the one those constants were derived for.")
+    calib = {
+        "ax": settings.camera_calib_ax, "bx": settings.camera_calib_bx,
+        "ay": round(eff_ay, 4), "by": round(eff_by, 4),
+        "source": calib_source, **calib_extra,
+    }
+    if vknots:
+        calib["knots"] = [[round(m, 4), round(c, 4)] for m, c in vknots]
     return {
         "screen_id":         screen_id,
         "source":            source,
@@ -1354,11 +1452,7 @@ def _element_coords_for_screen(screen: dict, screen_id: str, source: str,
         "camera_height":     cam_h,
         "viewport_width":    settings.viewport_width,
         "viewport_height":   settings.viewport_height,
-        "calibration": {
-            "ax": settings.camera_calib_ax, "bx": settings.camera_calib_bx,
-            "ay": round(eff_ay, 4), "by": round(eff_by, 4),
-            "source": calib_source, **calib_extra,
-        },
+        "calibration":       calib,
         "elements": elements,
         "note": note,
     }
@@ -1595,6 +1689,8 @@ def vision_test_analyze(req: VisionAnalyzeRequest):
         if coord_sid:
             element_coords = _element_coords_for_screen(screens[coord_sid], coord_sid, coord_src,
                                                         img_w, img_h, image_bytes=img_bytes)
+            # Auto-save the coordinate table to a NEW timestamped Excel file each run of the tool.
+            element_coords["excel_export"] = _export_coords_to_excel(element_coords, req.filename)
 
     return {
         "status":       "ok",
@@ -1649,14 +1745,31 @@ def vision_test_element_coords(req: ElementCoordsRequest):
     if req.screen_id not in screens:
         raise HTTPException(404, f"Screen {req.screen_id!r} is not in the app map")
 
+    coords = _element_coords_for_screen(screens[req.screen_id], req.screen_id, "requested",
+                                        img_w, img_h, image_bytes=img_bytes)
+    # Auto-save the coordinate table to a NEW timestamped Excel file each time the tool runs.
+    coords["excel_export"] = _export_coords_to_excel(coords, req.filename)
     return {
         "status": "ok",
         "filename": req.filename,
         "width": img_w,
         "height": img_h,
-        "element_coords": _element_coords_for_screen(screens[req.screen_id], req.screen_id, "requested",
-                                                     img_w, img_h, image_bytes=img_bytes),
+        "element_coords": coords,
     }
+
+
+@app.get("/api/vision-test/coords-export/{filename}")
+def vision_test_coords_export(filename: str):
+    """Download a saved Camera Vision Test coordinate Excel export from coordinate_exports/."""
+    from fastapi.responses import FileResponse
+    path = _coords_export_dir() / Path(filename).name   # .name → no path traversal
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, f"Export {filename!r} not found")
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=path.name,
+    )
 
 
 # ── TC Plan (Claude-powered, cached) ─────────────────────────────────────────

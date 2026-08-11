@@ -48,6 +48,17 @@ class Settings(BaseSettings):
     # "Arm-reachable kiosk layout".
     kiosk_screen_layout: str = "arm-reachable"
 
+    # Demo mock card for exploring the card-payment flow. The App Explorer needs to complete ONE mock
+    # card payment to discover the payment/success/order_history screens, but the kiosk (RPS) requires
+    # an ISSUED card. Rather than a fragile cross-kiosk "issue at VPS then pay at RPS" dance, the kiosk
+    # app seeds an always-available DEMO smart card (the card analogue of the demo login) that this
+    # number identifies. When `explore_demo_card` is on (set by run_explorer.py at startup — exploration
+    # only, never test execution), the exploration URL gets ?demoCard=1 so the RPS mock-card field is
+    # pre-filled with this number, and the walkthrough types it as a backup. Keep this in sync with
+    # DEMO_SMART_CARD_NUMBER in the kiosk app's src/lib/storage.ts.
+    demo_card_number: str = "4111111111110001"
+    explore_demo_card: bool = False
+
     # Agent behaviour
     max_retries: int = 3
     screenshots_dir: str = "./screenshots"
@@ -183,6 +194,18 @@ class Settings(BaseSettings):
     # rejected and the configured camera_calib_ay/by is used instead, so this can never do worse than the
     # static calibration. Set False to force the static camera_calib_* only. Playwright/demo ignore it.
     auto_tap_calibration: bool = True
+
+    # ── VIRTUAL-KEYBOARD tap coordinates (real backend) ──────────────────────────────────────────
+    # The on-screen keyboard's keys are stored in the app_map keyboard_map as NORMALIZED viewport
+    # fractions and are converted to camera pixels through the SAME per-pose calibration as every other
+    # element (real_robot._scale_key defers to _scale). The keyboard occupies monitor y≈0.68–0.86, a range
+    # the login 4-anchor vmap already brackets with its sign-in (≈0.72) and FOOTER (≈0.84) knots — the
+    # footer knot lands almost exactly on the keyboard's bottom row — so the keyboard's VERTICAL mapping is
+    # interpolated by the login vmap (this is why the footer-anchor fix also fixes keyboard accuracy), not
+    # a separate calibration. Horizontal uses camera_calib_ax/bx (identity), correct when the operating
+    # camera pose frames the arm-reachable box at the same fraction as the exploration viewport (the
+    # documented "match the viewport aspect / observe pose" setup); a different zoom shifts off-centre keys
+    # and is a pose/setup issue, with Tier-3 vision as the runtime fallback. No keyboard-specific knobs.
 
     # Physical kiosk screen dimensions (meters). NOT consumed by our code — the ROBOT converts the
     # pixel (u,v) we send into a 3D stylus point using its OWN per-kiosk screen pose (AprilTag) and

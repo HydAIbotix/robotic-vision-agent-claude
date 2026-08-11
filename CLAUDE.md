@@ -2182,6 +2182,146 @@ green; `api.main`/`real_robot`/`screen_calibrate` import clean; frontend `tsc -b
   frame". If a login test ever can't self-calibrate (odd lighting), it falls back to identity; you can
   still `python calibrate_tap.py` to set a static AY/BY, but you normally won't need to.
 
+### Real-arm sign-in: keyboard coords, footer robustness, Tier-3 double-scale fix (2026-08-12)
+
+Goal: complete the RPS sign-in with the physical arm — accurate coordinates for each virtual-keyboard
+character, then Done (dismiss) + Sign In. Plus a robustness pass on the footer calibration and a
+long-standing Tier-3 real-backend coordinate bug. All no-regression (83 passed, 5 skipped: `test_screen_calibrate`,
+`test_camera_vision`, `test_dom_correct`, `test_arm_poll`, `test_keyboard_typing`, `test_agv_gate`,
+`test_robot_faults`, `test_analyze_center`, `test_scale_calib`; the 5 skips are frame-specific to
+`sign_in_click.png`, moved during re-exploration). All edited modules import clean.
+
+**HOW CENTER COORDINATES ARE CALCULATED (operator question, answered).** Element coordinates always come
+from the **app_map** (learned in the Playwright exploration viewport, 1920×1080), NEVER from the camera —
+the camera image is only used to (a) identify the screen and (b) auto-calibrate the mapping. The pipeline
+per element: app_map center (viewport px) → `real_robot._scale` → camera px `(u,v)` sent to `/screen/click`.
+`_scale` = viewport→camera resolution scale (measured from each `/capture`) × a per-axis calibration:
+horizontal `camera_calib_ax/bx` (identity — the box is centred), vertical a **per-pose login vmap** (the
+4-anchor piecewise map from [[camera-vision-test-2026-07-16]]: email/password/sign-in/footer). The Camera
+Vision Test diagnostic mirrors this exactly (`api/main._diag_scale_point`).
+
+- ✅ **Virtual-keyboard keys now map through the SAME calibration as every element** (`real_robot._scale_key`).
+  The keyboard_map stores each key as a NORMALIZED viewport fraction; the old code converted it with a RAW
+  `frac × camera_dim` (NO calibration), so on the real arm the keys landed too high (the keyboard sits at
+  the bottom, where the rectified-frame vertical distortion is largest). Fix: `_scale_key(fx, fy)` converts
+  the fraction to a viewport pixel and defers to `_scale`, so keys use the login vmap for vertical. KEY
+  INSIGHT (validated on a real open-keyboard camera frame): the keyboard occupies monitor y≈0.68–0.86, which
+  the login vmap's sign-in (≈0.72) and **footer (≈0.84)** knots already bracket — the footer knot lands almost
+  exactly on the keyboard's bottom row, so the keyboard's vertical mapping is INTERPOLATED, not a wild
+  extrapolation. **This is why the footer-anchor fix also fixes keyboard accuracy.** (An earlier attempt to
+  detect the keyboard block via edge "busyness" was abandoned — real camera keyboards are too low-contrast;
+  reusing the login vmap is far more robust. No keyboard-specific config remains.) Horizontal stays identity
+  (`camera_calib_ax/bx`), correct when the operating camera pose frames the arm-reachable box at the same
+  fraction as the exploration viewport (the documented viewport-match / observe-pose setup); a differently
+  ZOOMED pose shifts off-centre keys and is a setup issue with Tier-3 vision as the runtime fallback.
+- ✅ **Done → Sign In sequencing already correct, confirmed.** `real_robot.type_text` appends the keyboard's
+  `done`/`return`/`enter` key AFTER the characters (its coords now go through `_scale_key` too), so after
+  typing the password the keyboard is DISMISSED before the plan's next step taps Sign In — the keyboard no
+  longer overlaps the button. A well-formed RPS plan is: verify(login) → tap(email) → type(email)+Done →
+  tap(password) → type(password)+Done → tap(sign_in) → verify(products). The leading `verify` capture derives
+  the 4-anchor vmap for the pose, which every subsequent tap/type/key reuses (base doesn't move mid-test).
+- ✅ **Footer calibration made ROBUST (consensus fit).** The 4-anchor derive previously took "the first two
+  detected bands" as email/password, so a TITLE/helper-text band above the form contaminated it → on some
+  poses it fell back to `config` (identity, everything floats high) or locked onto the title. New
+  `screen_calibrate._consensus_form_fit`: the email/password pair is drawn ONLY from FILLED boxes
+  (`detect_form_field_fracs`, which rejects sparse text), and for every ordered pair the affine is kept only
+  if in-bounds AND (preferentially) its predicted sign-in lands on a detected band. A title↔box pair's gap is
+  wrong → its affine goes out-of-bounds → rejected automatically. Validated on two real re-explored frames: a
+  heavily-cropped pose (title visible, sign-in cropped, footer off-frame) now correctly maps
+  email/password/sign-in (2-anchor `auto`, footer not forced); a clean pose gets the full 4-anchor `auto-vmap4`
+  with all three footer links on their labels.
+- ✅ **Tier-3 / inline-vision real-backend DOUBLE-SCALE fixed** (the user's "Tier-3 will identify coordinates
+  on unexplored screens" assumption). Tier-3 vision reads element coords OFF the camera frame (`_norm_to_px`
+  with the camera dims → camera pixels), but then called `robot.tap`, which applies `_scale` (viewport→camera)
+  AGAIN — so on the real backend a Tier-3 tap was scaled twice and landed far off. New **`tap_image_point(px,py)`**
+  on all three backends taps a point in the LAST-CAPTURED IMAGE's pixel space: real sends it verbatim to
+  `/screen/click` (NO `_scale`); playwright delegates to `tap()` (the screenshot IS the viewport, and its
+  element-snap helps slightly-off vision coords); demo no-op. Wired into `vision_agent/nodes/execute.py`
+  (Tier-3 VisionAgent) and both inline-vision fast-path taps in `run_vision_step`. `tap()` was refactored to
+  `_scale` then call the shared `_tap_camera` core; `tap_image_point` calls `_tap_camera` directly. STRUCTURED
+  Tier-1/2 taps still use `robot.tap` (app_map viewport coords → `_scale`) — unchanged. Playwright/demo behave
+  identically to before (verified: `tap_image_point`≡`tap` there).
+- **Tests:** new `tests/test_screen_calibrate.py` cases — consensus rejects the title band; the derive works
+  on a real re-explored frame; `_scale_key` reuses the login vmap (footer knot ≈ keyboard bottom); and
+  `tap_image_point` sends camera coords verbatim while `tap` halves a point under a 0.5 scale (proving the
+  paths differ). `test_keyboard_typing` Done-key assertion relaxed to ±1px (keys now round via `_scale`).
+- **User re-steps:** RESTART the backend (all of this is backend code — the Studio's uvicorn has no
+  `--reload`, so a stale timeout/behaviour is the tell it wasn't reloaded); capture from a consistent
+  close/head-on pose where the arm-reachable box frames the same fraction as the viewport (so keyboard
+  horizontal is accurate); re-run TC-RPS-001 — email/password taps centre, each key lands (slow, ~1–3 min of
+  per-key taps), Done closes the keyboard, Sign In taps the button. If a screen is unexplored, Tier-3 now taps
+  the camera-space coords it reads directly (no double-scale). See [[camera-vision-test-2026-07-16]],
+  [[agv-hardware-test-2026-07-13]].
+
+### Footer-link tap centring + Excel export + demo mock card + explorer add-to-cart (2026-08-11)
+
+Four independent fixes from an operator session. All no-regression (existing suites green: `test_camera_vision`
+17, `test_screen_calibrate` 13, `test_dom_correct` 9, plus arm_poll/keyboard_typing/agv_gate/robot_faults/
+analyze_center = 82 passing together); kiosk-app `tsc` clean; studio `tsc -b` clean. The 4 `test_template_match`
+failures on this box are the pre-existing external-`Image_processor/uploads` artefact (that module untouched).
+
+- ✅ **1 · Camera Vision Test coordinate table auto-exports to Excel every run.** New project-root folder
+  **`coordinate_exports/`** (gitignored, sibling to `camera_captures/`). `api/main._export_coords_to_excel`
+  (openpyxl, already a dep) writes a timestamped `coords_<screen>_<frameStem>_<YYYYmmdd_HHMMSS_mmm>.xlsx`
+  (a **counter suffix guarantees a NEW file** even on same-ms calls — never overwrites) with a meta header
+  (screen, frame, camera/viewport dims, vertical-calibration source + knots) and the full element table
+  (id/type/label, viewport X/Y, **click U/V camera**, bbox). Wired into BOTH coord paths —
+  `POST /vision-test/analyze` and `POST /vision-test/element-coords` set `element_coords.excel_export`; new
+  `GET /vision-test/coords-export/{file}` downloads it (`.name`-guarded). Studio `CameraVisionTest.tsx` shows a
+  green download link ("Auto-saved to … in coordinate_exports/"). Export failure never breaks the response.
+
+- ✅ **2 · Footer-row links (Sign up / Forgot password / Developer settings) now tap on their labels** — was
+  ~20 px HIGH. Root cause: the 2-point (email/password) vertical affine is accurate THROUGH Sign In but the
+  footer sits BELOW it and does NOT lie on that line — the rectified `/capture` frame compresses the middle
+  and the footer renders lower than ANY smooth extrapolation predicts (measured on the real frame: footer true
+  ≈0.965 cam-frac, affine gives 0.92, projective-through-3 gives 0.90 — extrapolation can't reach it). Fix: a
+  **4-anchor monotonic PIECEWISE-LINEAR vertical map** through detected anchors — email box, password box,
+  **Sign In button** (detected via a LOCAL-contrast band detector + a spacing-RATIO match to the app_map's
+  known email→password:password→signin ratio, robust to the title band), and the **footer text row** (brightest
+  text row in the bottom band, energy-gated). `vision_agent/vision/screen_calibrate.py` gained
+  `detect_login_form_bands`, `_match_form_anchors`, `detect_footer_band`, `find_login_anchor_fracs`,
+  `eval_vmap`, `derive_login_vmap`. Applied ONLY when ALL FOUR anchors are confidently found AND the detected
+  Sign In agrees with the email/password affine (so sign-in barely moves); otherwise it FALLS BACK to the exact
+  2-point affine → **no regression for any pose/screen where the full set can't be measured**. Unified into the
+  consumer via a per-pose `_calibration["vknots"]`: `real_robot._scale` and `api/main._diag_scale_point` evaluate
+  the piecewise map when knots are present, else the plain affine (byte-identical default). `calibrate_vertical_from_login`
+  gained optional `signin_center_y`/`footer_center_y`; `run_vision_step` passes all four via `find_login_anchor_fracs`;
+  base motion clears `vknots`. Diagnostic reports `source="auto-vmap4"` + the knots. Validated by rendering
+  crosshairs on the real frame: all six elements (email/password/Sign In/3 footer links) centre.
+
+- ✅ **3 · App Explorer can now complete the RPS card-payment flow via an always-available DEMO mock card**
+  (chosen over the fragile "issue at VPS → pay at RPS" cross-kiosk dance — the card analogue of the demo login).
+  KIOSK APP (`robotics-kiosk-pos`): `src/lib/storage.ts` exports `DEMO_SMART_CARD` / `DEMO_SMART_CARD_NUMBER`
+  (`4111111111110001`, balance 1,000,000) and `getSmartCards()` seeds it IN-MEMORY on read (never written
+  through to the shared card service; a real issued card of the same number overrides), so paying with that
+  number always finds a funded issued card → `confirmMockCard` approves. `src/App.tsx` pre-fills the mock-card
+  input with it when `?demoCard=1` (new `isDemoCardMode()`), so exploration's "Use Mock Card → Pay with Mock
+  Card" completes without a human typing; **real test runs never set the param**, so their entry stays empty and
+  they type their own captured card — no interference. BACKEND: `config.demo_card_number` + `explore_demo_card`
+  (default False); `run_explorer.py` sets `explore_demo_card=True` at startup (exploration entrypoint ONLY →
+  test execution never gets the param); `playwright_stubs._kiosk_url()` appends `&demoCard=1` when the flag is
+  on; the commerce-walkthrough payment loop was rewritten to handle the TWO-STEP mock-card reveal (Use Mock Card
+  reveals the entry on the SAME screen → re-explore → TYPE the demo card as a backup → tap "Pay with Mock Card"
+  → navigates to the result), no longer stopping on a same-screen reveal (a `tapped` set prevents loops).
+
+- ✅ **4 · Explorer add-to-cart fixed (whole purchase flow was skipped).** The `+` quantity stepper's app_map
+  coordinate was never DOM-corrected, so its tap snapped to the Add-to-Cart button below it (disabled at qty 0)
+  → qty stayed 0 → cart never populated → walkthrough bailed. Root cause: Claude named the stepper
+  `nexora_quantity_plus` (symbol/direction) while the DOM testid is `quantity-increase-<id>` — the ONLY shared
+  identity token was the product name (1 → below the ≥2 strong-snap threshold), and type `stepper` isn't
+  type-compatible with `button`. Fix (`app_explorer/nodes/explore_screen.py`): a **direction-synonym map**
+  (`plus→increase`, `minus→decrease`, `increment/decrement` too) in `_meaningful_tokens`, so
+  `nexora_quantity_plus` → {nexora, increase} shares TWO tokens with the DOM `quantity-increase-nexora-phone-x2`
+  → an unambiguous strong snap to the true stepper centre; the minus maps to decrease (direction preserved, no
+  cross-snap). `add`/`remove` are deliberately NOT synonyms (would collide with Add-to-Cart). Takes effect within
+  one exploration run (correction runs before the walkthrough reads the map). New `tests/test_dom_correct.py`
+  cases assert plus/minus snap correctly and `add` never gains an `increase` token.
+
+- **User re-steps:** RESTART the backend (loads all of the above); **RE-EXPLORE both kiosks** — RPS now completes
+  the purchase→cart→payment→success flow (add-to-cart fixed + demo card) and re-learns the stepper coords;
+  regenerate plans; re-run the Camera Vision Test (footer links now centre, and each run drops a new
+  `coordinate_exports/*.xlsx`). See [[camera-vision-test-2026-07-16]], [[agv-hardware-test-2026-07-13]].
+
 ### Studio / infrastructure (sibling `kiosk-test-studio`)
 
 - ✅ **`fetch` had no timeout** — dashboard hung on "Loading…", Reset froze uncancellably, readiness

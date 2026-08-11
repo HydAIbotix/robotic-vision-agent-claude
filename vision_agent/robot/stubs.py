@@ -50,6 +50,13 @@ def tap(x: int, y: int) -> dict:
     return {"success": True, "x": x, "y": y}
 
 
+def tap_image_point(px: int, py: int) -> dict:
+    """Tap a point in the last-captured image's pixel space (vision-derived coords). Demo has no live
+    screen, so this is the same no-op as tap() — kept for backend-signature parity."""
+    print(f"    [ROBOT] tap_image_point({px}, {py})")
+    return {"success": True, "x": px, "y": py}
+
+
 def type_text(text: str, clear_first: bool = False) -> dict:
     """Type text character-by-character via robot arm keyboard simulator.
 
