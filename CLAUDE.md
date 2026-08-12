@@ -2182,6 +2182,49 @@ green; `api.main`/`real_robot`/`screen_calibrate` import clean; frontend `tsc -b
   frame". If a login test ever can't self-calibrate (odd lighting), it falls back to identity; you can
   still `python calibrate_tap.py` to set a static AY/BY, but you normally won't need to.
 
+### Exploration screenshots grouped per-run + browser-explore requires playwright backend (2026-08-12)
+
+Two operator items. No-regression (46 passed / 5 skipped on the affected suites; all edited modules
+compile + `api.main` imports clean).
+
+- ✅ **Exploring a browser kiosk app must run on `ROBOT_BACKEND=playwright`, not `real`.** A fresh
+  explore of kiosk-2 died `code 1` with `ConnectionError … 192.168.0.107:8000 … /api/v1/capture` —
+  with `ROBOT_BACKEND=real`, `run_explorer.py`'s first `robot.capture_screen()` hit the PHYSICAL arm
+  camera (unreachable from the dev box) instead of driving Chromium. The `real` backend has no browser
+  to crawl; exploration needs a live DOM. Fix/док: `.env` `ROBOT_BACKEND` flipped to `playwright` for
+  exploration (+ a comment explaining the rule). **Set it back to `real` and RESTART the backend for a
+  real-arm test run** — exploration is a fresh subprocess that reads `.env` each time (no restart
+  needed), but live test execution reads the backend from the running API process.
+- ✅ **Each exploration's screenshots now go to a dedicated, meaningfully-named folder** (operator
+  ask). `run_explorer.py` routes THIS run's raw captures under
+  **`screenshots/exploration_<app_id>_<YYYYMMDD_HHMMSS>/`** (app_id from `EXPLORE_APP_ID`, else
+  `single`) by overriding `settings.screenshots_dir` at startup — so entry/explore_*/walkthrough_*/
+  keyboard_map_*/aria_*/scroll_* are grouped, not scattered at the top level. Design guarantees:
+  - **`reference_screenshot` stays self-consistent** — it's built from `settings.screenshots_dir` at
+    capture time, so real-robot Tier-1 template matching still resolves it from the new folder (paths
+    are relative to the repo-root cwd; no rewrite needed).
+  - **Annotated shots stay in the SHARED `screenshots/annotated/`** — `explore_screen._save_annotated`
+    now anchors to `Path(settings.app_map_path).parent/"screenshots"/"annotated"` (NOT the overridden
+    `settings.screenshots_dir`), so the App Map page's annotated view (served from the fixed
+    `screenshots/annotated/`) is untouched and re-explorations' annotated shots stay coherent per
+    screen_id across the multi-app map.
+  - **Clear/GC keep "clean slate" parity** — the raw shots left the top level, so global clear
+    (`_delete_exploration_shots(None)`) now also `rmtree`s every `screenshots/exploration_*/` dir, and
+    per-app clear (`delete_app_map_app`) removes `screenshots/exploration_<app_id>_*/` (same app_id
+    sanitisation `run_explorer` uses). `/reset` still preserves exploration output (exploration_* dirs
+    don't match its `run-`/`results` rule). Execution shots (`screenshots/run-*/`) are never matched.
+  - **Re-exploring an app prunes its OWN prior `exploration_<app>_*` folders at startup** (a full
+    re-exploration re-captures every screen → old shots are orphans; mirrors the previous
+    overwrite-in-place behaviour). Other apps' folders are left intact. A crash mid-explore degrades
+    gracefully (missing reference → template match falls back to Claude vision, non-fatal).
+  - **`recover_keyboard_map.py`** now searches `screenshots/**/keyboard_map_*.png` (recursive) so it
+    finds the shot inside the new folder. `calibrate_tap.py` writes its own `calibrate_login.png` at
+    the base (real-robot capture, unaffected).
+  - **Files:** `.env` (backend), `run_explorer.py` (folder override + same-app prune + banner line),
+    `app_explorer/nodes/explore_screen.py` (annotated anchored to base), `api/main.py` (global +
+    per-app exploration-folder clear), `recover_keyboard_map.py` (recursive glob).
+  See [[camera-vision-test-2026-07-16]], [[agv-hardware-test-2026-07-13]].
+
 ### Real-arm sign-in: keyboard coords, footer robustness, Tier-3 double-scale fix (2026-08-12)
 
 Goal: complete the RPS sign-in with the physical arm — accurate coordinates for each virtual-keyboard

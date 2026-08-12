@@ -390,7 +390,11 @@ def _dedup_elements(elements: list, radius: int = 30) -> list:
 
 def _save_annotated(image_path: str, screen_id: str, elements: list) -> None:
     """Draw bounding boxes and centre dots on the screenshot for visual QA."""
-    annotated_dir = Path(settings.screenshots_dir) / "annotated"
+    # Annotated shots live in the SHARED base screenshots/annotated/ folder (keyed by screen_id
+    # across the whole multi-app map), NOT in the per-exploration subfolder that settings.screenshots_dir
+    # points at during a run.  This keeps the App Map page's annotated view (served from the fixed
+    # screenshots/annotated/) working, and keeps re-explorations' annotated shots coherent per screen.
+    annotated_dir = Path(settings.app_map_path).parent / "screenshots" / "annotated"
     annotated_dir.mkdir(parents=True, exist_ok=True)
 
     img  = Image.open(image_path).copy()

@@ -2352,6 +2352,13 @@ def _delete_exploration_shots(screen_ids: Optional[set[str]] = None) -> int:
                 if f.is_file() and f.suffix.lower() in {".png", ".jpg", ".jpeg"}:
                     try: f.unlink(); removed += 1
                     except OSError: pass
+            # Per-exploration capture folders (screenshots/exploration_<app>_<ts>/) — the raw shots
+            # now live here, so a clean slate must nuke them too.  Execution folders (run-*, results)
+            # and annotated/ are intentionally NOT matched by the exploration_ prefix.
+            import shutil as _shutil
+            for d in base.iterdir():
+                if d.is_dir() and d.name.startswith("exploration_"):
+                    _shutil.rmtree(d, ignore_errors=True); removed += 1
         return removed
 
     # ── Per-app clear = only the given screens' shots (other apps preserved) ───
@@ -2443,6 +2450,13 @@ def delete_app_map_app(app_id: str):
         p.write_text(json.dumps(updated, indent=2, default=str), encoding="utf-8")
         n = _delete_exploration_shots(app_screen_ids)  # this app's shots
         n += _gc_orphan_shots()                         # + any leftover orphans
+        # This app's per-exploration capture folders (screenshots/exploration_<app_id>_<ts>/).
+        # Folder name uses the same sanitisation run_explorer.py applies to the app_id.
+        import shutil as _shutil
+        _safe = "".join(c if (c.isalnum() or c in "-_") else "-" for c in app_id) or "single"
+        for d in _base_screens_dir().glob(f"exploration_{_safe}_*"):
+            if d.is_dir():
+                _shutil.rmtree(d, ignore_errors=True); n += 1
     print(f"  [APP MAP] Cleared app '{app_id}' + {n} screenshots")
 
 

@@ -30,10 +30,15 @@ from app_explorer.prompts import MAP_KEYBOARD
 
 
 def _latest_keyboard_shot() -> str:
-    shots = glob.glob(str(Path(settings.screenshots_dir) / "keyboard_map_*.png"))
+    # Keyboard shots are captured under the per-exploration folder
+    # (screenshots/exploration_<app>_<ts>/keyboard_map_*.png); older runs wrote them at the top
+    # level.  Search both so recovery works regardless of when the shot was captured.
+    base = Path(settings.screenshots_dir)
+    shots = glob.glob(str(base / "keyboard_map_*.png"))
+    shots += glob.glob(str(base / "**" / "keyboard_map_*.png"), recursive=True)
     if not shots:
         return ""
-    return max(shots, key=os.path.getmtime)
+    return max(set(shots), key=os.path.getmtime)
 
 
 def main() -> int:
@@ -44,7 +49,7 @@ def main() -> int:
 
     img = args.image or _latest_keyboard_shot()
     if not img or not Path(img).exists():
-        print(f"✗ No keyboard screenshot found (looked in {settings.screenshots_dir}/keyboard_map_*.png). "
+        print(f"✗ No keyboard screenshot found (looked in {settings.screenshots_dir}/**/keyboard_map_*.png). "
               f"Re-explore the kiosk to capture one, or pass --image.")
         return 2
     print(f"→ Mapping keyboard from: {img}")

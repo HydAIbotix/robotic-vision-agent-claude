@@ -81,6 +81,32 @@ from vision_agent import robot
 # This is set ONLY here (the exploration entrypoint), so test execution never gets ?demoCard=1.
 settings.explore_demo_card = True
 
+# ── Group THIS exploration's screenshots into a dedicated, meaningfully-named folder ──────────
+# Every raw capture (entry, per-screen explore_*, walkthrough_*, keyboard_map_*, aria_*, scroll_*)
+# is routed under screenshots/exploration_<app_id>_<YYYYMMDD_HHMMSS>/ so each run's shots are grouped
+# instead of scattered at the top level of screenshots/.  The folder is named for the app being
+# explored (EXPLORE_APP_ID, e.g. "kiosk-2") + a timestamp.
+#   • reference_screenshot paths are built from settings.screenshots_dir AT CAPTURE TIME, so they
+#     stay self-consistent — real-robot Tier-1 template matching still resolves them from this folder.
+#   • The ANNOTATED shots stay in the SHARED screenshots/annotated/ (anchored to app_map_path in
+#     explore_screen.py), so the App Map page's annotated view is unaffected.
+import os as _os_pre
+_base_screens_root = Path(settings.screenshots_dir)
+_explore_app_id = (_os_pre.environ.get("EXPLORE_APP_ID", "").strip() or "single")
+_safe_app_id = "".join(c if (c.isalnum() or c in "-_") else "-" for c in _explore_app_id) or "single"
+# Prune this app's PRIOR exploration folders (a full re-exploration re-captures all of the app's
+# screens, so old shots become orphans — matches the previous overwrite-in-place behaviour).  Only
+# this app's folders are touched; other apps' exploration folders are left intact.
+import shutil as _shutil_pre
+if _base_screens_root.exists():
+    for _d in _base_screens_root.glob(f"exploration_{_safe_app_id}_*"):
+        if _d.is_dir():
+            _shutil_pre.rmtree(_d, ignore_errors=True)
+_explore_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+_explore_shot_dir = _base_screens_root / f"exploration_{_safe_app_id}_{_explore_ts}"
+_explore_shot_dir.mkdir(parents=True, exist_ok=True)
+settings.screenshots_dir = str(_explore_shot_dir)
+
 screenshots_dir = Path(settings.screenshots_dir)
 screenshots_dir.mkdir(parents=True, exist_ok=True)
 
@@ -95,6 +121,7 @@ print("  App Explorer — Generic Kiosk POS")
 print(f"  Backend        : {settings.robot_backend}")
 print(f"  Explore mode   : {_eff_mode}")
 print(f"  App URL        : {settings.kiosk_url}")
+print(f"  Screenshots    : {settings.screenshots_dir}")
 print(f"  Log file       : {_log_path}")
 print(f"  Credentials (valid): {CREDENTIALS['valid']}")
 print("=" * 60)
