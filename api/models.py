@@ -106,9 +106,13 @@ class DeviceConfig(Base):
     """One entry per physical device the robot visits (TVM, MPOS, RSV, etc.)."""
     __tablename__ = "device_configs"
     id          = Column(Integer, primary_key=True)
-    alias       = Column(String(50), unique=True, nullable=False)  # e.g. "TVM"
-    kiosk_id    = Column(String(50))                               # linked Kiosk-ID (e.g. "KIOSK-ID-1")
-    description = Column(String(200))                               # e.g. "Ticket Vending Machine"
+    alias         = Column(String(50), unique=True, nullable=False)  # e.g. "TVM"
+    kiosk_id      = Column(String(50))                               # linked Kiosk-ID (e.g. "KIOSK-ID-1") — the JOIN KEY
+    # AGV map position name sent as the /base/goto `target` when driving to this device (e.g.
+    # "kiosk-2-Aug-14-G37"). DECOUPLED from kiosk_id so the robotics team can rename AGV map
+    # positions without disturbing the join key. Blank → falls back to kiosk_id (historical behaviour).
+    position_name = Column(String(80))
+    description   = Column(String(200))                             # e.g. "Ticket Vending Machine"
     pos_x       = Column(Float, default=0.0)   # metres from robot home
     pos_y       = Column(Float, default=0.0)
     pos_theta   = Column(Float, default=0.0)   # heading in degrees

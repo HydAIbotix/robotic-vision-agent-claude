@@ -411,28 +411,36 @@ def _poll(
     )
 
 
-def _poll_base(cmd_id: str, timeout_s: float, initial_state: str = "") -> dict:
-    """Poll /base/state until the AGV ARRIVES, emitting a live status tick each interval.
+def _poll_base(cmd_id: str, initial_state: str = "") -> dict:
+    """Poll /base/state until the AGV ARRIVES (reports a READY state), emitting a live status tick
+    each interval.
 
     Arrival contract (per the real AGV controller, confirmed on hardware 2026-07-13):
       • the base reports state "moving" while navigating, then "ready" once it reaches and settles
-        at the target — so we wait for a READY state (see _BASE_READY_STATES), NOT the arm's "idle";
+        at the target — so we wait for a READY state (see _BASE_READY_STATES, which is "ready" plus
+        the controller's other stopped-at-target synonyms), NOT the arm's "idle";
       • /base/state does NOT reliably echo our cmd_id (its sample returns a placeholder), so the
         STATE field is authoritative for arrival — we do not gate on a cmd_id match here;
       • state "error" fails fast.
-    Polls every settings.base_poll_interval_s (2s default, configurable). Each tick surfaces the
+
+    NO client-side move deadline and NO self-abort (2026-08-18). AGV travel time is unknown and varies
+    with distance/traffic; a previous 60s deadline aborted a base that was still closing in (0.89m out)
+    on a "go home" move (run-2-212857-1808). So we wait as long as the base keeps reporting progress and
+    NEVER POST /base/abort ourselves. The loop still exits promptly on: a READY state (arrived), an
+    "error" state (fail fast), or a network/HTTP failure from /base/state — a down/unreachable
+    controller makes _get_quiet raise, which propagates so the runner fails the step. Only a live
+    controller that keeps honestly reporting "moving" keeps us waiting, which is the intended behaviour.
+
+    Polls every settings.base_poll_interval_s (10s default, configurable). Each tick surfaces the
     state + nav_feedback (distance remaining) to the live monitor via _status so the move is visible
-    instead of a silent wait. On timeout: POST /base/abort (best effort) then raise TimeoutError.
-    Strictly uses the AGV URL (all /base/* calls route to agv_api_base via _base_for)."""
+    instead of a silent wait. Strictly uses the AGV URL (all /base/* calls route via _base_for)."""
     if initial_state:
         _status("/base/goto", cmd_id, initial_state, {})   # immediate status from the goto response
         if initial_state.lower() in _BASE_READY_STATES:
             return {"state": initial_state, "cmd_id": cmd_id}
 
-    deadline   = time.time() + timeout_s
-    last_state: dict = {}
-    while time.time() < deadline:
-        last_state = _get_quiet("/base/state")
+    while True:
+        last_state = _get_quiet("/base/state")   # raises on a down/unreachable controller → propagates
         s = str(last_state.get("state", "")).lower()
         _status("/base/state", cmd_id, s or "?", last_state.get("nav_feedback") or {})
         if s == "error":
@@ -440,17 +448,6 @@ def _poll_base(cmd_id: str, timeout_s: float, initial_state: str = "") -> dict:
         if s in _BASE_READY_STATES:
             return last_state
         time.sleep(settings.base_poll_interval_s)
-
-    # Timed out — attempt graceful abort so the base doesn't keep driving.
-    try:
-        _post("/base/abort", {"cmd_id": _new_cmd_id("base-abort")},
-              timeout=settings.robot_response_timeout_s)
-    except Exception:
-        pass
-    raise TimeoutError(
-        f"AGV /base/state timed out after {timeout_s}s "
-        f"(last state: {last_state.get('state')!r}) — base never reached a ready state"
-    )
 
 
 def _annotate_click(src_path: str, points: list[tuple[int, int]], save_path: str) -> str:
@@ -1023,13 +1020,14 @@ def navigate_to_kiosk(kiosk_id: str, timeout_s: Optional[float] = None) -> dict:
     _calibration.pop("calib_ay", None)   # pose changed → drop the per-pose vertical auto-calibration
     _calibration.pop("calib_by", None)   # (re-derived from the next login frame; else config fallback)
     _calibration.pop("vknots", None)     # drop the per-pose piecewise vertical map too
-    t = timeout_s or settings.base_move_timeout_s
     cmd_id = _new_cmd_id(f"goto-{kiosk_id}")
-    print(f"  [ROBOT] navigate_to_kiosk({kiosk_id!r})  timeout={t}s")
+    # timeout_s is accepted for cross-backend signature parity but is NOT used as a move deadline:
+    # the base move waits for the controller to report READY (no self-imposed timeout / abort).
+    print(f"  [ROBOT] navigate_to_kiosk({kiosk_id!r})  (waiting for base READY — no client-side deadline)")
     goto = _post("/base/goto", {"target": kiosk_id, "cmd_id": cmd_id})
     # Use the goto response's immediate state ("moving") for the first live status, then poll
     # /base/state (strictly the AGV URL) until it reports a ready state.
-    result = _poll_base(cmd_id, t, initial_state=str((goto or {}).get("state", "")))
+    result = _poll_base(cmd_id, initial_state=str((goto or {}).get("state", "")))
     _current_kiosk_id = kiosk_id
     print(f"  [ROBOT] arrived at {kiosk_id!r}  (state: {result.get('state')!r})")
     return result
@@ -1048,8 +1046,9 @@ def move_to_position(x: float, y: float, theta: float, target: Optional[str] = N
     raw pose instead of by name (used only when no target name is available).
 
     Non-blocking POST → poll: the HTTP call itself respects settings.robot_response_timeout_s (fail
-    fast if the base controller doesn't answer), while the physical move is awaited up to
-    base_move_timeout_s. A timeout raises, which the runner catches and fails the step gracefully."""
+    fast if the base controller doesn't answer). The physical move is then awaited with NO client-side
+    deadline and NO self-abort — _poll_base waits for the base to report READY (see its docstring),
+    failing only on an "error" state or an unreachable controller, which the runner catches."""
     global _screen_localized
     _screen_localized = False   # base motion invalidates the screen pose → must re-capture before taps
     _calibration.pop("calib_ay", None)   # pose changed → drop the per-pose vertical auto-calibration
@@ -1063,8 +1062,7 @@ def move_to_position(x: float, y: float, theta: float, target: Optional[str] = N
         print(f"  [ROBOT] move_to_position(x={x}, y={y}, θ={theta}°)")
         body = {"x": x, "y": y, "theta": theta, "cmd_id": cmd_id}
     goto = _post("/base/goto", body)
-    return _poll_base(cmd_id, settings.base_move_timeout_s,
-                      initial_state=str((goto or {}).get("state", "")))
+    return _poll_base(cmd_id, initial_state=str((goto or {}).get("state", "")))
 
 
 def get_base_pose() -> dict:

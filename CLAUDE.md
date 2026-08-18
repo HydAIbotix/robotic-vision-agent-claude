@@ -2182,6 +2182,152 @@ green; `api.main`/`real_robot`/`screen_calibrate` import clean; frontend `tsc -b
   frame". If a login test ever can't self-calibrate (odd lighting), it falls back to identity; you can
   still `python calibrate_tap.py` to set a static AY/BY, but you normally won't need to.
 
+### Live status streams from the FIRST base move (per-test positioning), not 2 min in (TC-AGV-002, 2026-08-18)
+
+Operator re-ran `TC-AGV-002` after the no-timeout fix. Two observations:
+
+**(A) The AGV fault was ROBOT-SIDE, not ours — our new no-abort behaviour worked correctly.** From
+`results/run-3-215758-1808/run_console.log`, the base drove in cleanly (distance 4.60m → **0.26m** by
+`21:59:01`) then its OWN navigation drove it BACK OUT (0.26 → 0.30 → 1.14 → 2.53 → 5.47m) and the
+controller reported **`state='error'`** at `22:00:12` with **`tag_seen: False`** and `nav2=ACTIVE`. The
+second attempt's `distance_remaining` oscillated wildly (2.12 → 8.11 → 1.97 → 6.66 → … → error). This is
+an AGV/nav2 docking failure on the robotics side: the final AprilTag docking never saw the tag
+(`tag_seen: False`), so nav2 aborted the approach, wandered, and the controller declared `error`. OUR
+code did exactly the right thing per the 2026-08-18 no-timeout change — it did NOT time out and did NOT
+self-abort; it waited and failed only when the CONTROLLER itself reported `error` (fail-fast on error is
+retained). So nothing to fix on our end for the movement; the robotics team should investigate why the
+docking tag isn't seen at ~0.26m and why distance-remaining is non-monotonic (localization j/jumps).
+NB the base was driven TWICE (per-test positioning `cmd-4` then the plan's `move` step `cmd-1`) — both hit
+the same robot-side error; the double-drive is pre-existing (positioning + explicit move) and harmless.
+
+**(B) FIXED — live stream was silent for ~2 min, then started.** Root cause: the real-time AGV/arm
+status sink (`set_event_sink`) was registered INSIDE `_execute_structured_plan`, but the per-test
+positioning move (`_position_for_test` → `navigate_to_kiosk`) runs in `run_vision_step` BEFORE that
+executor is called. So during the whole ~2-minute positioning drive the 10s status ticks were pushed to a
+sink that wasn't registered yet → they reached the console (`print` in `_status`) but NOT the WebSocket;
+the live stream only came alive when the first in-step move started inside the executor (~2 min in). Fix:
+- Extracted the sink builder to a module-level `_make_robot_status_sink(run_id, test_id)` +
+  `_register_status_sink(run_id, test_id)` helper (`run_vision_step.py`), so there's ONE definition.
+- `run_vision_step` now calls `_register_status_sink(...)` **BEFORE** `_position_for_test(tc)`, so the
+  positioning drive streams live from its first tick. `_execute_structured_plan` still re-registers the
+  same sink (idempotent — same behaviour), so nothing downstream changed.
+- **No-regression:** real backend only implements `set_event_sink` (playwright/demo no-op); the sink is a
+  no-op when `run_id` is empty (CLI); STATUS ticks stay live-only (not in the ring buffer) so the post-step
+  `_flush_robot_events()` pull never double-emits. Verified: the sink emits a `[ROBOT AGV] … Nm remaining`
+  `log` event to the broadcaster and no-ops without a run_id; suites green (`test_agv_gate` 7,
+  `test_arm_poll` 9, `test_robot_faults` 8).
+- **Files:** `test_runner/nodes/run_vision_step.py`. **User: RESTART the backend**, then AGV moves —
+  including the initial positioning drive — will stream distance-remaining every 10s from the start. See
+  [[agv-hardware-test-2026-07-13]].
+
+### AGV base move: no self-abort / no client-side timeout; poll every 10s (TC-AGV-004, 2026-08-18)
+
+`TC-AGV-004` ("Move the AGV to home position") FAILED even though the base was driving correctly. From
+the run console (`results/run-2-212857-1808/run_console.log`): `/base/goto home-Aug-14-G37` at
+`21:29:00`, then steady `state='moving'` ticks with distance-remaining falling 4.53m → **0.89m** by
+`21:29:59`; at `21:30:01` we POSTed `/base/abort` and the step failed
+`TimeoutError: AGV /base/state timed out after 60.0s … base never reached a ready state`.
+
+- **Root cause:** OUR 60s client-side deadline (`settings.base_move_timeout_s`) in `_poll_base` elapsed
+  (~60s after the goto) while the AGV was still legitimately closing in (0.89m out, distance decreasing
+  every tick). On timeout the poll POSTed `/base/abort`, which STOPPED the base short of home. The
+  controller was healthy the whole time — this was purely our timeout+abort, not a hardware fault.
+- ✅ **`_poll_base` no longer imposes a move deadline and NEVER self-aborts** (`real_robot.py`). It now
+  loops until the controller reports a READY state (arrived) — polling `/base/state` every
+  `settings.base_poll_interval_s`. It still exits promptly on (a) a READY state → success, (b) an
+  `"error"` state → fail fast (RuntimeError), or (c) a network/HTTP failure from `/base/state` — a
+  down/unreachable controller makes `_get_quiet` raise and that propagates so the runner fails the step
+  (verified: `_get_quiet` does `requests.get(...).raise_for_status()` and `_poll_base` doesn't catch
+  it). Only a LIVE controller that keeps honestly reporting `"moving"` keeps us waiting — the intended
+  behaviour, since AGV travel time is unknown/variable. The `/base/abort` POST was removed from the poll
+  entirely (the only remaining `/base/abort` in the codebase is the operator-initiated Robot API tester
+  whitelist in `api/main.py`).
+- ✅ **Poll cadence 2s → 10s** (`settings.base_poll_interval_s` default 2.0 → **10.0**,
+  `BASE_POLL_INTERVAL_S`). Live distance-remaining status still shows, just every 10s during a long
+  drive (no hammering).
+- ✅ **`_poll_base` signature dropped its `timeout_s` param**; both callers (`navigate_to_kiosk`,
+  `move_to_position`) updated. `navigate_to_kiosk` keeps its own `timeout_s` kwarg ONLY for cross-backend
+  signature parity (stubs/playwright have it) — it is no longer used as a deadline (documented inline).
+  `settings.base_move_timeout_s` is now UNUSED (kept so an existing `.env` `BASE_MOVE_TIMEOUT_S` still
+  parses; marked deprecated in `config.py`).
+- **Arrival = READY.** `_BASE_READY_STATES` (`ready` + the controller's other stopped-at-target synonyms
+  `idle/arrived/done/reached`) is unchanged — `"ready"` is the real arrival signal; the synonyms are kept
+  so an already-at-target goto that acks `idle` still short-circuits (and `check_state agv==idle` still
+  passes on `ready`). Narrowing to strictly-only-`ready` was NOT done because it would hang on the
+  already-there `idle` ack and break `check_state`.
+- **No-regression:** real-backend base path only; the ARM poll (`_poll` / `_recover_arm`, which DOES
+  abort+home on arm faults) is untouched — arm safety recovery is unchanged. Playwright/demo have their
+  own no-op stubs. Behavioural test proved: long move (20 `moving` samples) → returns on `ready` with
+  **0 aborts**; `error` fails fast (0 aborts); unreachable propagates (0 aborts); initial `ready`
+  short-circuits (0 polls). Suites green (`test_arm_poll` 9, `test_agv_gate` 7, `test_robot_faults` 8).
+- **Files:** `vision_agent/robot/real_robot.py`, `vision_agent/config.py`. **User: RESTART the backend**
+  (uvicorn has no `--reload`), then re-run `TC-AGV-004` — the base should now be allowed to finish the
+  last ~1m and reach home; we will not abort it. If it genuinely never reaches home the step only ends
+  when the controller reports `error` or becomes unreachable. See [[agv-hardware-test-2026-07-13]].
+
+### AGV map position names decoupled from kiosk_id — per-device `position_name` + configurable home (2026-08-18)
+
+The robotics team renamed the AGV map's named dock positions (e.g. `kiosk-2-Aug-14-G37`,
+`kiosk-1-Aug-14-G37-angled`, `home-Aug-14-G37`). The `/base/goto` `target` must match those names
+EXACTLY. Previously the runtime sent the **`kiosk_id`** as the `target` (kiosk move) and the hardcoded
+literal **`"home"`** (home move) — so the new names couldn't be used without either mangling the
+`kiosk_id` join key (used across KioskConfig ↔ DeviceConfig ↔ TestCase inference ↔ app_map `app_id`/
+plan scoping/template refs — the `[[kiosk-id-join-key]]` invariant) or, for home, at all (no field).
+
+**How the `/base/goto target` is derived (for reference).** A test step "Go to RPS device" is tagged
+by the planner as `target: "RPS"` (the alias). At runtime the move handler looks RPS up in the Device
+Map (DeviceConfig) and sends the resolved position name to `robot.navigate_to_kiosk(...)` →
+`POST /base/goto {"target": …, "cmd_id": …}`. A "go home" step sends the reserved home target.
+
+**Fix — Option B: decouple the AGV position name from the join key (backward-compatible).**
+- ✅ **New `DeviceConfig.position_name` column** (`api/models.py` + idempotent
+  `api/database.py` migration `ALTER TABLE device_configs ADD COLUMN position_name VARCHAR(80)`). Holds
+  the robotics team's AGV-map name for THAT device (e.g. `kiosk-2-Aug-14-G37`). **Blank → falls back to
+  `kiosk_id`** (the exact historical behaviour), so existing DBs behave identically until a name is set.
+- ✅ **New `settings.agv_home_target`** (`vision_agent/config.py`, `.env` `AGV_HOME_TARGET`, default
+  `"home"`) — the AGV-map name sent for a "go home"/"return to base" step. Blank → `"home"`.
+- ✅ **Single resolver `_agv_target(dev_cfg, fallback)`** (`test_runner/nodes/run_vision_step.py`):
+  `position_name` if set → else `kiosk_id` → else the fallback (alias). Wired into ALL three AGV-drive
+  paths so they behave identically: the explicit `move` handler (`target = agv_home_target if is_home
+  else _agv_target(...)`), the cross-kiosk switch (`move_to_position(..., target=_agv_target(...))`), and
+  the per-test pre-positioning (`_position_for_test` → `navigate_to_kiosk(_agv_target(...))`).
+  `_load_device_map` now carries `position_name` per entry.
+- ✅ **`current_kiosk` still tracks the KIOSK_ID, not the position name** — after a `move`,
+  `current_kiosk = dev_cfg["kiosk_id"] or _kid_of_dev(alias)`, so the cross-kiosk routing comparison
+  (which compares against kiosk_ids) is unaffected. This is the one subtle regression the change had to
+  avoid, and it's handled.
+- ✅ **API surface:** `_device_summary` + `DeviceConfigRequest` gained `position_name` (upsert flows it
+  through `model_dump()` unchanged); `GET /api/config` and `PATCH /api/config/robot` now return
+  `agv_home_target`, and `PATCH /api/config/robot` accepts `agv_home_target` (persists to `.env`).
+- **No-regression proof:** blank `position_name` → `_agv_target` returns `kiosk_id` (verified);
+  blank home → `"home"`; the migration is idempotent and adds the column to legacy tables (verified on a
+  temp DB + a synthetic legacy table). Playwright/demo ignore the AGV target (simulated no-op). Full
+  suite: `39 passed` on the AGV/robot suites; the only failing tests (`test_template_match` ×4,
+  `test_vision_agent` ×4) are PRE-EXISTING/environmental — **confirmed via `git stash`: the identical 8
+  fail on the baseline without these changes**. `api.main` imports clean.
+- **Kiosk Test Studio UI (sibling `../kiosk-test-studio`):**
+  1. ✅ **DONE — Configuration → Device Map:** added an **"AGV position name"** column (table) + input
+     (add/edit form) bound to `position_name` (`Configuration.tsx`; `client.ts` `DeviceConfig` gained
+     `position_name?`). The table cell shows `↳ <kiosk_id>` in muted text when blank (so the fallback is
+     visible), the real name when set. Help text under both the Kiosk-ID field ("the join key — do NOT
+     rename to match the AGV map") and the AGV-position field ("sent as the /base/goto target; blank →
+     Kiosk-ID"), plus a Device Map intro paragraph explaining the decoupling. `tsc -b` clean. Operator
+     enters `kiosk-2-Aug-14-G37` on the RPS row, `kiosk-1-Aug-14-G37-angled` on VPS, etc.; Kiosk-ID
+     stays unchanged. PUT `/api/config/device` already accepts the field.
+  2. ✅ **DONE — AGV home name:** added an **"AGV Home Position"** field to the **Robot Connection**
+     card (Configuration page — the editable robot-config form that already holds the AGV/arm URLs and
+     saves via `setRobotConn` → `PATCH /api/config/robot`; `RobotSetup.tsx` itself is read-only health/
+     calibration/diagnostics, so the config field belongs with the other robot-connection inputs). Bound
+     to `robotForm.agv_home_target`, loaded from `GET /api/config`, disabled unless backend=`real` (like
+     the URLs), placeholder `home-Aug-14-G37`, help "AGV map name for a 'go home' step — /base/goto
+     target; blank → home". `client.ts` `Config` gained `agv_home_target` + `setRobotConn` body/response.
+     `tsc -b` clean. Both new values pre-fill from `GET /api/config` (`devices[].position_name`,
+     `agv_home_target`).
+- **Files:** `api/models.py`, `api/database.py`, `api/main.py`, `vision_agent/config.py`,
+  `test_runner/nodes/run_vision_step.py`, `.env`. **User: RESTART the backend** so the migration runs
+  and the new fields load; then set each device's AGV position name + the home name in the studio. See
+  [[kiosk-id-join-key]], [[agv-hardware-test-2026-07-13]].
+
 ### AGV base health showed "Error" though the base reported `ready` (2026-08-18)
 
 Robot Setup page's **AGV Base** health component rendered red **"Error — AGV base is 'ready', not ready"**

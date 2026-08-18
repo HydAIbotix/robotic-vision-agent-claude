@@ -486,7 +486,9 @@ def upload_test_cases(
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 def _device_summary(d: models.DeviceConfig) -> dict:
-    return {"alias": d.alias, "kiosk_id": d.kiosk_id or "", "description": d.description or "",
+    return {"alias": d.alias, "kiosk_id": d.kiosk_id or "",
+            "position_name": (getattr(d, "position_name", "") or ""),
+            "description": d.description or "",
             "pos_x": d.pos_x, "pos_y": d.pos_y, "pos_theta": d.pos_theta}
 
 
@@ -503,6 +505,7 @@ def get_config(db: Session = Depends(get_db)):
         "agv_base":         settings.agv_api_base(),
         "arm_base":         settings.arm_api_base(),
         "robot_id":         settings.robot_id,
+        "agv_home_target":  settings.agv_home_target,
         "exploration_mode": _runtime_exploration_mode,
         "card_service_url": settings.card_service_url,
         "viewport":         {"width": settings.viewport_width, "height": settings.viewport_height},
@@ -556,8 +559,9 @@ class RobotConnRequest(BaseModel):
     robot_backend: str            # "demo" | "playwright" | "real"
     robot_ip:      Optional[str] = None
     robot_port:    Optional[int] = None
-    agv_url:       Optional[str] = None   # mobile base (AGV) controller URL
-    arm_url:       Optional[str] = None   # arm/camera/card controller URL
+    agv_url:         Optional[str] = None   # mobile base (AGV) controller URL
+    arm_url:         Optional[str] = None   # arm/camera/card controller URL
+    agv_home_target: Optional[str] = None   # AGV map position name for a "go home" step (e.g. "home-Aug-14-G37")
 
 
 @app.patch("/api/config/robot")
@@ -592,6 +596,12 @@ def set_robot_conn(req: RobotConnRequest):
             settings.arm_url = req.arm_url.strip().rstrip("/")
             env_updates["ARM_URL"] = settings.arm_url
 
+    # AGV "home" position name — settable regardless of backend (a name mapping, used by the real
+    # backend's move-to-home). Blank resets to the literal "home".
+    if req.agv_home_target is not None:
+        settings.agv_home_target = req.agv_home_target.strip() or "home"
+        env_updates["AGV_HOME_TARGET"] = settings.agv_home_target
+
     try:
         _persist_env(env_updates)
         persisted = True
@@ -609,6 +619,7 @@ def set_robot_conn(req: RobotConnRequest):
         "agv_base":         settings.agv_api_base(),
         "arm_base":         settings.arm_api_base(),
         "robot_url":        settings.arm_api_base(),
+        "agv_home_target":  settings.agv_home_target,
         "persisted":        persisted,
         "restart_required": backend_changed,
     }
@@ -684,12 +695,13 @@ def set_camera_config(req: CameraConfigRequest):
 
 
 class DeviceConfigRequest(BaseModel):
-    alias:       str
-    kiosk_id:    str = ""
-    description: str = ""
-    pos_x:       float = 0.0
-    pos_y:       float = 0.0
-    pos_theta:   float = 0.0
+    alias:         str
+    kiosk_id:      str = ""
+    position_name: str = ""   # AGV map position name for /base/goto target (blank → falls back to kiosk_id)
+    description:   str = ""
+    pos_x:         float = 0.0
+    pos_y:         float = 0.0
+    pos_theta:     float = 0.0
 
 
 @app.get("/api/config/devices")

@@ -34,7 +34,10 @@ def _run_lightweight_migrations():
     from sqlalchemy import inspect, text
     insp = inspect(engine)
     wanted = {
-        "device_configs": {"kiosk_id": "VARCHAR(50)"},  # abbreviation → Kiosk-ID link (multi-device)
+        "device_configs": {
+            "kiosk_id":      "VARCHAR(50)",   # abbreviation → Kiosk-ID link (multi-device)
+            "position_name": "VARCHAR(80)",   # AGV map position name for /base/goto target (decoupled from kiosk_id)
+        },
     }
     for table, cols in wanted.items():
         if not insp.has_table(table):

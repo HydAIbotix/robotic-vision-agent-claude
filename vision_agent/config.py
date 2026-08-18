@@ -133,6 +133,11 @@ class Settings(BaseSettings):
     arm_url: str = ""   # arm + camera + card controller — serves /capture, /arm/*, /screen/*, /card/*
     robot_id: str = "R-01"
     default_kiosk_id: str = "K-01"
+    # AGV map position name sent as the /base/goto `target` for a "go home" / "return to base" step.
+    # The robotics team's AGV map names its dock positions arbitrarily (e.g. "home-Aug-14-G37"); this
+    # is decoupled from any kiosk_id join key. Blank/unset → the literal "home" (historical behaviour).
+    # Editable from Robot Setup (PATCH /api/config/robot) and persisted to .env as AGV_HOME_TARGET.
+    agv_home_target: str = "home"
 
     def _api_base(self, url: str) -> str:
         base = (url or f"http://{self.robot_ip}:{self.robot_port}").strip().rstrip("/")
@@ -244,6 +249,12 @@ class Settings(BaseSettings):
     # ─────────────────────────────────────────────────────────────────────────────
 
     # Timeouts (seconds)
+    # DEPRECATED / UNUSED for the AGV base (2026-08-18). The base move no longer has a client-side
+    # deadline: AGV travel time is unknown and varies with distance/traffic, and a 60s deadline once
+    # aborted a base that was still closing in (0.89m out) on a "go home" move — see CLAUDE.md
+    # "AGV move: no self-abort / no client-side timeout". _poll_base now waits for the controller to
+    # report a READY state, failing only on an "error" state or an unreachable controller. Field kept
+    # so BASE_MOVE_TIMEOUT_S in an existing .env still parses; nothing reads it now.
     base_move_timeout_s: float = 60.0
     # Overall deadline for ONE arm click sequence (hover PTP → linear descend → touch → ascend →
     # return).  The myCobot 280 is slow: a single Cartesian move can take 4-17s and a full click
@@ -271,9 +282,11 @@ class Settings(BaseSettings):
     arm_settle_grace_s: float = 2.0
     arm_status_tick_s: float = 3.0
     # How often to poll /base/state while the AGV is driving to a kiosk. The base move is slow
-    # (seconds→tens of seconds), so a 2s cadence gives readable live status without hammering the
-    # controller. Separate from the fast arm poll (robot_poll_interval_s) which times sub-second taps.
-    base_poll_interval_s: float = 2.0
+    # (tens of seconds→minutes) and has NO client-side deadline, so a relaxed 10s cadence gives
+    # readable live status without hammering the controller during a long drive. Separate from the
+    # fast arm poll (robot_poll_interval_s) which times sub-second taps. Configurable via
+    # BASE_POLL_INTERVAL_S.
+    base_poll_interval_s: float = 10.0
     # Max time to wait for a SINGLE robot REST call to respond (HTTP request timeout). The physical
     # arm/AGV can be slow to answer; if a command gets no response within this window we abort and
     # fail the step gracefully (see run_vision_step's try/except → Tier-3/fail path). Kept small and

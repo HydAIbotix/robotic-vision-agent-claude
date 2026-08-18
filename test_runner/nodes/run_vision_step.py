@@ -67,6 +67,10 @@ def _load_device_map() -> dict[str, dict]:
                 cfg = {
                     "pos_x": d.pos_x, "pos_y": d.pos_y, "pos_theta": d.pos_theta,
                     "kiosk_id": d.kiosk_id or "",
+                    # AGV map position name for /base/goto target (decoupled from the kiosk_id join
+                    # key). getattr for safety on rows written before the column existed. Blank →
+                    # _agv_target falls back to kiosk_id.
+                    "position_name": (getattr(d, "position_name", "") or ""),
                     "url": (kc.url if kc else "") or "",
                 }
                 out[d.alias] = cfg
@@ -81,12 +85,25 @@ def _load_device_map() -> dict[str, dict]:
             for kid, kc in kiosks.items():
                 if kid not in out and (getattr(kc, "url", "") or ""):
                     out[kid] = {"pos_x": 0.0, "pos_y": 0.0, "pos_theta": 0.0,
-                                "kiosk_id": kid, "url": kc.url or ""}
+                                "kiosk_id": kid, "position_name": "", "url": kc.url or ""}
             return out
         finally:
             db.close()
     except Exception:
         return {}
+
+
+def _agv_target(dev_cfg: dict, fallback: str = "") -> str:
+    """The named position to send as the /base/goto `target` for a device.
+
+    Prefers the device's AGV-map `position_name` (the robotics team's map name, e.g.
+    'kiosk-2-Aug-14-G37') when set; otherwise falls back to the `kiosk_id` (the historical
+    behaviour — kiosk_id doubled as the AGV target), and finally to the caller's `fallback`
+    (usually the raw alias/kiosk_id). Keeps the AGV position name decoupled from the kiosk_id
+    join key so renaming AGV positions never disturbs exploration/plan/template joins."""
+    return (str(dev_cfg.get("position_name") or "").strip()
+            or str(dev_cfg.get("kiosk_id") or "").strip()
+            or str(fallback or "").strip())
 
 
 import re as _re
@@ -147,8 +164,10 @@ def _position_for_test(tc: dict) -> None:
             return
         try:
             if hasattr(robot, "navigate_to_kiosk"):
-                print(f"  [RUN] Per-test: driving AGV to kiosk '{kid}' before the test (explicit move intent)")
-                robot.navigate_to_kiosk(kid)
+                _agv = _agv_target(_load_device_map().get(kid) or {}, kid)
+                print(f"  [RUN] Per-test: driving AGV to kiosk '{kid}' (AGV target '{_agv}') before the "
+                      f"test (explicit move intent)")
+                robot.navigate_to_kiosk(_agv)
         except Exception as exc:
             print(f"  [RUN] Per-test AGV move to '{kid}' failed (continuing): {exc}")
 
@@ -530,6 +549,49 @@ def _run_inline_vision(desc: str, captured: dict, credentials: dict, scenario: s
     return seg_steps, made_progress
 
 
+def _make_robot_status_sink(run_id: str, test_id: str):
+    """Build the real-time robot STATUS sink callback for a run.
+
+    The real backend pushes live status ticks — AGV state + distance-remaining WHILE the base drives,
+    arm state + elapsed WHILE the arm moves/types — to this callback DURING a blocking robot call, so
+    the live monitor shows progress instead of a silent wait. Live-only (not in the robot event
+    ring-buffer) so the post-step pull-flush never double-emits them. No-op when run_id is empty
+    (CLI runs). Registered BEFORE the FIRST base move of a test — including the per-test positioning
+    move (_position_for_test) — so the WHOLE drive streams every ~10s, not just the in-step moves."""
+    def _sink(ev: dict) -> None:
+        if not run_id:
+            return
+        st   = ev.get("state", "?")
+        ep   = ev.get("endpoint", "")
+        cmd  = ev.get("cmd_id", "")
+        ts   = ev.get("response_time", "")
+        ctrl = ev.get("controller", "")
+        # Arm ticks carry an 'operation' label + elapsed; base ticks carry distance/nav feedback.
+        if ep.startswith("/arm") or "operation" in ev:
+            op = ev.get("operation") or ep
+            el = ev.get("elapsed_s")
+            msg = (f"[ROBOT ARM] {ts} {op}{(' (' + cmd + ')') if cmd else ''} @ {ctrl} — "
+                   f"state='{st}'" + (f" ({el:.0f}s)" if isinstance(el, (int, float)) else ""))
+        else:
+            dist = ev.get("distance_remaining")
+            msg = (f"[ROBOT AGV] {ts} {ep}{(' (' + cmd + ')') if cmd else ''} @ {ctrl} — "
+                   f"state='{st}'" + (f", {dist:.2f}m remaining" if isinstance(dist, (int, float)) else ""))
+        broadcaster.emit(run_id, {"event": "log", "run_id": run_id, "test_id": test_id,
+                                  "message": msg, "robot_api": ev})
+    return _sink
+
+
+def _register_status_sink(run_id: str, test_id: str) -> None:
+    """Register the live status sink on the active robot backend (real backend only implements
+    set_event_sink; playwright/demo have a no-op). Safe to call repeatedly — idempotent re-registration
+    of the same behaviour. Guarded so it can never break a run."""
+    if run_id and hasattr(robot, "set_event_sink"):
+        try:
+            robot.set_event_sink(_make_robot_status_sink(run_id, test_id))
+        except Exception:
+            pass
+
+
 def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", test_id: str = "", app_map: dict = None, start_kiosk: str = "") -> tuple[list[dict], str, dict]:
     """
     Execute every step in the structured plan using stored pixel coordinates.
@@ -649,35 +711,13 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                                           "message": msg, "robot_api": ev})
         _evt_seen[0] += len(evs)
 
-    # Real-time AGV status sink: the real backend pushes live status ticks (state + distance
-    # remaining) here WHILE the base is driving (a blocking call that can take tens of seconds), so
-    # the monitor shows the AGV approaching instead of a silent wait. These are live-only (not in the
-    # robot event ring-buffer), so the post-step _flush_robot_events() pull never double-emits them.
-    def _robot_status_sink(ev: dict) -> None:
-        if not run_id:
-            return
-        st   = ev.get("state", "?")
-        ep   = ev.get("endpoint", "")
-        cmd  = ev.get("cmd_id", "")
-        ts   = ev.get("response_time", "")
-        ctrl = ev.get("controller", "")
-        # Arm ticks carry an 'operation' label + elapsed; base ticks carry distance/nav feedback.
-        if ep.startswith("/arm") or "operation" in ev:
-            op   = ev.get("operation") or ep
-            el   = ev.get("elapsed_s")
-            msg  = (f"[ROBOT ARM] {ts} {op}{(' (' + cmd + ')') if cmd else ''} @ {ctrl} — "
-                    f"state='{st}'" + (f" ({el:.0f}s)" if isinstance(el, (int, float)) else ""))
-        else:
-            dist = ev.get("distance_remaining")
-            msg  = (f"[ROBOT AGV] {ts} {ep}{(' (' + cmd + ')') if cmd else ''} @ {ctrl} — "
-                    f"state='{st}'" + (f", {dist:.2f}m remaining" if isinstance(dist, (int, float)) else ""))
-        broadcaster.emit(run_id, {"event": "log", "run_id": run_id, "test_id": test_id,
-                                  "message": msg, "robot_api": ev})
-    if hasattr(robot, "set_event_sink"):
-        try:
-            robot.set_event_sink(_robot_status_sink)
-        except Exception:
-            pass
+    # Real-time AGV/arm status sink: the real backend pushes live status ticks (state + distance
+    # remaining / elapsed) here WHILE the base is driving or the arm is moving (a blocking call that
+    # can take minutes), so the monitor shows progress instead of a silent wait. These are live-only
+    # (not in the robot event ring-buffer), so the post-step _flush_robot_events() pull never
+    # double-emits them. The sink is USUALLY already registered by run_vision_step BEFORE the per-test
+    # positioning move so that drive streams too; re-registering here (same behaviour) is idempotent.
+    _register_status_sink(run_id, test_id)
 
     # Human-readable command ids restart at cmd-1 for each test (real backend only).
     if hasattr(robot, "reset_command_seq"):
@@ -711,11 +751,12 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                     try:
                         print(f"    [ROBOT] Moving to kiosk '{target_kid}' @ "
                               f"({dev_cfg.get('pos_x',0)}, {dev_cfg.get('pos_y',0)}, {dev_cfg.get('pos_theta',0)}°)")
-                        # Pass the destination kiosk_id as the named `target` (the AGV map's named
-                        # position); x/y/theta ride along only as a raw-pose fallback. Real robot
-                        # drives /base/goto by target; playwright/demo ignore it (simulated).
+                        # Pass the destination's AGV-map position name as `target` (position_name if
+                        # set, else the kiosk_id — historical); x/y/theta ride along only as a raw-pose
+                        # fallback. Real robot drives /base/goto by target; playwright/demo ignore it.
+                        _agv = _agv_target(dev_cfg, target_kid)
                         robot.move_to_position(dev_cfg.get("pos_x", 0), dev_cfg.get("pos_y", 0),
-                                               dev_cfg.get("pos_theta", 0), target=target_kid)
+                                               dev_cfg.get("pos_theta", 0), target=_agv)
                         time.sleep(0.8)  # allow robot/camera to settle
                         # Playwright: point the browser at this kiosk's app URL. (No-op on real.)
                         _switch_browser_to(dev_cfg, target_kid, target_kid)
@@ -1112,19 +1153,24 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
         if action in ("move", "navigate", "move_base"):
             target_alias = (step.get("target") or step.get("device") or "").strip()
             is_home = target_alias.lower() in ("home", "base", "dock")
-            # Resolve alias OR bare kiosk_id → kiosk_id for the API target (home passes verbatim).
+            # Resolve the AGV-map position name for /base/goto's `target`:
+            #   • home  → settings.agv_home_target (e.g. "home-Aug-14-G37"; default "home")
+            #   • device→ its position_name (e.g. "kiosk-2-Aug-14-G37"), else kiosk_id, else the alias
+            # position_name is decoupled from the kiosk_id join key, so renaming AGV positions in the
+            # Device Map never disturbs exploration/plan/template joins.
             dev_cfg = device_map.get(target_alias) or {}
-            target = "home" if is_home else (dev_cfg.get("kiosk_id") or target_alias)
+            target = (settings.agv_home_target or "home") if is_home else _agv_target(dev_cfg, target_alias)
             print(f"    {i:>2}. move  AGV → {target_alias or target!r} (robot target='{target}')")
             try:
                 res = robot.navigate_to_kiosk(target) if hasattr(robot, "navigate_to_kiosk") else {"simulated": True}
                 # Playwright: the AGV move means the robot now faces THIS device's screen — switch
                 # the browser to its app URL so its screens load (a physical robot just faces the
                 # device it drove to → no-op there). "home" is not a device, so nothing to switch.
-                # Mark current_kiosk so the following cross-kiosk routing block doesn't switch again.
+                # Mark current_kiosk (the KIOSK_ID, not the AGV position name) so the following
+                # cross-kiosk routing block compares correctly and doesn't switch again.
                 if not is_home and target_alias:
                     _switch_browser_to(dev_cfg, target_alias, target)
-                    current_kiosk = target or _kid_of_dev(target_alias)
+                    current_kiosk = (dev_cfg.get("kiosk_id") or _kid_of_dev(target_alias) or target_alias)
             except Exception as exc:
                 _flush_robot_events()
                 return step_results, _robot_fail(i, f"move: AGV → {target_alias or target}", exc), captured
@@ -1539,6 +1585,13 @@ def run_vision_step(state: TestRunnerState) -> dict:
         backend = settings.robot_backend
         print(f"  [RUN] TIER-1/2 EXECUTION [{backend}] — running {len(structured_plan.get('steps') or [])} "
               f"stored-coordinate steps from the app map (0 LLM calls)")
+
+        # Register the live AGV/arm status sink BEFORE positioning so the per-test AGV move streams in
+        # real time (10s ticks) instead of a silent live monitor until the first in-step move. Without
+        # this, the positioning drive (which can take MINUTES) showed nothing on the live stream until
+        # _execute_structured_plan later registered the sink — observed on TC-AGV-002 (2026-08-18).
+        # _execute_structured_plan re-registers the same sink (idempotent).
+        _register_status_sink(run_id, tc["test_id"])
 
         # Point the browser at THIS test's kiosk, then reset to app entry and wait for the SPA /
         # camera to settle. Per-test URL is essential for a mixed suite (RPS test then VPS test);
