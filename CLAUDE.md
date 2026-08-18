@@ -2182,6 +2182,30 @@ green; `api.main`/`real_robot`/`screen_calibrate` import clean; frontend `tsc -b
   frame". If a login test ever can't self-calibrate (odd lighting), it falls back to identity; you can
   still `python calibrate_tap.py` to set a static AY/BY, but you normally won't need to.
 
+### AGV base health showed "Error" though the base reported `ready` (2026-08-18)
+
+Robot Setup page's **AGV Base** health component rendered red **"Error — AGV base is 'ready', not ready"**
+even though `GET /base/state` correctly returned `state: "ready"`. Same class of bug already fixed for the
+ARM health check (`_ARM_HEALTHY_STATES`, 2026-07-28), but the BASE probe was missed.
+
+- **Root cause** (`vision_agent/robot/real_robot.health_check`): the base branch hard-coded
+  `ok = bst == "idle"`, but the physical AGV mobile base signals arrived/available with **`ready`** (its
+  own convention — the arm uses `idle`), which the poll loop (`_poll_base` / `_BASE_READY_STATES`) and
+  `check_state` already treat as settled. So a genuinely-healthy `ready` base was flagged `error`. (The
+  earlier arm fix taught the arm probe `ready`≡healthy but left the base probe on the stale `== "idle"`.)
+- ✅ **Fix:** the base health check now uses `str(bst).lower() in _BASE_READY_STATES`
+  (`{ready, idle, arrived, done, reached}`) — the SAME ready-state set every other base path uses — so a
+  `ready`/`idle`/`arrived`/`done`/`reached` base is `ok`; `moving`/`error`/unknown still `error`
+  (case-insensitive). Detail message now reads "AGV base ready at kiosk '…' (state: ready)".
+- **Frontend needed NO change** — the Robot Setup page faithfully renders `comp.status`; flipping the
+  backend status to `ok` turns the card green. **No regression:** the ONLY change is which base states count
+  as healthy (a superset of `{idle}` matching the rest of the base lifecycle); playwright/demo use their own
+  stubs; `_BASE_READY_STATES` is unchanged so the poll loop is untouched. Verified: predicate returns True
+  for ready/idle/arrived/done/reached (+ uppercase), False for moving/error; `real_robot.py` syntax-clean.
+- **User:** RESTART the backend (Studio uvicorn has no `--reload`) so this loads, then the AGV Base card
+  shows green "ready". If the base is genuinely mid-move it still correctly shows the moving/error state.
+  See [[agv-hardware-test-2026-07-13]].
+
 ### Exploration screenshots grouped per-run + browser-explore requires playwright backend (2026-08-12)
 
 Two operator items. No-regression (46 passed / 5 skipped on the affected suites; all edited modules

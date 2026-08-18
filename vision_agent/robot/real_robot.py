@@ -1211,10 +1211,13 @@ def health_check(do_capture: bool = True) -> dict:
             pose = _get("/base/pose")
         except Exception:
             pose = {}
-        ok = bst == "idle"
+        # The AGV mobile base signals "arrived/available" with state "ready" (its own convention,
+        # not the arm's "idle") — same states the poll loop (_BASE_READY_STATES) and check_state
+        # already treat as settled.  Accept ANY of them so a healthy "ready" base isn't flagged error.
+        ok = str(bst).lower() in _BASE_READY_STATES
         components["base"] = comp(
             "ok" if ok else "error",
-            f"AGV base idle at kiosk '{_current_kiosk_id or settings.default_kiosk_id}'"
+            f"AGV base ready at kiosk '{_current_kiosk_id or settings.default_kiosk_id}' (state: {bst})"
             if ok else f"AGV base is '{bst}', not ready",
             base_state=bst, base_pose=pose,
         )
