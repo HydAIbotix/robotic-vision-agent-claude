@@ -374,6 +374,86 @@ def _dom_correct_elements(elements: list) -> list:
     return corrected
 
 
+# Interactive DOM tags a backfilled element may come from → its app_map element "type".
+_BACKFILL_TAG_TYPE = {"input": "input", "select": "input", "a": "link", "button": "button"}
+
+
+def _testid_to_element_id(testid: str) -> str:
+    """Derive a readable app_map element id from a stable data-testid.
+
+    e.g. 'station-topup-tap' → 'topup_tap', 'signin-email' → 'signin_email'. A common leading
+    'station-'/'kiosk-' UI-scope prefix is dropped so the id reads as the control, not the page.
+    """
+    t = (testid or "").strip().lower()
+    for pfx in ("station-", "kiosk-", "pos-", "data-"):
+        if t.startswith(pfx):
+            t = t[len(pfx):]
+            break
+    return re.sub(r"[^a-z0-9]+", "_", t).strip("_") or "control"
+
+
+def _backfill_unmatched_dom(elements: list) -> list:
+    """Add interactive DOM controls (buttons/inputs/links carrying a data-testid) that Claude's
+    vision pass never proposed — so re-exploration doesn't silently DROP a real, tappable control.
+
+    Root cause this fixes: when two controls share the SAME visible label (e.g. the VPS card
+    station renders TWO 'Tap Real Card' buttons — one to issue a new card, one to top up an
+    existing card), vision emits a single element for the pair and the second button is lost from
+    the app_map. Any test needing the missing button (TC-VPS-011 "add money to an existing card")
+    then can't be planned against it and taps the wrong control.
+
+    Conservative by design — it only adds a DOM node when ALL of these hold, so it never
+    duplicates or displaces a vision-mapped element:
+      • the node carries a stable data-testid (an intentional, layout-independent hook),
+      • its tag is interactive (button / input / select / a),
+      • no existing element already claims that testid, AND
+      • no existing element already sits on that spot (within 24px) under a different id.
+    Runs only where the backend exposes the DOM (playwright); real-arm stubs return [] → skipped.
+    """
+    try:
+        dom_els = robot.get_dom_element_centers()
+    except AttributeError:
+        return elements
+    if not dom_els:
+        return elements
+
+    have_testids = {(e.get("testid") or "").strip() for e in elements if e.get("testid")}
+    centers = [tuple(e["center"]) for e in elements if e.get("center")]
+    added: list = []
+    for dom_el in dom_els:
+        tid = (dom_el.get("testid") or "").strip()
+        tag = dom_el.get("tag", "")
+        if not tid or tid in have_testids or tag not in _BACKFILL_TAG_TYPE:
+            continue
+        cx, cy = dom_el["cx"], dom_el["cy"]
+        if any(abs(px - cx) < 24 and abs(py - cy) < 24 for px, py in centers):
+            continue   # a vision element already covers this spot (mapped under a different id)
+        el_type = _BACKFILL_TAG_TYPE[tag]
+        eid = _testid_to_element_id(tid)
+        # guarantee a unique id within the screen
+        base = eid
+        n = 2
+        existing_ids = {e.get("id") for e in elements} | {a["id"] for a in added}
+        while eid in existing_ids:
+            eid = f"{base}_{n}"; n += 1
+        label = (dom_el.get("text") or dom_el.get("aria") or "").strip()[:60]
+        bw, bh = (220 if el_type == "input" else 120), 44
+        added.append({
+            "id": eid, "type": el_type, "label": label,
+            "center": [cx, cy],
+            "bbox": [cx - bw // 2, cy - bh // 2, cx + bw // 2, cy + bh // 2],
+            "confidence": 0.6, "testid": tid,
+            "description": f"Backfilled from DOM testid={tid!r} — vision did not emit a distinct "
+                           f"element (commonly a duplicate-label control).",
+        })
+        have_testids.add(tid)
+        centers.append((cx, cy))
+    if added:
+        print(f"  [DOM-BACKFILL] +{len(added)} unmapped testid control(s): "
+              + ", ".join(f"{a['id']}@({a['center'][0]},{a['center'][1]})" for a in added))
+    return elements + added
+
+
 def _dedup_elements(elements: list, radius: int = 30) -> list:
     result: list = []
     for el in elements:
@@ -523,6 +603,7 @@ def explore_screen(state: ExplorerState) -> dict:
         # even if the main exploration first visited the cart when it was empty.
         elements = screen.get("elements") or []
         elements = _dom_correct_elements(elements)   # fix coordinates using live DOM positions
+        elements = _backfill_unmatched_dom(elements) # add testid'd controls vision missed (dup labels)
         elements = _collect_scrolled_elements(elements, state["current_image_path"], screen_id)
 
         image_bytes = get_storage().load(state["current_image_path"])

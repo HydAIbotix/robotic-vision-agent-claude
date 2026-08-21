@@ -347,14 +347,38 @@ def reset_to_entry() -> None:
     unauthenticated (no session restore).  Without this, a logged-in kiosk
     SPA auto-redirects back to the products page on every reset, making
     login-page actions test the wrong screen.
+
+    EXCEPTION: keys matching `settings.reset_preserve_storage_keys` are preserved across the reset,
+    so smart-card DATA issued in an earlier test survives for a later top-up / balance / history test
+    (cards live in the kiosk's localStorage when the shared card service is offline). This is why a
+    card from TC-VPS-001 was previously "not issued" in TC-VPS-002 — the reset wiped it. UI/auth/nav
+    state (session, orders, config) is NOT matched by the default list, so it still resets per test.
     """
     global _progress_injected
+    from vision_agent.config import settings
     if _page is not None:
-        _page.evaluate("() => { localStorage.clear(); sessionStorage.clear(); }")
+        preserve = [k.strip().lower() for k in (settings.reset_preserve_storage_keys or "").split(",") if k.strip()]
+        _page.evaluate(
+            """(preserve) => {
+                const keep = {};
+                if (preserve && preserve.length) {
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const k = localStorage.key(i);
+                        if (k && preserve.some(p => k.toLowerCase().includes(p))) keep[k] = localStorage.getItem(k);
+                    }
+                }
+                localStorage.clear(); sessionStorage.clear();
+                for (const k in keep) localStorage.setItem(k, keep[k]);
+            }""",
+            preserve,
+        )
         _page.goto(_kiosk_url())
         _page.wait_for_load_state("networkidle")
         _progress_injected = False  # page reload wiped the HUD div — re-inject on next update
-        print(f"  [PLAYWRIGHT] Reset to {_kiosk_url()}")
+        if preserve:
+            print(f"  [PLAYWRIGHT] Reset to {_kiosk_url()}  (preserved storage keys ~ {preserve})")
+        else:
+            print(f"  [PLAYWRIGHT] Reset to {_kiosk_url()}")
 
 
 def navigate_to_url(url: str) -> dict:
@@ -525,6 +549,108 @@ def get_dom_element_centers() -> list[dict]:
         }""")
     except Exception:
         return []
+
+
+def focus_by_testid(testid: str) -> bool:
+    """Focus a form field by its stable data-testid (deterministic, coord-independent).
+
+    Typing relies on the right field being focused first. Focusing by pixel coordinate is fragile
+    when the app_map coords are stale/state-dependent (e.g. the VPS top-up panel shifts ~112px
+    depending on whether a reader box is open), so a type can land in the WRONG field. When the
+    app_map element carries a testid we focus by DOM identity instead — immune to coordinate drift.
+    Returns True only if a focusable field was found and focused; False → caller falls back to a tap.
+    """
+    if not testid:
+        return False
+    page = _ensure_page()
+    try:
+        loc = page.locator(f'[data-testid="{testid}"]')
+        if loc.count() == 0:
+            return False
+        el = loc.first
+        # Prefer the field itself; if the testid is on a wrapper, focus the input/textarea inside it.
+        target = el
+        try:
+            inner = el.locator("input, textarea, select")
+            if inner.count() > 0:
+                target = inner.first
+        except Exception:
+            pass
+        target.scroll_into_view_if_needed(timeout=1000)
+        target.click(timeout=1500)   # full event chain → React onFocus fires
+        print(f"  [PLAYWRIGHT] focus [data-testid={testid!r}]")
+        return True
+    except Exception as e:
+        print(f"  [PLAYWRIGHT] focus_by_testid({testid!r}) failed: {e}")
+        return False
+
+
+def tap_by_testid(testid: str) -> bool:
+    """Click a control by its stable data-testid (deterministic, coord-independent).
+
+    Coordinate taps snap to the nearest interactive element within 80px, so an app_map coord that
+    is stale by more than that (e.g. the VPS top-up buttons drifted ~112px) falls through to a RAW
+    click on empty space and the button is silently MISSED — the action never fires yet the step
+    reports success. When the app_map element carries a testid we click it by DOM identity instead.
+    Includes the same post-click settle as tap() so React re-renders finish before the next verify.
+    Returns True only if a single matching element was found and clicked; False → caller falls back.
+    """
+    if not testid:
+        return False
+    page = _ensure_page()
+    try:
+        loc = page.locator(f'[data-testid="{testid}"]')
+        n = loc.count()
+        if n == 0:
+            return False
+        if n > 1:
+            # Ambiguous — don't guess; let the coordinate path (with its spatial snap) decide.
+            print(f"  [PLAYWRIGHT] tap_by_testid({testid!r}) skipped — {n} matches (ambiguous)")
+            return False
+        loc.first.scroll_into_view_if_needed(timeout=1000)
+        loc.first.click(timeout=1500)
+        print(f"  [PLAYWRIGHT] tap [data-testid={testid!r}]")
+    except Exception as e:
+        print(f"  [PLAYWRIGHT] tap_by_testid({testid!r}) failed: {e}")
+        return False
+    # Same settle window as tap() — SPA route changes / toasts / injected kiosk delays.
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=1500)
+    except Exception:
+        pass
+    page.wait_for_timeout(1400)
+    return True
+
+
+def get_page_error_text() -> str:
+    """Return the text of any VISIBLE error/alert banner on the page, else "".
+
+    A `verify` that only asserts the screen id passes on identity alone — but the app can sit on the
+    right screen while showing a FAILURE banner ("No card found", "…is not issued", "declined"). This
+    reads error surfaces generically — elements whose data-testid contains "error", `[role="alert"]`,
+    `aria-invalid`, or an `error`/`danger` class — and returns their combined non-empty text so the
+    validation pipeline can FAIL the step. Deterministic DOM read, zero LLM. Errors that the app
+    clears on success render empty → "" → no false failure.
+    """
+    page = _ensure_page()
+    try:
+        return page.evaluate("""() => {
+            const sel = '[data-testid*="error" i],[data-testid*="alert" i],[role="alert"],' +
+                        '[aria-invalid="true"],.error,.error-message,[class*="error" i],[class*="danger" i]';
+            const seen = new Set(); const out = [];
+            for (const el of document.querySelectorAll(sel)) {
+                const r = el.getBoundingClientRect();
+                if (r.width === 0 || r.height === 0) continue;           // not visible
+                const st = window.getComputedStyle(el);
+                if (st.display === 'none' || st.visibility === 'hidden' || +st.opacity === 0) continue;
+                const t = (el.textContent || '').trim();
+                if (!t || t.length > 200 || seen.has(t)) continue;       // empty / boilerplate / dup
+                seen.add(t); out.push(t);
+            }
+            return out.join(' | ');
+        }""") or ""
+    except Exception:
+        return ""
 
 
 def navigate_to_screen(screen_id: str) -> bool:

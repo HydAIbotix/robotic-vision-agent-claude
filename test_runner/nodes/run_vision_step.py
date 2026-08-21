@@ -172,6 +172,21 @@ def _position_for_test(tc: dict) -> None:
             print(f"  [RUN] Per-test AGV move to '{kid}' failed (continuing): {exc}")
 
 
+def _element_testid(app_map: dict, screen_id: str, element_id: str) -> str:
+    """Return the DOM data-testid stored for an app_map element, or "" if none.
+
+    Used to focus a form field by stable identity (immune to stale/state-dependent pixel coords)
+    before typing. The explorer records `testid` on each element via DOM-correction / backfill.
+    """
+    if not (app_map and screen_id and element_id):
+        return ""
+    sc = (app_map.get("screens") or {}).get(screen_id) or {}
+    for el in sc.get("elements") or []:
+        if el.get("id") == element_id:
+            return el.get("testid") or ""
+    return ""
+
+
 def _looks_like_value(val: str) -> bool:
     """True when a captured string is already a clean, reusable token (a card number, code,
     id, amount) rather than empty or a label-noisy blob. Multi-line / long / label-containing
@@ -969,13 +984,29 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                     broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
                 return step_results, "failed", captured
 
-            print(f"    {i:>2}. tap   {eid!r} @ ({px},{py})  [{sid}]")
-            try:
-                tap_result = robot.tap(px, py)
-            except Exception as exc:
-                # Robot fault (API timeout/unreachable, click did-not-land, motion-plan failure) →
-                # STOP on the real backend (no Tier-3); playwright/demo still fall through to Tier-3.
-                return step_results, _robot_fail(i, f"tap: {eid} @ ({px},{py})", exc), captured
+            # Prefer clicking by STABLE DOM identity (testid) when the app_map has one. A coord tap
+            # snaps only within 80px, so a stale/state-shifted coord (the VPS top-up buttons drifted
+            # ~112px) falls through to a RAW click on empty space — the button is silently MISSED yet
+            # the step reports success. Clicking by testid (playwright) is immune; on the real arm /
+            # demo tap_by_testid returns False and we fall back to the coordinate tap unchanged.
+            testid = _element_testid(app_map, sid, eid)
+            tapped = False
+            if testid:
+                try:
+                    tapped = bool(robot.tap_by_testid(testid))
+                except AttributeError:
+                    tapped = False
+            if tapped:
+                print(f"    {i:>2}. tap   {eid!r} via testid={testid!r}  [{sid}]")
+                tap_result = {}
+            else:
+                print(f"    {i:>2}. tap   {eid!r} @ ({px},{py})  [{sid}]")
+                try:
+                    tap_result = robot.tap(px, py)
+                except Exception as exc:
+                    # Robot fault (API timeout/unreachable, click did-not-land, motion-plan failure) →
+                    # STOP on the real backend (no Tier-3); playwright/demo still fall through to Tier-3.
+                    return step_results, _robot_fail(i, f"tap: {eid} @ ({px},{py})", exc), captured
             time.sleep(0.5)
             # Fresh post-tap image for the next verify step.
             #   playwright → cheap browser screenshot; also saved as step evidence (UI).
@@ -1045,8 +1076,23 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             # login flows (previously it only worked when a prior tap happened to focus the field).
             try:
                 if px and py:
-                    print(f"    {i:>2}. focus {eid!r} @ ({px},{py})  (focus before type)")
-                    robot.tap(px, py)
+                    # Prefer focusing by STABLE DOM identity (testid) over pixel coords. App_map
+                    # coords can be stale / state-dependent (e.g. the VPS top-up panel shifts ~112px
+                    # when a reader box opens), landing the focus — and thus the typed value — in the
+                    # WRONG field. When the app_map element has a testid we focus by it (playwright);
+                    # otherwise (or on the real arm) we fall back to the coordinate tap unchanged.
+                    testid  = _element_testid(app_map, sid, eid)
+                    focused = False
+                    if testid:
+                        try:
+                            focused = bool(robot.focus_by_testid(testid))
+                        except AttributeError:
+                            focused = False
+                    if focused:
+                        print(f"    {i:>2}. focus {eid!r} via testid={testid!r}  (focus before type)")
+                    else:
+                        print(f"    {i:>2}. focus {eid!r} @ ({px},{py})  (focus before type)")
+                        robot.tap(px, py)
                     time.sleep(0.3)
                 else:
                     print(f"    {i:>2}. type  (no coords on step — relying on prior tap's focus)")

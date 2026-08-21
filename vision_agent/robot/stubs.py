@@ -102,6 +102,21 @@ def get_dom_element_centers() -> list[dict]:
     return []
 
 
+def focus_by_testid(testid: str) -> bool:
+    """No DOM on the real arm / demo — caller falls back to a coordinate tap to focus the field."""
+    return False
+
+
+def tap_by_testid(testid: str) -> bool:
+    """No DOM on the real arm / demo — caller falls back to a coordinate tap."""
+    return False
+
+
+def get_page_error_text() -> str:
+    """No DOM on the real arm / demo — error-banner detection is a playwright-only validation aid."""
+    return ""
+
+
 def navigate_to_screen(screen_id: str) -> bool:
     """Not applicable to real robot arm — sidebar nav must be tapped physically."""
     return False

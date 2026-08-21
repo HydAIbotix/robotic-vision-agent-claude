@@ -133,7 +133,8 @@ local PNGs), `generate_test_cases.py` (writes 50 sample TCs to Excel), `inspect_
 
 ## API surface (`api/main.py`, all under `/api`)
 
-Health `GET /health` · Runs `GET/POST /runs`, `GET /runs/{id}`, `WS /runs/{id}/ws`,
+Health `GET /health` · Runs `GET/POST /runs` (`POST` executes `filter_tc` ids in the **given order**),
+`GET /runs/{id}`, `WS /runs/{id}/ws`,
 `GET /runs/{id}/defects`, `GET /runs/{id}/screenshots[/{file}]`, `PATCH /runs/{id}/verdict`
 (human FAIL/PASS override) · Test cases `GET /test-cases`, `POST /test-cases/upload` (Excel) ·
 Config `GET/PUT /config`, `PATCH /config/robot`, `PATCH /config/camera`, `PATCH /config/card-service`,
@@ -199,6 +200,15 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
 - **Element coordinates ALWAYS come from the `app_map` (learned in the Playwright exploration
   viewport), scaled to the camera — in EVERY tier. Camera image quality NEVER affects tapping
   accuracy; it only affects screen/text VALIDATION (`verify` steps).**
+- ✅ **Tap/type focus by STABLE testid first (playwright), coords are the fallback**
+  (`run_vision_step._element_testid` → `robot.focus_by_testid` / `robot.tap_by_testid`). App_map
+  coords can be **stale or state-dependent** — the VPS top-up panel's fields/buttons shift ~112px
+  when a reader box opens, so a re-exploration can chart them in the wrong state. A coord tap snaps
+  only within 80px → a larger drift falls through to a RAW click on empty space (button silently
+  MISSED) or focuses the WRONG field (card number typed into the amount box) — yet the step still
+  reports success. When the app_map element has a `testid` we focus/click by DOM identity (immune to
+  drift); `tap_by_testid` skips on 0 or >1 matches so ambiguity falls back to the spatial snap. Real
+  arm / demo return False → coordinate path unchanged (no regression).
 - **Exploration viewport = the physical kiosk MONITOR's native resolution (1920×1080 for these
   kiosks), NOT the camera resolution.** The kiosks render an arm-reachable CENTERED fixed-px box
   (`clamp(620px,40vw,780px)`) whose fractional element positions are viewport-dependent, so the
@@ -286,6 +296,14 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   centres by text, then by a single-distinctive-or-≥2 shared identity-token match against testid/aria
   (with plus→increase / minus→decrease direction synonyms for steppers). This is why re-exploration
   fixes the add-to-cart / stepper coordinates.
+- ✅ **DOM backfill for vision-missed controls** (`explore_screen._backfill_unmatched_dom`, runs right
+  after DOM-correction, playwright only): when TWO controls share the SAME visible label (e.g. the VPS
+  card station renders **two** "Tap Real Card" buttons — `station-arm-real-card` issues a NEW card,
+  `station-topup-tap` tops up an EXISTING one), Claude's vision emits a single element and the second is
+  LOST from the app_map. Backfill re-reads the DOM and appends any interactive node with a stable
+  `data-testid` that no vision element claimed (dedup-guarded by testid + 24px proximity, id derived from
+  the testid e.g. `station-topup-tap`→`topup_tap`). Conservative — testid'd buttons/inputs/links only, so
+  it never displaces a mapped element. This is what makes a re-exploration capture the top-up reader.
 - `app_map.json`, `reference_screens/*.png`, `camera_captures/`, `coordinate_exports/`, and
   `screenshots/exploration_*` are gitignored generated per-environment data. Each exploration's raw
   shots go to `screenshots/exploration_<app_id>_<ts>/`; annotated shots stay in `screenshots/annotated/`.
@@ -297,11 +315,85 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
 - ⚠️ **The real-robot arm/camera/card paths are still not fully verified against physical hardware.**
   The AGV `/base/*` path has run live; arm sign-in (TC-RPS-001) reaches email/password taps + typing
   but is gated by robot-side MoveIt reach/planning limits (keep the base close; the app is shrunk to the
-  arm-reachable box). Card ops are unwired into execution.
+  arm-reachable box). Card ops are unwired into the `real` backend, but the VPS **card-station reader**
+  flows (TC-VPS-009/010/011) DO run under `playwright` against a real USB HID reader — see the card-station
+  progress note below.
 - 🔲 `run_backend_step.py` (API/DB validation channels) is still a stub; real JIRA integration pending.
 - ⚠️ Per-kiosk plan scoping + kiosk-URL lifecycle are unit-tested, but each new hardware run is the real
   end-to-end test. Requires the user re-steps: re-explore per kiosk, align Device Map alias→kiosk_id,
   regenerate plans, restart the backend.
+
+### Recent progress (2026-08-21) — VPS card-station reader tests + run ordering
+
+- **VPS card station has THREE independent reader sessions sharing one `reader`/`readerCard` state**
+  (`Kiosk_App/robotics-kiosk-pos/src/App.tsx`): `tap-load` = *Buy & Load* → **issue a NEW** card
+  (`station-arm-real-card`), `tap-check` = *Check Balance*, `tap-topup` = **add money to an EXISTING**
+  card (`station-topup-tap` → `station-topup` "Add Money to Card"). The USB HID reader types into an
+  autofocused wedge input; `handleReaderInput` commits on a delimited track payload / Enter / 220ms
+  debounce, routing to `issueCard` / `runCheck` / `runTopUpCardRead` by which session is armed.
+  `issueCard` **requires the Load Amount FIRST** (presenting a card with no amount is rejected with
+  *"Enter a non-zero load amount…"*); `topUpCard`/`runTopUpCardRead` require the card to be **already
+  issued**.
+- **TC-VPS-011 failure root cause (this run, `results/run-1-182645-2108`):** the cached plan (a) tapped
+  the WRONG reader — `tap_real_card_button` (issue-new) instead of the top-up reader — and (b) armed it
+  BEFORE typing the amount, so the presented card was rejected and the session stayed armed; the later
+  vision step then typed the number into the open wedge (not the card-number field), so "Add Money"
+  saw an empty number. Final screen stuck on *"Waiting for a card… Detected 0005322931."* (009 passed
+  precisely because it types the amount FIRST.) **The card was read fine — the plan drove the wrong
+  control in the wrong order.**
+- **Two more app_map defects surfaced & fixed:** the top-up reader button (`station-topup-tap`) was
+  MISSING from the map entirely (duplicate "Tap Real Card" label → vision emitted one element — now
+  fixed durably by `_backfill_unmatched_dom`), and the top-up coords were STALE (`existing_card_number_input`
+  1150,**750**→**496**; `add_money_to_card_button` 1050,**804**→1163,**550**). Ground-truth pulled live from
+  the running app's DOM at the 1920×1080 exploration viewport. The button-row Y (550) is stable — the
+  reader box opens *below* it — so the reader-based plan taps are position-safe.
+- **Fixes applied (no regression to 009/010):** `app_map.json` patched (add `topup_tap_real_card_button`
+  @1032,550 + fix two coords) — `version_hash` is `md5(explored_at | screen_ids)` so element edits DON'T
+  change it → cached plan keys stay valid. TC-VPS-011's cached plan rewritten to the correct **reader-based**
+  flow: `verify → type 4000 (load_amount) → tap TOP-UP 'Tap Real Card' → wait 5s (present card) → tap 'Add
+  Money to Card' → verify 'Smart Card Loaded'` (Tier-1 HIT, `is_valid` ✓). 009/010 were ALREADY cache-misses
+  before this work (a post-run re-exploration staled them) and will Tier-2 re-plan unchanged. A pre-patch
+  `app_map.json.bak` is kept as a safety copy. **RESTART the backend to load the api/main.py + explorer edits.**
+- **Test-run ordering (new feature).** Backend (`api/main.py` `start_run`): the `filter_tc` id list now
+  executes in the **caller's order** (not `test_id` order), walking `filter_ids` in sequence with dedup +
+  prefix-match preserved. Frontend (`../kiosk-test-studio` `src/pages/Execution.tsx`): the "Selected Test
+  Cases" panel is now a **reorderable RUN ORDER list** (HTML5 drag-and-drop on the ≡ handle **and** ↑/↓
+  buttons, no new deps); order persists to `localStorage.selected_tcs` (already an ordered array) and is
+  sent verbatim as `filter_tc`, so the suite runs exactly as arranged.
+
+### Recent progress (2026-08-21, run-2) — false-PASS fixes on VPS top-up / balance-check
+
+Symptom (`results/run-2-200422-2108`): TC-VPS-002 typed the card number into the **wrong field** and
+TC-VPS-003 hit a **"No card found"** app error, yet BOTH still PASSED. Three distinct defects, all fixed
+with no regression (full suite: 98 passed, same 8 pre-existing env-only failures):
+
+- **Root A — typing/tapping by stale coords hit the wrong target.** The (re-explored) app_map charted the
+  top-up panel ~112px too LOW (`station-topup-number` live 419 vs map 531, `add_money` live 554 vs map 666;
+  the panel is taller mid-exploration when a reader box is open). So the card number focused the amount
+  field, and the Add-Money coord tap drifted past the 80px snap → `[raw]` click on empty space (button
+  MISSED). **Fix:** tap/type now focus by **testid first** (see the tap-pipeline rule above) — coord-drift
+  immune. Verified live: fields focus correctly, buttons hit, happy path clean.
+- **Root B — `verify` passed on screen-identity alone, ignoring error banners.** A verify with only
+  `expected_screen` (no `expected_text`) returned success once the DOM screen id matched, so a "No card
+  found" / "…is not issued" / declined state on the RIGHT screen still passed. **Fix:** new **error-banner
+  guard** in `validate_pipeline.run_validate_pipeline` (playwright, no-expected_text case only, so it can't
+  override an explicit assertion): `robot.get_page_error_text()` reads visible error surfaces
+  (`[data-testid*=error]`, `[role=alert]`, `aria-invalid`, error/danger classes) and FAILs the step when
+  any non-empty banner shows. Errors the app clears on success render empty → no false fail (verified).
+- **Root C — the between-test reset was WIPING the card store.** A card issued in TC-VPS-001 was "not
+  issued" in TC-VPS-002 even though both run in ONE playwright session on the SAME page (NOT a new browser
+  per test). Cause: `reset_to_entry()` (called between every test) ran `localStorage.clear()`, and the
+  kiosk stores smart cards in `localStorage` key `robotics-pos-smart-cards` (it's the store whenever the
+  shared card service is offline — `localhost:4000` was down, `VITE_CARD_SERVICE_ENABLED=false`). So the
+  reset destroyed the card before the next test. (A manual cross-browser check "worked" only because it
+  never cleared storage.) **Fix:** `reset_to_entry` now PRESERVES localStorage keys matching
+  `settings.reset_preserve_storage_keys` (default `"smart-cards,cardbalance"`) across the clear, so issued
+  cards survive for later top-up / balance / history tests; auth/session/orders/config keys don't match the
+  list → still reset per test (no regression). Verified live: old full-clear loses the card ("No card
+  found"), the preserve-reset keeps it. Alternative: bring up the shared card service and set
+  `card_service_url` (appends `?cardServiceUrl=…`) so cards persist server-side regardless of the clear.
+- New robot capabilities `focus_by_testid` / `tap_by_testid` / `get_page_error_text` live in
+  `playwright_stubs.py` (real) and `stubs.py` (shared fallback → False/"" so real-arm/demo are unchanged).
 
 ### Never
 

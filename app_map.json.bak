@@ -1,0 +1,3617 @@
+{
+  "app_name": "Multi-App Environment",
+  "explored_at": "2026-08-12T13:56:57",
+  "entry_screen": "login",
+  "keyboard_map": {
+    "keys": {
+      "1": [
+        0.344,
+        0.682
+      ],
+      "2": [
+        0.379,
+        0.682
+      ],
+      "3": [
+        0.413,
+        0.682
+      ],
+      "4": [
+        0.448,
+        0.682
+      ],
+      "5": [
+        0.482,
+        0.682
+      ],
+      "6": [
+        0.517,
+        0.682
+      ],
+      "7": [
+        0.551,
+        0.682
+      ],
+      "8": [
+        0.586,
+        0.682
+      ],
+      "9": [
+        0.62,
+        0.682
+      ],
+      "0": [
+        0.655,
+        0.682
+      ],
+      "q": [
+        0.344,
+        0.728
+      ],
+      "w": [
+        0.379,
+        0.728
+      ],
+      "e": [
+        0.413,
+        0.728
+      ],
+      "r": [
+        0.448,
+        0.728
+      ],
+      "t": [
+        0.482,
+        0.728
+      ],
+      "y": [
+        0.517,
+        0.728
+      ],
+      "u": [
+        0.551,
+        0.728
+      ],
+      "i": [
+        0.586,
+        0.728
+      ],
+      "o": [
+        0.62,
+        0.728
+      ],
+      "p": [
+        0.655,
+        0.728
+      ],
+      "a": [
+        0.354,
+        0.773
+      ],
+      "s": [
+        0.39,
+        0.773
+      ],
+      "d": [
+        0.427,
+        0.773
+      ],
+      "f": [
+        0.463,
+        0.773
+      ],
+      "g": [
+        0.499,
+        0.773
+      ],
+      "h": [
+        0.535,
+        0.773
+      ],
+      "j": [
+        0.572,
+        0.773
+      ],
+      "k": [
+        0.608,
+        0.773
+      ],
+      "l": [
+        0.644,
+        0.773
+      ],
+      "z": [
+        0.344,
+        0.819
+      ],
+      "x": [
+        0.379,
+        0.819
+      ],
+      "c": [
+        0.413,
+        0.819
+      ],
+      "v": [
+        0.448,
+        0.819
+      ],
+      "b": [
+        0.482,
+        0.819
+      ],
+      "n": [
+        0.517,
+        0.819
+      ],
+      "m": [
+        0.551,
+        0.819
+      ],
+      ".": [
+        0.586,
+        0.819
+      ],
+      "@": [
+        0.62,
+        0.819
+      ],
+      "-": [
+        0.655,
+        0.819
+      ],
+      "shift": [
+        0.353,
+        0.865
+      ],
+      "_": [
+        0.401,
+        0.865
+      ],
+      "space": [
+        0.467,
+        0.865
+      ],
+      "backspace": [
+        0.54,
+        0.865
+      ],
+      "clear": [
+        0.596,
+        0.865
+      ],
+      "done": [
+        0.647,
+        0.865
+      ]
+    }
+  },
+  "screens": {
+    "valuepass_card_station": {
+      "screen_id": "valuepass_card_station",
+      "description": "A kiosk screen for checking smart card balance/history and buying, loading, or adding money to smart cards.",
+      "elements": [
+        {
+          "id": "tap_card_to_check_button",
+          "type": "button",
+          "label": "Tap Card to Check",
+          "description": "Initiates reading a physical card on the reader to check its balance",
+          "bbox": [
+            595,
+            263,
+            733,
+            301
+          ],
+          "center": [
+            664,
+            282
+          ],
+          "confidence": 0.95,
+          "testid": "station-check-tap"
+        },
+        {
+          "id": "card_number_input",
+          "type": "input",
+          "label": "e.g. 1234",
+          "description": "Field to type a card number for balance check",
+          "bbox": [
+            608,
+            353,
+            934,
+            381
+          ],
+          "center": [
+            771,
+            367
+          ],
+          "confidence": 0.95,
+          "testid": "station-check-number"
+        },
+        {
+          "id": "check_balance_button",
+          "type": "button",
+          "label": "Check Balance",
+          "description": "Submits the entered card number to check the balance",
+          "bbox": [
+            596,
+            402,
+            714,
+            440
+          ],
+          "center": [
+            655,
+            421
+          ],
+          "confidence": 0.95,
+          "testid": "station-check-balance"
+        },
+        {
+          "id": "load_amount_input",
+          "type": "input",
+          "label": "e.g. 200",
+          "description": "Field to enter the amount to load onto a card",
+          "bbox": [
+            987,
+            295,
+            1313,
+            323
+          ],
+          "center": [
+            1150,
+            309
+          ],
+          "confidence": 0.95,
+          "testid": "station-load-amount"
+        },
+        {
+          "id": "use_mock_card_button",
+          "type": "button",
+          "label": "Use Mock Card",
+          "description": "Uses a mock card to load the entered amount",
+          "bbox": [
+            964,
+            344,
+            1104,
+            382
+          ],
+          "center": [
+            1034,
+            363
+          ],
+          "confidence": 0.95,
+          "testid": "station-use-mock-card"
+        },
+        {
+          "id": "tap_real_card_button",
+          "type": "button",
+          "label": "Tap Real Card",
+          "description": "Initiates loading onto a real physical card via the reader",
+          "bbox": [
+            1077,
+            344,
+            1219,
+            382
+          ],
+          "center": [
+            1148,
+            363
+          ],
+          "confidence": 0.95,
+          "testid": "station-arm-real-card"
+        },
+        {
+          "id": "existing_card_number_input",
+          "type": "input",
+          "label": "e.g. 1234",
+          "description": "Field to enter an existing card number to add money to",
+          "bbox": [
+            987,
+            736,
+            1313,
+            764
+          ],
+          "center": [
+            1150,
+            750
+          ],
+          "confidence": 0.95,
+          "testid": "station-topup-number"
+        },
+        {
+          "id": "add_money_to_card_button",
+          "type": "button",
+          "label": "Add Money to Card",
+          "description": "Adds the loaded amount to the specified existing card",
+          "bbox": [
+            964,
+            785,
+            1136,
+            823
+          ],
+          "center": [
+            1050,
+            804
+          ],
+          "confidence": 0.95,
+          "testid": "station-topup"
+        },
+        {
+          "id": "kiosk_id_badge",
+          "type": "text",
+          "label": "KIOSK-ID-1",
+          "description": "Displays the current kiosk identifier",
+          "bbox": [
+            1263,
+            115,
+            1317,
+            138
+          ],
+          "center": [
+            1290,
+            126
+          ],
+          "confidence": 0.85
+        }
+      ],
+      "transitions": {
+        "tap_card_to_check": "valuepass_card_station",
+        "check_balance_by_number": "valuepass_card_station",
+        "load_amount_mock_card": "valuepass_card_station",
+        "load_amount_real_card": "valuepass_card_station",
+        "add_money_to_existing_card": "valuepass_card_station"
+      },
+      "screen_hash": "fffff81ff81ff81ff81ff81ff81ff81ff81ff81ff81ff81ff81ff81ff81fffff",
+      "is_dynamic": false,
+      "dom_id": "station_check",
+      "reference_screenshot": "screenshots\\explore_entry.png",
+      "dependencies": [
+        {
+          "element_id": "check_balance_button",
+          "requires": [
+            "card_number_input"
+          ],
+          "reason": "The check balance submit reads the entered card number, so the number must be typed first.",
+          "prerequisite_steps": [
+            {
+              "action_type": "type",
+              "element_id": "card_number_input",
+              "value": "1234"
+            }
+          ]
+        },
+        {
+          "element_id": "use_mock_card_button",
+          "requires": [
+            "load_amount_input"
+          ],
+          "reason": "Loading onto a mock card consumes the amount entered in the load field.",
+          "prerequisite_steps": [
+            {
+              "action_type": "type",
+              "element_id": "load_amount_input",
+              "value": "200"
+            }
+          ]
+        },
+        {
+          "element_id": "tap_real_card_button",
+          "requires": [
+            "load_amount_input"
+          ],
+          "reason": "Loading onto a real card consumes the amount entered in the load field.",
+          "prerequisite_steps": [
+            {
+              "action_type": "type",
+              "element_id": "load_amount_input",
+              "value": "200"
+            }
+          ]
+        },
+        {
+          "element_id": "add_money_to_card_button",
+          "requires": [
+            "load_amount_input",
+            "existing_card_number_input"
+          ],
+          "reason": "Adding money reads both the amount and the target existing card number.",
+          "prerequisite_steps": [
+            {
+              "action_type": "type",
+              "element_id": "load_amount_input",
+              "value": "200"
+            },
+            {
+              "action_type": "type",
+              "element_id": "existing_card_number_input",
+              "value": "1234"
+            }
+          ]
+        }
+      ],
+      "app_id": "kiosk-1"
+    },
+    "login": {
+      "screen_id": "login",
+      "description": "Sign-in screen for the Generic Kiosk POS with email/password fields and account options.",
+      "elements": [
+        {
+          "id": "email_input",
+          "type": "input",
+          "label": "Email",
+          "description": "Enter the account email address",
+          "bbox": [
+            628,
+            447,
+            1292,
+            535
+          ],
+          "center": [
+            960,
+            491
+          ],
+          "confidence": 0.97,
+          "testid": "signin-email"
+        },
+        {
+          "id": "password_input",
+          "type": "input",
+          "label": "Password",
+          "description": "Enter the account password",
+          "bbox": [
+            628,
+            607,
+            1292,
+            695
+          ],
+          "center": [
+            960,
+            651
+          ],
+          "confidence": 0.97,
+          "testid": "signin-password"
+        },
+        {
+          "id": "sign_in_button",
+          "type": "button",
+          "label": "Sign In",
+          "description": "Submits credentials to log in",
+          "bbox": [
+            628,
+            727,
+            1292,
+            821
+          ],
+          "center": [
+            960,
+            774
+          ],
+          "confidence": 0.98,
+          "testid": "signin-button"
+        },
+        {
+          "id": "sign_up_link",
+          "type": "link",
+          "label": "Sign up",
+          "description": "Navigates to account creation",
+          "bbox": [
+            699,
+            891,
+            811,
+            923
+          ],
+          "center": [
+            755,
+            907
+          ],
+          "confidence": 0.95,
+          "testid": "go-signup"
+        },
+        {
+          "id": "forgot_password_link",
+          "type": "link",
+          "label": "Forgot password?",
+          "description": "Navigates to password recovery",
+          "bbox": [
+            831,
+            891,
+            989,
+            923
+          ],
+          "center": [
+            910,
+            907
+          ],
+          "confidence": 0.95,
+          "testid": "go-forgot-password"
+        },
+        {
+          "id": "developer_settings_link",
+          "type": "link",
+          "label": "Developer settings",
+          "description": "Opens developer settings",
+          "bbox": [
+            1025,
+            891,
+            1205,
+            923
+          ],
+          "center": [
+            1115,
+            907
+          ],
+          "confidence": 0.95,
+          "testid": "go-developer-settings"
+        }
+      ],
+      "transitions": {
+        "submit_valid_login": "products",
+        "submit_invalid_login": "login",
+        "open_sign_up": "login",
+        "open_forgot_password": "login",
+        "open_developer_settings": "login"
+      },
+      "screen_hash": "fffff81ff81ff81ff81ff81ff81ffffff81ffffff81ffa5ff81ff81ff81fffff",
+      "is_dynamic": true,
+      "dom_id": "signin",
+      "reference_screenshot": "screenshots\\explore_entry.png",
+      "dependencies": [
+        {
+          "element_id": "sign_in_button",
+          "requires": [
+            "email_input",
+            "password_input"
+          ],
+          "reason": "Sign In consumes the email and password values; empty fields produce an error rather than navigation.",
+          "prerequisite_steps": [
+            {
+              "action_type": "type",
+              "element_id": "email_input",
+              "value": "{{valid_email}}"
+            },
+            {
+              "action_type": "type",
+              "element_id": "password_input",
+              "value": "{{valid_password}}"
+            }
+          ]
+        }
+      ],
+      "app_id": "kiosk-2"
+    },
+    "products": {
+      "screen_id": "products",
+      "description": "Kiosk POS product selection screen showing products with quantity steppers and add to cart buttons.",
+      "elements": [
+        {
+          "id": "home_button",
+          "type": "button",
+          "label": "Home",
+          "description": "Navigates to the home screen",
+          "bbox": [
+            923,
+            111,
+            1047,
+            151
+          ],
+          "center": [
+            985,
+            131
+          ],
+          "confidence": 0.96,
+          "testid": "nav-home"
+        },
+        {
+          "id": "order_history_nav_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Navigates to order history",
+          "bbox": [
+            1039,
+            111,
+            1203,
+            151
+          ],
+          "center": [
+            1121,
+            131
+          ],
+          "confidence": 0.96,
+          "testid": "nav-orders"
+        },
+        {
+          "id": "sign_out_button",
+          "type": "button",
+          "label": "Sign Out",
+          "description": "Signs out of the current session",
+          "bbox": [
+            1180,
+            111,
+            1334,
+            151
+          ],
+          "center": [
+            1257,
+            131
+          ],
+          "confidence": 0.96,
+          "testid": "signout-button"
+        },
+        {
+          "id": "kiosk_id_2_tab",
+          "type": "button",
+          "label": "KIOSK-ID-2",
+          "description": "Shows current kiosk ID",
+          "bbox": [
+            589,
+            179,
+            917,
+            214
+          ],
+          "center": [
+            712,
+            183
+          ],
+          "confidence": 0.94
+        },
+        {
+          "id": "products_tab",
+          "type": "button",
+          "label": "Products",
+          "description": "Switches to products view",
+          "bbox": [
+            794,
+            167,
+            1126,
+            201
+          ],
+          "center": [
+            960,
+            184
+          ],
+          "confidence": 0.94,
+          "testid": "menu-products"
+        },
+        {
+          "id": "categories_nav",
+          "type": "link",
+          "label": "Categories",
+          "description": "Navigates to categories",
+          "bbox": [
+            1156,
+            173,
+            1256,
+            195
+          ],
+          "center": [
+            1206,
+            184
+          ],
+          "confidence": 0.92,
+          "testid": "menu-categories"
+        },
+        {
+          "id": "deals_nav",
+          "type": "link",
+          "label": "Deals",
+          "description": "Navigates to deals",
+          "bbox": [
+            671,
+            206,
+            757,
+            232
+          ],
+          "center": [
+            714,
+            219
+          ],
+          "confidence": 0.92,
+          "testid": "menu-deals"
+        },
+        {
+          "id": "loyalty_nav",
+          "type": "link",
+          "label": "Loyalty",
+          "description": "Navigates to loyalty",
+          "bbox": [
+            917,
+            223,
+            1008,
+            249
+          ],
+          "center": [
+            960,
+            219
+          ],
+          "confidence": 0.92,
+          "testid": "menu-loyalty"
+        },
+        {
+          "id": "receipts_nav",
+          "type": "link",
+          "label": "Receipts",
+          "description": "Navigates to receipts",
+          "bbox": [
+            1154,
+            206,
+            1258,
+            232
+          ],
+          "center": [
+            1206,
+            219
+          ],
+          "confidence": 0.92,
+          "testid": "menu-receipts"
+        },
+        {
+          "id": "support_nav",
+          "type": "link",
+          "label": "Support",
+          "description": "Navigates to support",
+          "bbox": [
+            669,
+            242,
+            759,
+            266
+          ],
+          "center": [
+            714,
+            254
+          ],
+          "confidence": 0.92,
+          "testid": "menu-support"
+        },
+        {
+          "id": "store_info_nav",
+          "type": "link",
+          "label": "Store Info",
+          "description": "Navigates to store info",
+          "bbox": [
+            915,
+            242,
+            1005,
+            266
+          ],
+          "center": [
+            960,
+            254
+          ],
+          "confidence": 0.92,
+          "testid": "menu-store-info"
+        },
+        {
+          "id": "order_history_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Opens order history panel",
+          "bbox": [
+            1037,
+            363,
+            1163,
+            403
+          ],
+          "center": [
+            1100,
+            383
+          ],
+          "confidence": 0.93,
+          "testid": "order-history-button"
+        },
+        {
+          "id": "cart_checkout_button",
+          "type": "button",
+          "label": "Cart / Checkout (0)",
+          "description": "Opens cart and checkout",
+          "bbox": [
+            1175,
+            372,
+            1347,
+            413
+          ],
+          "center": [
+            1244,
+            383
+          ],
+          "confidence": 0.94,
+          "testid": "cart-checkout-button"
+        },
+        {
+          "id": "nexora_phone_decrement",
+          "type": "stepper",
+          "label": "\u2212",
+          "description": "Decreases Nexora Phone X2 quantity",
+          "bbox": [
+            597,
+            559,
+            665,
+            597
+          ],
+          "center": [
+            631,
+            578
+          ],
+          "confidence": 0.95,
+          "testid": "quantity-decrease-nexora-phone-x2"
+        },
+        {
+          "id": "nexora_phone_increment",
+          "type": "stepper",
+          "label": "+",
+          "description": "Increases Nexora Phone X2 quantity",
+          "bbox": [
+            686,
+            559,
+            752,
+            597
+          ],
+          "center": [
+            719,
+            578
+          ],
+          "confidence": 0.95,
+          "testid": "quantity-increase-nexora-phone-x2"
+        },
+        {
+          "id": "nexora_phone_add_to_cart",
+          "type": "button",
+          "label": "Add to Cart",
+          "description": "Adds Nexora Phone X2 to cart",
+          "bbox": [
+            606,
+            621,
+            1300,
+            651
+          ],
+          "center": [
+            953,
+            636
+          ],
+          "confidence": 0.96,
+          "testid": "add-to-cart-nexora-phone-x2"
+        },
+        {
+          "id": "orionbook_decrement",
+          "type": "stepper",
+          "label": "\u2212",
+          "description": "Decreases OrionBook Pro 14 quantity",
+          "bbox": [
+            597,
+            826,
+            665,
+            864
+          ],
+          "center": [
+            631,
+            845
+          ],
+          "confidence": 0.95,
+          "testid": "quantity-decrease-orionbook-pro-14"
+        },
+        {
+          "id": "orionbook_increment",
+          "type": "stepper",
+          "label": "+",
+          "description": "Increases OrionBook Pro 14 quantity",
+          "bbox": [
+            686,
+            826,
+            752,
+            864
+          ],
+          "center": [
+            719,
+            845
+          ],
+          "confidence": 0.95,
+          "testid": "quantity-increase-orionbook-pro-14"
+        },
+        {
+          "id": "orionbook_add_to_cart",
+          "type": "button",
+          "label": "Add to Cart",
+          "description": "Adds OrionBook Pro 14 to cart",
+          "bbox": [
+            606,
+            888,
+            1300,
+            918
+          ],
+          "center": [
+            953,
+            903
+          ],
+          "confidence": 0.96,
+          "testid": "add-to-cart-orionbook-pro-14"
+        }
+      ],
+      "transitions": {
+        "navigate_home": "products",
+        "open_order_history_nav": "order_history",
+        "sign_out": "login",
+        "open_kiosk_id": "deals",
+        "open_categories": "categories",
+        "open_deals": "deals",
+        "open_loyalty": "loyalty",
+        "open_receipts": "receipts",
+        "open_support": "support",
+        "open_store_info": "store_info",
+        "open_order_history_panel": "order_history",
+        "increment_nexora_phone_qty": "products",
+        "decrement_nexora_phone_qty": "products",
+        "increment_orionbook_qty": "products",
+        "decrement_orionbook_qty": "products",
+        "add_nexora_phone_to_cart": "products",
+        "add_orionbook_to_cart": "products",
+        "open_cart_checkout": "cart",
+        "cart_checkout_button": "cart"
+      },
+      "screen_hash": "fffff01ff00ff00fffffffdffbfffffffbfff81ffffffffffbfff81ffffcf81c",
+      "is_dynamic": false,
+      "dom_id": "products",
+      "reference_screenshot": "screenshots\\explore_login_submit_valid_login_1786522485861.png",
+      "dependencies": [
+        {
+          "element_id": "nexora_phone_add_to_cart",
+          "requires": [
+            "nexora_phone_increment"
+          ],
+          "reason": "Confirmed during exploration: tapping 'nexora_phone_increment' then 'nexora_phone_add_to_cart' produced a non-empty cart (the cart screen opened).",
+          "prerequisite_steps": [
+            {
+              "action_type": "tap",
+              "element_id": "nexora_phone_increment"
+            }
+          ],
+          "observed": true
+        },
+        {
+          "element_id": "orionbook_add_to_cart",
+          "requires": [
+            "orionbook_increment"
+          ],
+          "reason": "Add to Cart reads the OrionBook quantity; stepper must set quantity to at least 1 first.",
+          "prerequisite_steps": [
+            {
+              "action_type": "tap",
+              "element_id": "orionbook_increment",
+              "value": null
+            }
+          ]
+        }
+      ],
+      "app_id": "kiosk-2"
+    },
+    "order_history": {
+      "screen_id": "order_history",
+      "description": "Order History screen showing no orders yet with navigation and a start purchase call to action.",
+      "elements": [
+        {
+          "id": "home_button",
+          "type": "button",
+          "label": "Home",
+          "description": "Navigates to the home page",
+          "bbox": [
+            917,
+            108,
+            1053,
+            154
+          ],
+          "center": [
+            985,
+            131
+          ],
+          "confidence": 0.96,
+          "testid": "nav-home"
+        },
+        {
+          "id": "order_history_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Navigates to the order history page",
+          "bbox": [
+            1034,
+            108,
+            1208,
+            154
+          ],
+          "center": [
+            1121,
+            131
+          ],
+          "confidence": 0.96,
+          "testid": "nav-orders"
+        },
+        {
+          "id": "sign_out_button",
+          "type": "button",
+          "label": "Sign Out",
+          "description": "Signs out of the current session",
+          "bbox": [
+            1187,
+            108,
+            1327,
+            154
+          ],
+          "center": [
+            1257,
+            131
+          ],
+          "confidence": 0.96,
+          "testid": "signout-button"
+        },
+        {
+          "id": "kiosk_id_2_button",
+          "type": "button",
+          "label": "KIOSK-ID-2",
+          "description": "Displays or selects the kiosk identifier",
+          "bbox": [
+            591,
+            182,
+            835,
+            214
+          ],
+          "center": [
+            712,
+            198
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "products_link",
+          "type": "link",
+          "label": "Products",
+          "description": "Navigates to the products section",
+          "bbox": [
+            936,
+            176,
+            984,
+            192
+          ],
+          "center": [
+            960,
+            184
+          ],
+          "confidence": 0.93,
+          "testid": "menu-products"
+        },
+        {
+          "id": "categories_link",
+          "type": "link",
+          "label": "Categories",
+          "description": "Navigates to the categories section",
+          "bbox": [
+            1177,
+            176,
+            1235,
+            192
+          ],
+          "center": [
+            1206,
+            184
+          ],
+          "confidence": 0.93,
+          "testid": "menu-categories"
+        },
+        {
+          "id": "deals_link",
+          "type": "link",
+          "label": "Deals",
+          "description": "Navigates to the deals section",
+          "bbox": [
+            694,
+            211,
+            734,
+            227
+          ],
+          "center": [
+            714,
+            219
+          ],
+          "confidence": 0.93,
+          "testid": "menu-deals"
+        },
+        {
+          "id": "loyalty_link",
+          "type": "link",
+          "label": "Loyalty",
+          "description": "Navigates to the loyalty section",
+          "bbox": [
+            941,
+            211,
+            979,
+            227
+          ],
+          "center": [
+            960,
+            219
+          ],
+          "confidence": 0.93,
+          "testid": "menu-loyalty"
+        },
+        {
+          "id": "receipts_link",
+          "type": "link",
+          "label": "Receipts",
+          "description": "Navigates to the receipts section",
+          "bbox": [
+            1179,
+            211,
+            1233,
+            227
+          ],
+          "center": [
+            1206,
+            219
+          ],
+          "confidence": 0.93,
+          "testid": "menu-receipts"
+        },
+        {
+          "id": "support_link",
+          "type": "link",
+          "label": "Support",
+          "description": "Navigates to the support section",
+          "bbox": [
+            690,
+            246,
+            738,
+            262
+          ],
+          "center": [
+            714,
+            254
+          ],
+          "confidence": 0.93,
+          "testid": "menu-support"
+        },
+        {
+          "id": "store_info_link",
+          "type": "link",
+          "label": "Store Info",
+          "description": "Navigates to store information",
+          "bbox": [
+            936,
+            246,
+            984,
+            262
+          ],
+          "center": [
+            960,
+            254
+          ],
+          "confidence": 0.93,
+          "testid": "menu-store-info"
+        },
+        {
+          "id": "go_to_home_page_button",
+          "type": "button",
+          "label": "Go to Home Page",
+          "description": "Navigates to the home page",
+          "bbox": [
+            592,
+            340,
+            1328,
+            392
+          ],
+          "center": [
+            960,
+            366
+          ],
+          "confidence": 0.97,
+          "testid": "history-home"
+        },
+        {
+          "id": "start_purchase_button",
+          "type": "button",
+          "label": "Start Purchase",
+          "description": "Begins a new mock purchase flow",
+          "bbox": [
+            893,
+            513,
+            1027,
+            563
+          ],
+          "center": [
+            960,
+            538
+          ],
+          "confidence": 0.96
+        }
+      ],
+      "transitions": {
+        "open_home": "products",
+        "select_kiosk_id": "deals",
+        "open_categories": "categories",
+        "open_deals": "deals",
+        "open_loyalty": "loyalty",
+        "open_receipts": "receipts",
+        "open_support": "support",
+        "open_store_info": "store_info",
+        "go_to_home_page": "products",
+        "start_purchase": "products"
+      },
+      "screen_hash": "fffff01ff00ff00ff83ff01ffffffe7ffffffffffffffffffffffffffffcf81c",
+      "is_dynamic": true,
+      "dom_id": "order_history",
+      "reference_screenshot": "screenshots\\explore_products_open_order_history_nav_1786522537192.png",
+      "app_id": "kiosk-2"
+    },
+    "deals": {
+      "screen_id": "deals",
+      "description": "Kiosk POS deals screen showing today's promotional product offers with navigation menu.",
+      "elements": [
+        {
+          "id": "home_button",
+          "type": "button",
+          "label": "Home",
+          "description": "Navigates to the home screen",
+          "bbox": [
+            922,
+            110,
+            1048,
+            152
+          ],
+          "center": [
+            985,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "nav-home"
+        },
+        {
+          "id": "order_history_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Navigates to order history screen",
+          "bbox": [
+            1017,
+            110,
+            1225,
+            152
+          ],
+          "center": [
+            1121,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "nav-orders"
+        },
+        {
+          "id": "sign_out_button",
+          "type": "button",
+          "label": "Sign Out",
+          "description": "Signs the user out of the kiosk",
+          "bbox": [
+            1154,
+            110,
+            1360,
+            152
+          ],
+          "center": [
+            1257,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "signout-button"
+        },
+        {
+          "id": "kiosk_id_2_button",
+          "type": "button",
+          "label": "KIOSK-ID-2",
+          "description": "Selects kiosk ID 2",
+          "bbox": [
+            589,
+            248,
+            835,
+            279
+          ],
+          "center": [
+            712,
+            264
+          ],
+          "confidence": 0.92
+        },
+        {
+          "id": "products_link",
+          "type": "link",
+          "label": "Products",
+          "description": "Navigates to products listing",
+          "bbox": [
+            920,
+            176,
+            1000,
+            192
+          ],
+          "center": [
+            960,
+            184
+          ],
+          "confidence": 0.9,
+          "testid": "menu-products"
+        },
+        {
+          "id": "categories_link",
+          "type": "link",
+          "label": "Categories",
+          "description": "Navigates to categories listing",
+          "bbox": [
+            1158,
+            176,
+            1254,
+            192
+          ],
+          "center": [
+            1206,
+            184
+          ],
+          "confidence": 0.9,
+          "testid": "menu-categories"
+        },
+        {
+          "id": "deals_button",
+          "type": "button",
+          "label": "Deals",
+          "description": "Shows today's deals",
+          "bbox": [
+            591,
+            203,
+            837,
+            235
+          ],
+          "center": [
+            714,
+            219
+          ],
+          "confidence": 0.92,
+          "testid": "menu-deals"
+        },
+        {
+          "id": "loyalty_link",
+          "type": "link",
+          "label": "Loyalty",
+          "description": "Navigates to loyalty dashboard",
+          "bbox": [
+            924,
+            211,
+            996,
+            227
+          ],
+          "center": [
+            960,
+            219
+          ],
+          "confidence": 0.9,
+          "testid": "menu-loyalty"
+        },
+        {
+          "id": "receipts_link",
+          "type": "link",
+          "label": "Receipts",
+          "description": "Navigates to receipts screen",
+          "bbox": [
+            1162,
+            211,
+            1250,
+            227
+          ],
+          "center": [
+            1206,
+            219
+          ],
+          "confidence": 0.9,
+          "testid": "menu-receipts"
+        },
+        {
+          "id": "support_link",
+          "type": "link",
+          "label": "Support",
+          "description": "Navigates to support screen",
+          "bbox": [
+            670,
+            246,
+            758,
+            262
+          ],
+          "center": [
+            714,
+            254
+          ],
+          "confidence": 0.9,
+          "testid": "menu-support"
+        },
+        {
+          "id": "store_info_link",
+          "type": "link",
+          "label": "Store Info",
+          "description": "Navigates to store information",
+          "bbox": [
+            916,
+            246,
+            1004,
+            262
+          ],
+          "center": [
+            960,
+            254
+          ],
+          "confidence": 0.9,
+          "testid": "menu-store-info"
+        },
+        {
+          "id": "shop_deals_button",
+          "type": "button",
+          "label": "Shop Deals",
+          "description": "Opens the deals shopping page",
+          "bbox": [
+            592,
+            344,
+            1328,
+            388
+          ],
+          "center": [
+            960,
+            366
+          ],
+          "confidence": 0.95,
+          "testid": "deals-products"
+        },
+        {
+          "id": "nexora_phone_x2_card",
+          "type": "button",
+          "label": "Nexora Phone X2",
+          "description": "Selects the Nexora Phone X2 deal",
+          "bbox": [
+            591,
+            583,
+            1328,
+            756
+          ],
+          "center": [
+            960,
+            669
+          ],
+          "confidence": 0.85
+        },
+        {
+          "id": "orionbook_pro_14_card",
+          "type": "button",
+          "label": "OrionBook Pro 14",
+          "description": "Selects the OrionBook Pro 14 deal",
+          "bbox": [
+            591,
+            785,
+            1328,
+            959
+          ],
+          "center": [
+            960,
+            871
+          ],
+          "confidence": 0.85
+        },
+        {
+          "id": "vistaview_55_smart_tv_card",
+          "type": "button",
+          "label": "VistaView 55 Smart TV",
+          "description": "Selects the VistaView 55 Smart TV deal",
+          "bbox": [
+            591,
+            982,
+            1328,
+            1080
+          ],
+          "center": [
+            960,
+            864
+          ],
+          "confidence": 0.9
+        }
+      ],
+      "transitions": {
+        "select_kiosk_id_2": "support",
+        "open_categories": "categories",
+        "open_loyalty": "loyalty",
+        "open_receipts": "receipts",
+        "open_support": "support",
+        "open_store_info": "store_info",
+        "select_nexora_phone_deal": "deals",
+        "select_orionbook_deal": "deals",
+        "select_vistaview_tv_deal": "deals"
+      },
+      "screen_hash": "fffff01ff00ff00ff01ff00ffffffffffffffffffffffffffffffffffffcf81c",
+      "is_dynamic": false,
+      "dom_id": "deals",
+      "reference_screenshot": "screenshots\\explore_order_history_select_kiosk_id_1786522573458.png",
+      "app_id": "kiosk-2"
+    },
+    "support": {
+      "screen_id": "support",
+      "description": "Support and diagnostics screen offering contact support, reader check, and network status options within a kiosk POS app.",
+      "elements": [
+        {
+          "id": "home_button",
+          "type": "button",
+          "label": "Home",
+          "description": "Navigates to the home screen",
+          "bbox": [
+            918,
+            110,
+            1052,
+            152
+          ],
+          "center": [
+            985,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "nav-home"
+        },
+        {
+          "id": "order_history_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Navigates to order history",
+          "bbox": [
+            1017,
+            110,
+            1225,
+            152
+          ],
+          "center": [
+            1121,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "nav-orders"
+        },
+        {
+          "id": "sign_out_button",
+          "type": "button",
+          "label": "Sign Out",
+          "description": "Signs the user out of the session",
+          "bbox": [
+            1163,
+            110,
+            1351,
+            152
+          ],
+          "center": [
+            1257,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "signout-button"
+        },
+        {
+          "id": "kiosk_id_2_button",
+          "type": "button",
+          "label": "KIOSK-ID-2",
+          "description": "Selects kiosk ID 2",
+          "bbox": [
+            589,
+            244,
+            835,
+            276
+          ],
+          "center": [
+            712,
+            260
+          ],
+          "confidence": 0.93
+        },
+        {
+          "id": "products_link",
+          "type": "link",
+          "label": "Products",
+          "description": "Navigates to products list",
+          "bbox": [
+            918,
+            171,
+            1002,
+            197
+          ],
+          "center": [
+            960,
+            184
+          ],
+          "confidence": 0.92,
+          "testid": "menu-products"
+        },
+        {
+          "id": "categories_link",
+          "type": "link",
+          "label": "Categories",
+          "description": "Navigates to categories",
+          "bbox": [
+            1155,
+            171,
+            1257,
+            197
+          ],
+          "center": [
+            1206,
+            184
+          ],
+          "confidence": 0.92,
+          "testid": "menu-categories"
+        },
+        {
+          "id": "deals_link",
+          "type": "link",
+          "label": "Deals",
+          "description": "Navigates to deals",
+          "bbox": [
+            682,
+            207,
+            746,
+            231
+          ],
+          "center": [
+            714,
+            219
+          ],
+          "confidence": 0.92,
+          "testid": "menu-deals"
+        },
+        {
+          "id": "loyalty_link",
+          "type": "link",
+          "label": "Loyalty",
+          "description": "Navigates to loyalty program",
+          "bbox": [
+            928,
+            207,
+            992,
+            231
+          ],
+          "center": [
+            960,
+            219
+          ],
+          "confidence": 0.92,
+          "testid": "menu-loyalty"
+        },
+        {
+          "id": "receipts_link",
+          "type": "link",
+          "label": "Receipts",
+          "description": "Navigates to receipts",
+          "bbox": [
+            1151,
+            207,
+            1261,
+            231
+          ],
+          "center": [
+            1206,
+            219
+          ],
+          "confidence": 0.92,
+          "testid": "menu-receipts"
+        },
+        {
+          "id": "support_button",
+          "type": "button",
+          "label": "Support",
+          "description": "Opens the support and diagnostics screen (currently active)",
+          "bbox": [
+            591,
+            237,
+            837,
+            271
+          ],
+          "center": [
+            714,
+            254
+          ],
+          "confidence": 0.93,
+          "testid": "menu-support"
+        },
+        {
+          "id": "store_info_link",
+          "type": "link",
+          "label": "Store Info",
+          "description": "Navigates to store information",
+          "bbox": [
+            926,
+            242,
+            994,
+            266
+          ],
+          "center": [
+            960,
+            254
+          ],
+          "confidence": 0.92,
+          "testid": "menu-store-info"
+        },
+        {
+          "id": "contact_support_card",
+          "type": "button",
+          "label": "Contact Support",
+          "description": "Opens assisted checkout support for the current kiosk session",
+          "bbox": [
+            591,
+            462,
+            1328,
+            542
+          ],
+          "center": [
+            960,
+            502
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "reader_check_card",
+          "type": "button",
+          "label": "Reader Check",
+          "description": "Verifies card-reader connectivity before payment",
+          "bbox": [
+            591,
+            582,
+            1328,
+            663
+          ],
+          "center": [
+            960,
+            623
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "network_status_card",
+          "type": "button",
+          "label": "Network Status",
+          "description": "Confirms transaction sync path is available",
+          "bbox": [
+            591,
+            703,
+            1328,
+            783
+          ],
+          "center": [
+            960,
+            743
+          ],
+          "confidence": 0.9
+        }
+      ],
+      "transitions": {
+        "open_categories": "categories",
+        "open_loyalty": "loyalty",
+        "open_receipts": "receipts",
+        "open_store_info": "store_info",
+        "run_reader_check": "support",
+        "check_network_status": "support"
+      },
+      "screen_hash": "fffff00ff00ff00ffffffffffffffffffffffffffffffffffffffffffffcf81c",
+      "is_dynamic": false,
+      "dom_id": "support",
+      "reference_screenshot": "screenshots\\explore_deals_select_kiosk_id_2_1786522612156.png",
+      "app_id": "kiosk-2"
+    },
+    "categories": {
+      "screen_id": "categories",
+      "description": "A kiosk POS screen displaying product categories that can be browsed and filtered.",
+      "elements": [
+        {
+          "id": "home_button",
+          "type": "button",
+          "label": "Home",
+          "description": "Navigates to the home screen",
+          "bbox": [
+            919,
+            110,
+            1051,
+            152
+          ],
+          "center": [
+            985,
+            131
+          ],
+          "confidence": 0.96,
+          "testid": "nav-home"
+        },
+        {
+          "id": "order_history_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Navigates to order history",
+          "bbox": [
+            1017,
+            110,
+            1225,
+            152
+          ],
+          "center": [
+            1121,
+            131
+          ],
+          "confidence": 0.96,
+          "testid": "nav-orders"
+        },
+        {
+          "id": "sign_out_button",
+          "type": "button",
+          "label": "Sign Out",
+          "description": "Signs the user out",
+          "bbox": [
+            1165,
+            110,
+            1349,
+            152
+          ],
+          "center": [
+            1257,
+            131
+          ],
+          "confidence": 0.96,
+          "testid": "signout-button"
+        },
+        {
+          "id": "kiosk_id_2_button",
+          "type": "button",
+          "label": "KIOSK-ID-2",
+          "description": "Displays or selects kiosk ID",
+          "bbox": [
+            593,
+            182,
+            833,
+            217
+          ],
+          "center": [
+            712,
+            199
+          ],
+          "confidence": 0.94
+        },
+        {
+          "id": "products_nav",
+          "type": "link",
+          "label": "Products",
+          "description": "Navigates to products list",
+          "bbox": [
+            920,
+            175,
+            1000,
+            193
+          ],
+          "center": [
+            960,
+            184
+          ],
+          "confidence": 0.93,
+          "testid": "menu-products"
+        },
+        {
+          "id": "categories_nav",
+          "type": "button",
+          "label": "Categories",
+          "description": "Navigates to categories view",
+          "bbox": [
+            1085,
+            167,
+            1327,
+            201
+          ],
+          "center": [
+            1206,
+            184
+          ],
+          "confidence": 0.94,
+          "testid": "menu-categories"
+        },
+        {
+          "id": "deals_nav",
+          "type": "link",
+          "label": "Deals",
+          "description": "Navigates to deals",
+          "bbox": [
+            675,
+            210,
+            753,
+            228
+          ],
+          "center": [
+            714,
+            219
+          ],
+          "confidence": 0.93,
+          "testid": "menu-deals"
+        },
+        {
+          "id": "loyalty_nav",
+          "type": "link",
+          "label": "Loyalty",
+          "description": "Navigates to loyalty program",
+          "bbox": [
+            920,
+            210,
+            1000,
+            228
+          ],
+          "center": [
+            960,
+            219
+          ],
+          "confidence": 0.93,
+          "testid": "menu-loyalty"
+        },
+        {
+          "id": "receipts_nav",
+          "type": "link",
+          "label": "Receipts",
+          "description": "Navigates to receipts",
+          "bbox": [
+            1165,
+            210,
+            1247,
+            228
+          ],
+          "center": [
+            1206,
+            219
+          ],
+          "confidence": 0.93,
+          "testid": "menu-receipts"
+        },
+        {
+          "id": "support_nav",
+          "type": "link",
+          "label": "Support",
+          "description": "Navigates to support",
+          "bbox": [
+            675,
+            245,
+            753,
+            263
+          ],
+          "center": [
+            714,
+            254
+          ],
+          "confidence": 0.93,
+          "testid": "menu-support"
+        },
+        {
+          "id": "store_info_nav",
+          "type": "link",
+          "label": "Store Info",
+          "description": "Navigates to store info",
+          "bbox": [
+            912,
+            245,
+            1008,
+            263
+          ],
+          "center": [
+            960,
+            254
+          ],
+          "confidence": 0.93,
+          "testid": "menu-store-info"
+        },
+        {
+          "id": "view_products_button",
+          "type": "button",
+          "label": "View Products",
+          "description": "Opens the full products list",
+          "bbox": [
+            478,
+            341,
+            1428,
+            391
+          ],
+          "center": [
+            953,
+            366
+          ],
+          "confidence": 0.97,
+          "testid": "categories-products"
+        },
+        {
+          "id": "smartphone_category",
+          "type": "button",
+          "label": "SMARTPHONE 1 item",
+          "description": "Filters products by smartphone category",
+          "bbox": [
+            591,
+            433,
+            1541,
+            545
+          ],
+          "center": [
+            1065,
+            489
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "laptop_category",
+          "type": "button",
+          "label": "LAPTOP 1 item",
+          "description": "Filters products by laptop category",
+          "bbox": [
+            591,
+            573,
+            1541,
+            685
+          ],
+          "center": [
+            1065,
+            629
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "television_category",
+          "type": "button",
+          "label": "TELEVISION 1 item",
+          "description": "Filters products by television category",
+          "bbox": [
+            591,
+            712,
+            1541,
+            825
+          ],
+          "center": [
+            1065,
+            768
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "audio_category",
+          "type": "button",
+          "label": "AUDIO 1 item",
+          "description": "Filters products by audio category",
+          "bbox": [
+            591,
+            853,
+            1541,
+            965
+          ],
+          "center": [
+            1065,
+            909
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "tablet_category",
+          "type": "button",
+          "label": "TABLET 1 item",
+          "description": "Filters products by tablet category",
+          "bbox": [
+            591,
+            983,
+            1541,
+            1077
+          ],
+          "center": [
+            1065,
+            1031
+          ],
+          "confidence": 0.85
+        }
+      ],
+      "transitions": {
+        "sign_out": "login",
+        "open_loyalty": "loyalty",
+        "open_receipts": "receipts",
+        "open_store_info": "store_info",
+        "filter_smartphone": "categories",
+        "filter_laptop": "categories",
+        "filter_television": "categories",
+        "filter_audio": "categories",
+        "filter_tablet": "categories"
+      },
+      "screen_hash": "fffff01ff00ff00ff01ff01ffffffffffffffffffffffffffffffffffffcf81c",
+      "is_dynamic": false,
+      "dom_id": "categories",
+      "reference_screenshot": "screenshots\\explore_support_open_categories_1786522648271.png",
+      "app_id": "kiosk-2"
+    },
+    "loyalty": {
+      "screen_id": "loyalty",
+      "description": "Loyalty rewards screen showing member details, tier, points, and reward value for a logged-in kiosk POS user.",
+      "elements": [
+        {
+          "id": "home_button",
+          "type": "button",
+          "label": "Home",
+          "description": "Navigates to the home screen",
+          "bbox": [
+            917,
+            106,
+            1053,
+            156
+          ],
+          "center": [
+            985,
+            131
+          ],
+          "confidence": 0.96,
+          "testid": "nav-home"
+        },
+        {
+          "id": "order_history_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Opens the order history view",
+          "bbox": [
+            1041,
+            106,
+            1201,
+            156
+          ],
+          "center": [
+            1121,
+            131
+          ],
+          "confidence": 0.96,
+          "testid": "nav-orders"
+        },
+        {
+          "id": "sign_out_button",
+          "type": "button",
+          "label": "Sign Out",
+          "description": "Signs the user out of the POS",
+          "bbox": [
+            1175,
+            106,
+            1339,
+            156
+          ],
+          "center": [
+            1257,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "signout-button"
+        },
+        {
+          "id": "kiosk_id_2_button",
+          "type": "button",
+          "label": "KIOSK-ID-2",
+          "description": "Selects or displays the current kiosk identifier",
+          "bbox": [
+            591,
+            182,
+            833,
+            214
+          ],
+          "center": [
+            712,
+            198
+          ],
+          "confidence": 0.94
+        },
+        {
+          "id": "products_nav",
+          "type": "link",
+          "label": "Products",
+          "description": "Navigates to the products list",
+          "bbox": [
+            907,
+            175,
+            1013,
+            193
+          ],
+          "center": [
+            960,
+            184
+          ],
+          "confidence": 0.93,
+          "testid": "menu-products"
+        },
+        {
+          "id": "categories_nav",
+          "type": "link",
+          "label": "Categories",
+          "description": "Navigates to the categories view",
+          "bbox": [
+            1147,
+            175,
+            1265,
+            193
+          ],
+          "center": [
+            1206,
+            184
+          ],
+          "confidence": 0.93,
+          "testid": "menu-categories"
+        },
+        {
+          "id": "deals_nav",
+          "type": "link",
+          "label": "Deals",
+          "description": "Navigates to the deals view",
+          "bbox": [
+            673,
+            210,
+            755,
+            228
+          ],
+          "center": [
+            714,
+            219
+          ],
+          "confidence": 0.93,
+          "testid": "menu-deals"
+        },
+        {
+          "id": "loyalty_nav",
+          "type": "link",
+          "label": "Loyalty",
+          "description": "Displays the loyalty rewards view (current screen)",
+          "bbox": [
+            838,
+            197,
+            1082,
+            241
+          ],
+          "center": [
+            960,
+            219
+          ],
+          "confidence": 0.95,
+          "testid": "menu-loyalty"
+        },
+        {
+          "id": "receipts_nav",
+          "type": "link",
+          "label": "Receipts",
+          "description": "Navigates to the receipts view",
+          "bbox": [
+            1147,
+            210,
+            1265,
+            228
+          ],
+          "center": [
+            1206,
+            219
+          ],
+          "confidence": 0.93,
+          "testid": "menu-receipts"
+        },
+        {
+          "id": "support_nav",
+          "type": "link",
+          "label": "Support",
+          "description": "Navigates to the support view",
+          "bbox": [
+            668,
+            246,
+            760,
+            262
+          ],
+          "center": [
+            714,
+            254
+          ],
+          "confidence": 0.93,
+          "testid": "menu-support"
+        },
+        {
+          "id": "store_info_nav",
+          "type": "link",
+          "label": "Store Info",
+          "description": "Navigates to the store info view",
+          "bbox": [
+            903,
+            246,
+            1017,
+            262
+          ],
+          "center": [
+            960,
+            254
+          ],
+          "confidence": 0.93,
+          "testid": "menu-store-info"
+        }
+      ],
+      "transitions": {
+        "open_receipts": "receipts",
+        "open_store_info": "store_info"
+      },
+      "screen_hash": "fffff00ff00ff00ff07ffffffffffffffffffffffffffffffffffffffffff81f",
+      "is_dynamic": false,
+      "dom_id": "loyalty",
+      "reference_screenshot": "screenshots\\explore_categories_open_loyalty_1786522707585.png",
+      "app_id": "kiosk-2"
+    },
+    "receipts": {
+      "screen_id": "receipts",
+      "description": "Receipt Center screen showing no receipt is available with options to view order history.",
+      "elements": [
+        {
+          "id": "home_button",
+          "type": "button",
+          "label": "Home",
+          "description": "Navigates to the home screen",
+          "bbox": [
+            915,
+            107,
+            1055,
+            155
+          ],
+          "center": [
+            985,
+            131
+          ],
+          "confidence": 0.96,
+          "testid": "nav-home"
+        },
+        {
+          "id": "order_history_nav_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Navigates to the order history screen",
+          "bbox": [
+            1015,
+            107,
+            1227,
+            155
+          ],
+          "center": [
+            1121,
+            131
+          ],
+          "confidence": 0.96,
+          "testid": "nav-orders"
+        },
+        {
+          "id": "sign_out_button",
+          "type": "button",
+          "label": "Sign Out",
+          "description": "Signs the user out of the kiosk",
+          "bbox": [
+            1151,
+            107,
+            1363,
+            155
+          ],
+          "center": [
+            1257,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "signout-button"
+        },
+        {
+          "id": "kiosk_id_2_button",
+          "type": "button",
+          "label": "KIOSK-ID-2",
+          "description": "Displays or selects the kiosk identifier",
+          "bbox": [
+            591,
+            179,
+            833,
+            219
+          ],
+          "center": [
+            712,
+            198
+          ],
+          "confidence": 0.93
+        },
+        {
+          "id": "products_nav",
+          "type": "link",
+          "label": "Products",
+          "description": "Navigates to the products list",
+          "bbox": [
+            904,
+            175,
+            1016,
+            193
+          ],
+          "center": [
+            960,
+            184
+          ],
+          "confidence": 0.94,
+          "testid": "menu-products"
+        },
+        {
+          "id": "categories_nav",
+          "type": "link",
+          "label": "Categories",
+          "description": "Navigates to the categories screen",
+          "bbox": [
+            1142,
+            175,
+            1270,
+            193
+          ],
+          "center": [
+            1206,
+            184
+          ],
+          "confidence": 0.94,
+          "testid": "menu-categories"
+        },
+        {
+          "id": "deals_nav",
+          "type": "link",
+          "label": "Deals",
+          "description": "Navigates to the deals screen",
+          "bbox": [
+            676,
+            210,
+            752,
+            228
+          ],
+          "center": [
+            714,
+            219
+          ],
+          "confidence": 0.94,
+          "testid": "menu-deals"
+        },
+        {
+          "id": "loyalty_nav",
+          "type": "link",
+          "label": "Loyalty",
+          "description": "Navigates to the loyalty screen",
+          "bbox": [
+            918,
+            210,
+            1002,
+            228
+          ],
+          "center": [
+            960,
+            219
+          ],
+          "confidence": 0.94,
+          "testid": "menu-loyalty"
+        },
+        {
+          "id": "receipts_nav",
+          "type": "button",
+          "label": "Receipts",
+          "description": "Navigates to the receipts screen (currently active)",
+          "bbox": [
+            860,
+            194,
+            1552,
+            244
+          ],
+          "center": [
+            1206,
+            219
+          ],
+          "confidence": 0.94,
+          "testid": "menu-receipts"
+        },
+        {
+          "id": "support_nav",
+          "type": "link",
+          "label": "Support",
+          "description": "Navigates to the support screen",
+          "bbox": [
+            670,
+            245,
+            758,
+            263
+          ],
+          "center": [
+            714,
+            254
+          ],
+          "confidence": 0.94,
+          "testid": "menu-support"
+        },
+        {
+          "id": "store_info_nav",
+          "type": "link",
+          "label": "Store Info",
+          "description": "Navigates to the store info screen",
+          "bbox": [
+            909,
+            245,
+            1011,
+            263
+          ],
+          "center": [
+            960,
+            254
+          ],
+          "confidence": 0.94,
+          "testid": "menu-store-info"
+        },
+        {
+          "id": "order_history_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Opens the order history view",
+          "bbox": [
+            592,
+            343,
+            1328,
+            389
+          ],
+          "center": [
+            960,
+            366
+          ],
+          "confidence": 0.95,
+          "testid": "receipts-history"
+        },
+        {
+          "id": "view_history_button",
+          "type": "button",
+          "label": "View History",
+          "description": "Navigates to the order history to view past orders",
+          "bbox": [
+            895,
+            516,
+            1025,
+            560
+          ],
+          "center": [
+            960,
+            538
+          ],
+          "confidence": 0.96
+        }
+      ],
+      "transitions": {
+        "view_history": "order_history",
+        "open_store_info": "store_info"
+      },
+      "screen_hash": "fffff00ff00ff00ff19ffffffffffe7ffe7ffffffffffffffffffffffffcf81c",
+      "is_dynamic": true,
+      "dom_id": "receipts",
+      "reference_screenshot": "screenshots\\explore_loyalty_open_receipts_1786522735020.png",
+      "app_id": "kiosk-2"
+    },
+    "store_info": {
+      "screen_id": "store_info",
+      "description": "Store and Kiosk Information screen displaying kiosk setup details in a POS lab environment.",
+      "elements": [
+        {
+          "id": "home_button",
+          "type": "button",
+          "label": "Home",
+          "description": "Navigates to the home screen",
+          "bbox": [
+            922,
+            115,
+            1048,
+            147
+          ],
+          "center": [
+            985,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "nav-home"
+        },
+        {
+          "id": "order_history_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Opens the order history view",
+          "bbox": [
+            1017,
+            115,
+            1225,
+            147
+          ],
+          "center": [
+            1121,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "nav-orders"
+        },
+        {
+          "id": "sign_out_button",
+          "type": "button",
+          "label": "Sign Out",
+          "description": "Signs the user out of the POS",
+          "bbox": [
+            1166,
+            115,
+            1348,
+            147
+          ],
+          "center": [
+            1257,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "signout-button"
+        },
+        {
+          "id": "kiosk_id_2_tab",
+          "type": "button",
+          "label": "KIOSK-ID-2",
+          "description": "Selects the KIOSK-ID-2 tab",
+          "bbox": [
+            589,
+            244,
+            835,
+            273
+          ],
+          "center": [
+            712,
+            259
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "products_link",
+          "type": "link",
+          "label": "Products",
+          "description": "Navigates to the products list",
+          "bbox": [
+            904,
+            172,
+            1016,
+            196
+          ],
+          "center": [
+            960,
+            184
+          ],
+          "confidence": 0.94,
+          "testid": "menu-products"
+        },
+        {
+          "id": "categories_link",
+          "type": "link",
+          "label": "Categories",
+          "description": "Navigates to the categories view",
+          "bbox": [
+            1137,
+            172,
+            1275,
+            196
+          ],
+          "center": [
+            1206,
+            184
+          ],
+          "confidence": 0.94,
+          "testid": "menu-categories"
+        },
+        {
+          "id": "deals_link",
+          "type": "link",
+          "label": "Deals",
+          "description": "Navigates to the deals view",
+          "bbox": [
+            672,
+            208,
+            756,
+            230
+          ],
+          "center": [
+            714,
+            219
+          ],
+          "confidence": 0.94,
+          "testid": "menu-deals"
+        },
+        {
+          "id": "loyalty_link",
+          "type": "link",
+          "label": "Loyalty",
+          "description": "Navigates to the loyalty view",
+          "bbox": [
+            918,
+            208,
+            1002,
+            230
+          ],
+          "center": [
+            960,
+            219
+          ],
+          "confidence": 0.94,
+          "testid": "menu-loyalty"
+        },
+        {
+          "id": "receipts_link",
+          "type": "link",
+          "label": "Receipts",
+          "description": "Navigates to the receipts view",
+          "bbox": [
+            1155,
+            208,
+            1257,
+            230
+          ],
+          "center": [
+            1206,
+            219
+          ],
+          "confidence": 0.94,
+          "testid": "menu-receipts"
+        },
+        {
+          "id": "support_link",
+          "type": "link",
+          "label": "Support",
+          "description": "Navigates to the support view",
+          "bbox": [
+            667,
+            242,
+            761,
+            266
+          ],
+          "center": [
+            714,
+            254
+          ],
+          "confidence": 0.94,
+          "testid": "menu-support"
+        },
+        {
+          "id": "store_info_tab",
+          "type": "button",
+          "label": "Store Info",
+          "description": "Selects the store info tab (current screen)",
+          "bbox": [
+            840,
+            240,
+            1080,
+            268
+          ],
+          "center": [
+            960,
+            254
+          ],
+          "confidence": 0.95,
+          "testid": "menu-store-info"
+        }
+      ],
+      "transitions": {
+        "select_kiosk_id_2": "support"
+      },
+      "screen_hash": "fffff00ff00ff00ff1fffffffffffffffffffffffffffffffffffffffffcf81c",
+      "is_dynamic": false,
+      "dom_id": "store_info",
+      "reference_screenshot": "screenshots\\explore_receipts_open_store_info_1786522770228.png",
+      "app_id": "kiosk-2"
+    },
+    "cart": {
+      "screen_id": "cart",
+      "description": "Cart and checkout screen showing a product with quantity controls, order totals, and payment button.",
+      "elements": [
+        {
+          "id": "home_button",
+          "type": "button",
+          "label": "Home",
+          "description": "Navigates to the home screen",
+          "bbox": [
+            923,
+            110,
+            1047,
+            152
+          ],
+          "center": [
+            985,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "nav-home"
+        },
+        {
+          "id": "order_history_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Navigates to order history",
+          "bbox": [
+            1022,
+            110,
+            1220,
+            152
+          ],
+          "center": [
+            1121,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "nav-orders"
+        },
+        {
+          "id": "sign_out_button",
+          "type": "button",
+          "label": "Sign Out",
+          "description": "Signs the user out",
+          "bbox": [
+            1190,
+            110,
+            1324,
+            152
+          ],
+          "center": [
+            1257,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "signout-button"
+        },
+        {
+          "id": "kiosk_id_2",
+          "type": "button",
+          "label": "KIOSK-ID-2",
+          "description": "Displays the kiosk identifier",
+          "bbox": [
+            591,
+            182,
+            835,
+            214
+          ],
+          "center": [
+            712,
+            198
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "products_link",
+          "type": "link",
+          "label": "Products",
+          "description": "Navigates to products",
+          "bbox": [
+            917,
+            177,
+            1003,
+            191
+          ],
+          "center": [
+            960,
+            184
+          ],
+          "confidence": 0.9,
+          "testid": "menu-products"
+        },
+        {
+          "id": "categories_link",
+          "type": "link",
+          "label": "Categories",
+          "description": "Navigates to categories",
+          "bbox": [
+            1158,
+            177,
+            1254,
+            191
+          ],
+          "center": [
+            1206,
+            184
+          ],
+          "confidence": 0.9,
+          "testid": "menu-categories"
+        },
+        {
+          "id": "deals_link",
+          "type": "link",
+          "label": "Deals",
+          "description": "Navigates to deals",
+          "bbox": [
+            681,
+            212,
+            747,
+            226
+          ],
+          "center": [
+            714,
+            219
+          ],
+          "confidence": 0.9,
+          "testid": "menu-deals"
+        },
+        {
+          "id": "loyalty_link",
+          "type": "link",
+          "label": "Loyalty",
+          "description": "Navigates to loyalty",
+          "bbox": [
+            920,
+            212,
+            1000,
+            226
+          ],
+          "center": [
+            960,
+            219
+          ],
+          "confidence": 0.9,
+          "testid": "menu-loyalty"
+        },
+        {
+          "id": "receipts_link",
+          "type": "link",
+          "label": "Receipts",
+          "description": "Navigates to receipts",
+          "bbox": [
+            1158,
+            212,
+            1254,
+            226
+          ],
+          "center": [
+            1206,
+            219
+          ],
+          "confidence": 0.9,
+          "testid": "menu-receipts"
+        },
+        {
+          "id": "support_link",
+          "type": "link",
+          "label": "Support",
+          "description": "Navigates to support",
+          "bbox": [
+            674,
+            247,
+            754,
+            261
+          ],
+          "center": [
+            714,
+            254
+          ],
+          "confidence": 0.9,
+          "testid": "menu-support"
+        },
+        {
+          "id": "store_info_link",
+          "type": "link",
+          "label": "Store Info",
+          "description": "Navigates to store info",
+          "bbox": [
+            912,
+            247,
+            1008,
+            261
+          ],
+          "center": [
+            960,
+            254
+          ],
+          "confidence": 0.9,
+          "testid": "menu-store-info"
+        },
+        {
+          "id": "continue_shopping_button",
+          "type": "button",
+          "label": "Continue Shopping",
+          "description": "Returns to product browsing",
+          "bbox": [
+            592,
+            337,
+            1328,
+            395
+          ],
+          "center": [
+            960,
+            366
+          ],
+          "confidence": 0.97,
+          "testid": "continue-shopping"
+        },
+        {
+          "id": "decrease_quantity_button",
+          "type": "stepper",
+          "label": "\u2212",
+          "description": "Decreases the item quantity",
+          "bbox": [
+            610,
+            520,
+            658,
+            571
+          ],
+          "center": [
+            633,
+            545
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "increase_quantity_button",
+          "type": "stepper",
+          "label": "+",
+          "description": "Increases the item quantity",
+          "bbox": [
+            700,
+            520,
+            748,
+            571
+          ],
+          "center": [
+            721,
+            545
+          ],
+          "confidence": 0.95
+        },
+        {
+          "id": "proceed_to_card_payment_button",
+          "type": "button",
+          "label": "Proceed to Card Payment",
+          "description": "Proceeds to card payment step",
+          "bbox": [
+            592,
+            837,
+            1328,
+            889
+          ],
+          "center": [
+            960,
+            863
+          ],
+          "confidence": 0.97,
+          "testid": "checkout-button"
+        }
+      ],
+      "transitions": {
+        "continue_shopping": "products",
+        "increment_nexora_phone_qty": "cart",
+        "decrement_nexora_phone_qty": "cart",
+        "increment_orionbook_qty": "cart",
+        "decrement_orionbook_qty": "cart",
+        "proceed_to_card_payment_button": "payment"
+      },
+      "screen_hash": "fffff01ff00ff00ff9fffffffffffbfffffffffffffffffff00ffdbffffff81f",
+      "is_dynamic": true,
+      "dom_id": "cart",
+      "reference_screenshot": "screenshots\\walkthrough_cart_with_item_1786523092.png",
+      "app_id": "kiosk-2"
+    },
+    "payment": {
+      "screen_id": "payment",
+      "description": "Card payment step showing order totals and a mock card number entry for completing checkout.",
+      "elements": [
+        {
+          "id": "home_button",
+          "type": "button",
+          "label": "Home",
+          "description": "Navigates to the home screen",
+          "bbox": [
+            915,
+            107,
+            1055,
+            155
+          ],
+          "center": [
+            985,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "nav-home"
+        },
+        {
+          "id": "order_history_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Navigates to order history",
+          "bbox": [
+            1018,
+            107,
+            1224,
+            155
+          ],
+          "center": [
+            1121,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "nav-orders"
+        },
+        {
+          "id": "sign_out_button",
+          "type": "button",
+          "label": "Sign Out",
+          "description": "Signs the user out",
+          "bbox": [
+            1156,
+            107,
+            1358,
+            155
+          ],
+          "center": [
+            1257,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "signout-button"
+        },
+        {
+          "id": "kiosk_id_2_button",
+          "type": "button",
+          "label": "KIOSK-ID-2",
+          "description": "Displays or selects the current kiosk ID",
+          "bbox": [
+            589,
+            184,
+            835,
+            213
+          ],
+          "center": [
+            712,
+            198
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "products_link",
+          "type": "link",
+          "label": "Products",
+          "description": "Navigates to products list",
+          "bbox": [
+            917,
+            176,
+            1003,
+            192
+          ],
+          "center": [
+            960,
+            184
+          ],
+          "confidence": 0.9,
+          "testid": "menu-products"
+        },
+        {
+          "id": "categories_link",
+          "type": "link",
+          "label": "Categories",
+          "description": "Navigates to categories",
+          "bbox": [
+            1158,
+            176,
+            1254,
+            192
+          ],
+          "center": [
+            1206,
+            184
+          ],
+          "confidence": 0.9,
+          "testid": "menu-categories"
+        },
+        {
+          "id": "deals_link",
+          "type": "link",
+          "label": "Deals",
+          "description": "Navigates to deals",
+          "bbox": [
+            692,
+            211,
+            736,
+            227
+          ],
+          "center": [
+            714,
+            219
+          ],
+          "confidence": 0.9,
+          "testid": "menu-deals"
+        },
+        {
+          "id": "loyalty_link",
+          "type": "link",
+          "label": "Loyalty",
+          "description": "Navigates to loyalty section",
+          "bbox": [
+            921,
+            211,
+            999,
+            227
+          ],
+          "center": [
+            960,
+            219
+          ],
+          "confidence": 0.9,
+          "testid": "menu-loyalty"
+        },
+        {
+          "id": "receipts_link",
+          "type": "link",
+          "label": "Receipts",
+          "description": "Navigates to receipts",
+          "bbox": [
+            1159,
+            211,
+            1253,
+            227
+          ],
+          "center": [
+            1206,
+            219
+          ],
+          "confidence": 0.9,
+          "testid": "menu-receipts"
+        },
+        {
+          "id": "support_link",
+          "type": "link",
+          "label": "Support",
+          "description": "Navigates to support",
+          "bbox": [
+            690,
+            246,
+            738,
+            262
+          ],
+          "center": [
+            714,
+            254
+          ],
+          "confidence": 0.9,
+          "testid": "menu-support"
+        },
+        {
+          "id": "store_info_link",
+          "type": "link",
+          "label": "Store Info",
+          "description": "Navigates to store info",
+          "bbox": [
+            913,
+            246,
+            1007,
+            262
+          ],
+          "center": [
+            960,
+            254
+          ],
+          "confidence": 0.9,
+          "testid": "menu-store-info"
+        },
+        {
+          "id": "back_to_cart_button",
+          "type": "button",
+          "label": "Back to Cart",
+          "description": "Returns to the shopping cart",
+          "bbox": [
+            613,
+            361,
+            1307,
+            415
+          ],
+          "center": [
+            960,
+            388
+          ],
+          "confidence": 0.95,
+          "testid": "payment-back"
+        },
+        {
+          "id": "mock_card_number_input",
+          "type": "input",
+          "label": "4111111111110001",
+          "description": "Enter the mock card number for payment",
+          "bbox": [
+            630,
+            708,
+            1290,
+            794
+          ],
+          "center": [
+            960,
+            751
+          ],
+          "confidence": 0.95,
+          "testid": "mock-card-number"
+        },
+        {
+          "id": "pay_with_mock_card_button",
+          "type": "button",
+          "label": "Pay with Mock Card",
+          "description": "Submits payment using the mock card",
+          "bbox": [
+            630,
+            788,
+            1290,
+            846
+          ],
+          "center": [
+            960,
+            817
+          ],
+          "confidence": 0.97,
+          "testid": "confirm-mock-card"
+        }
+      ],
+      "transitions": {
+        "pay_with_mock_card_button": "order_result"
+      },
+      "screen_hash": "fffff01ff00ff00ffbfffffffffffffffffffffffffff81ff81ffffffffff81f",
+      "is_dynamic": true,
+      "dom_id": "payment",
+      "reference_screenshot": "screenshots\\walkthrough_payment_hop0_1786523155.png",
+      "dependencies": [
+        {
+          "element_id": "pay_with_mock_card_button",
+          "requires": [
+            "mock_card_number_input"
+          ],
+          "reason": "Payment submission consumes the card number entered in the input field on this screen",
+          "prerequisite_steps": [
+            {
+              "action_type": "type",
+              "element_id": "mock_card_number_input",
+              "value": "4111111111110001"
+            }
+          ]
+        }
+      ],
+      "app_id": "kiosk-2"
+    },
+    "order_result": {
+      "screen_id": "order_result",
+      "description": "Order confirmation screen showing successful payment details with navigation options.",
+      "elements": [
+        {
+          "id": "home_button",
+          "type": "button",
+          "label": "Home",
+          "description": "Navigates to the home page",
+          "bbox": [
+            921,
+            104,
+            1049,
+            158
+          ],
+          "center": [
+            985,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "nav-home"
+        },
+        {
+          "id": "order_history_button",
+          "type": "button",
+          "label": "Order History",
+          "description": "Navigates to order history",
+          "bbox": [
+            1013,
+            104,
+            1229,
+            158
+          ],
+          "center": [
+            1121,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "nav-orders"
+        },
+        {
+          "id": "sign_out_button",
+          "type": "button",
+          "label": "Sign Out",
+          "description": "Signs the user out",
+          "bbox": [
+            1147,
+            104,
+            1367,
+            158
+          ],
+          "center": [
+            1257,
+            131
+          ],
+          "confidence": 0.95,
+          "testid": "signout-button"
+        },
+        {
+          "id": "kiosk_id_2",
+          "type": "button",
+          "label": "KIOSK-ID-2",
+          "description": "Displays or selects the kiosk identifier",
+          "bbox": [
+            589,
+            181,
+            835,
+            218
+          ],
+          "center": [
+            712,
+            199
+          ],
+          "confidence": 0.9
+        },
+        {
+          "id": "products_link",
+          "type": "link",
+          "label": "Products",
+          "description": "Navigates to products",
+          "bbox": [
+            916,
+            175,
+            1004,
+            193
+          ],
+          "center": [
+            960,
+            184
+          ],
+          "confidence": 0.92,
+          "testid": "menu-products"
+        },
+        {
+          "id": "categories_link",
+          "type": "link",
+          "label": "Categories",
+          "description": "Navigates to categories",
+          "bbox": [
+            1151,
+            175,
+            1261,
+            193
+          ],
+          "center": [
+            1206,
+            184
+          ],
+          "confidence": 0.92,
+          "testid": "menu-categories"
+        },
+        {
+          "id": "deals_link",
+          "type": "link",
+          "label": "Deals",
+          "description": "Navigates to deals",
+          "bbox": [
+            679,
+            210,
+            749,
+            228
+          ],
+          "center": [
+            714,
+            219
+          ],
+          "confidence": 0.92,
+          "testid": "menu-deals"
+        },
+        {
+          "id": "loyalty_link",
+          "type": "link",
+          "label": "Loyalty",
+          "description": "Navigates to loyalty program",
+          "bbox": [
+            916,
+            210,
+            1004,
+            228
+          ],
+          "center": [
+            960,
+            219
+          ],
+          "confidence": 0.92,
+          "testid": "menu-loyalty"
+        },
+        {
+          "id": "receipts_link",
+          "type": "link",
+          "label": "Receipts",
+          "description": "Navigates to receipts",
+          "bbox": [
+            1153,
+            210,
+            1259,
+            228
+          ],
+          "center": [
+            1206,
+            219
+          ],
+          "confidence": 0.92,
+          "testid": "menu-receipts"
+        },
+        {
+          "id": "support_link",
+          "type": "link",
+          "label": "Support",
+          "description": "Navigates to support",
+          "bbox": [
+            679,
+            245,
+            749,
+            263
+          ],
+          "center": [
+            714,
+            254
+          ],
+          "confidence": 0.92,
+          "testid": "menu-support"
+        },
+        {
+          "id": "store_info_link",
+          "type": "link",
+          "label": "Store Info",
+          "description": "Navigates to store info",
+          "bbox": [
+            912,
+            245,
+            1008,
+            263
+          ],
+          "center": [
+            960,
+            254
+          ],
+          "confidence": 0.92,
+          "testid": "menu-store-info"
+        },
+        {
+          "id": "go_to_home_page_button",
+          "type": "button",
+          "label": "Go to Home Page",
+          "description": "Navigates back to the home page",
+          "bbox": [
+            513,
+            847,
+            859,
+            903
+          ],
+          "center": [
+            686,
+            875
+          ],
+          "confidence": 0.95,
+          "testid": "go-home-after-order"
+        },
+        {
+          "id": "view_order_history_button",
+          "type": "button",
+          "label": "View Order History",
+          "description": "Navigates to the order history view",
+          "bbox": [
+            674,
+            847,
+            1044,
+            903
+          ],
+          "center": [
+            859,
+            875
+          ],
+          "confidence": 0.95,
+          "testid": "view-history-after-order"
+        }
+      ],
+      "transitions": {},
+      "screen_hash": "fffff00ff00ff00ff9fffffffffffffffffffffffffffffff9fffbfffffff81f",
+      "is_dynamic": true,
+      "dom_id": "order_result",
+      "reference_screenshot": "screenshots\\walkthrough_success_1786523190.png",
+      "app_id": "kiosk-2"
+    }
+  },
+  "apps": {
+    "kiosk-1": {
+      "app_id": "kiosk-1",
+      "label": "kiosk-1",
+      "entry_screen": "valuepass_card_station",
+      "url": "http://localhost:5173/?kiosk=kiosk-1",
+      "explored_at": "2026-08-11T13:12:13",
+      "screen_count": 1
+    },
+    "kiosk-2": {
+      "app_id": "kiosk-2",
+      "label": "kiosk-2",
+      "entry_screen": "login",
+      "url": "http://localhost:5173/?screenLayout=arm-reachable&flowMode=full",
+      "explored_at": "2026-08-12T13:56:57",
+      "screen_count": 12
+    }
+  }
+}

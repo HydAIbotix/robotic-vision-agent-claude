@@ -2641,11 +2641,21 @@ def _execute_run(run_id: str, req: RunRequest):
             ]
 
         if req.filter_tc:
+            # Honor the ORDER the caller listed test ids in — the Execution page lets the operator
+            # arrange the run queue (drag / move up-down) and the suite MUST execute in exactly that
+            # order, NOT test_id order. We walk filter_ids in order and append the matching case(s),
+            # de-duplicating so a prefix that overlaps an exact id can't run a test twice.
             filter_ids = [f.strip() for f in req.filter_tc.split(',') if f.strip()]
-            test_cases = [
-                tc for tc in all_cases
-                if any(tc["test_id"] == fid or tc["test_id"].startswith(fid) for fid in filter_ids)
-            ]
+            test_cases = []
+            seen: set[str] = set()
+            for fid in filter_ids:
+                # exact id first, else prefix match (e.g. "TC-VPS" → all VPS cases), order preserved
+                matches = [tc for tc in all_cases if tc["test_id"] == fid] or \
+                          [tc for tc in all_cases if tc["test_id"].startswith(fid)]
+                for tc in matches:
+                    if tc["test_id"] not in seen:
+                        seen.add(tc["test_id"])
+                        test_cases.append(tc)
         else:
             test_cases = all_cases
 

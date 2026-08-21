@@ -212,6 +212,30 @@ def run_validate_pipeline(
             "note":          "",
         }
 
+    # ── Node 2b: Error-banner guard (playwright; screen matched, no positive text assertion) ──
+    # A verify that only names expected_screen passes on screen identity alone — but the app can be
+    # on the RIGHT screen while showing a FAILURE banner ("No card found", "…is not issued", a
+    # decline). Without a positive expected_text to pin the outcome, a visible error surface MUST fail
+    # the step, else wrong-field / not-found / declined states silently PASS (observed: TC-VPS-002/003
+    # passed on a "no card found" / wrong-field state). Deterministic DOM read, zero LLM. Scoped to the
+    # no-expected_text case so it can never override an explicit content assertion (no regression).
+    if screen_match and not expected_text and backend == "playwright":
+        try:
+            err_text = robot.get_page_error_text()
+        except AttributeError:
+            err_text = ""
+        if err_text:
+            return {
+                "success":       False,
+                "screen_match":  screen_match,
+                "text_match":    None,
+                "method":        "error_banner",
+                "actual_screen": actual_screen,
+                "observation":   (f"On '{actual_screen}' but the app is showing a failure/error "
+                                  f"message: \"{err_text}\""),
+                "note":          "verify failed: on-screen error banner present",
+            }
+
     # All active nodes passed
     parts = []
     if screen_match:

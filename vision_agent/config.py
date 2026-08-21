@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     # (?cardServiceUrl=…) so the kiosk apps share smart-card balances/transactions
     # across machines. Blank → apps use per-browser localStorage (single-machine default).
     card_service_url: str = ""
+    # localStorage keys to PRESERVE across the between-test reset (reset_to_entry clears storage so
+    # each test starts unauthenticated / not mid-flow). Any key whose name CONTAINS one of these
+    # (case-insensitive, comma-separated) substrings is kept — so a smart card issued in one test is
+    # still present for a later top-up / balance-check test when the shared card service is offline
+    # (cards then live only in the kiosk's localStorage). Config-driven so no app-specific key is
+    # hardcoded in the robot layer. Blank → clear everything (original behaviour).
+    reset_preserve_storage_keys: str = "smart-cards,cardbalance"
     # Kiosk display layout forced during Playwright EXPLORATION (and playwright test runs) via a
     # ?screenLayout=… query param, so app_map coordinates are always learned at the SAME layout the
     # physical kiosk shows — immune to stale browser localStorage. The robotics-kiosk-pos app supports:
