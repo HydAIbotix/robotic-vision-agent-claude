@@ -16,7 +16,6 @@ Query it:          query_codebase("valid login credentials not working")
 """
 import os
 import re
-import shutil
 import zipfile
 import xml.etree.ElementTree as ET
 from html import unescape
@@ -270,28 +269,35 @@ def build_codebase_index():
 
     print(f"Extracted {len(all_documents)} searchable chunks.")
 
-    if PERSIST_DIR.exists():
-        try:
-            shutil.rmtree(PERSIST_DIR)
-        except PermissionError as e:
-            # On Windows a Chroma DB file can't be deleted while another process (usually THIS running
-            # backend, from an earlier repair query) still holds it open. Fail with a clear, actionable
-            # message instead of a cryptic WinError 32 / a half-deleted (corrupt) index.
-            raise RuntimeError(
-                f"Can't rebuild the RAG index — its folder is locked by a running process ({e}). "
-                f"Rebuild it right after RESTARTING the backend (before running any repair), or stop "
-                f"the backend and run `python -m repair_agent.parse_code_and_store`."
-            ) from e
-
     print("Generating embeddings and saving to ChromaDB...")
     embedding_model = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
 
-    Chroma.from_documents(
-        documents=all_documents,
-        embedding=embedding_model,
-        persist_directory=str(PERSIST_DIR)
-    )
-    print(f"Indexing complete! Database successfully persisted at {PERSIST_DIR}.")
+    # Reset the collection IN-PLACE rather than deleting the folder. On Windows the running backend
+    # keeps the Chroma sqlite open (a prior repair query), so `shutil.rmtree(PERSIST_DIR)` fails with
+    # WinError 32 and can leave a half-deleted, corrupt index. Reusing the same persistent client to
+    # drop + recreate the collection sidesteps the file lock entirely, so "Rebuild index" works while
+    # the backend is running — no restart required.
+    try:
+        db = Chroma(persist_directory=str(PERSIST_DIR), embedding_function=embedding_model)
+        try:
+            db.delete_collection()
+        except Exception as e:
+            print(f"  (could not drop old collection, continuing: {e})")
+        db = Chroma(persist_directory=str(PERSIST_DIR), embedding_function=embedding_model)
+        db.add_documents(all_documents)
+    except Exception as e:
+        # A previous rmtree that half-deleted the dir can leave it un-openable. As a fresh process
+        # holds no lock, fall back to a clean rebuild from scratch.
+        print(f"  In-place reset failed ({e}); rebuilding the index directory from scratch.")
+        import shutil
+        if PERSIST_DIR.exists():
+            shutil.rmtree(PERSIST_DIR, ignore_errors=True)
+        Chroma.from_documents(
+            documents=all_documents, embedding=embedding_model,
+            persist_directory=str(PERSIST_DIR),
+        )
+    print(f"Indexing complete! {len(all_documents)} chunks persisted at {PERSIST_DIR}.")
+    return len(all_documents)
 
 
 def _vector_db():

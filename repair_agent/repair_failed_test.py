@@ -22,7 +22,7 @@ import os
 import platform
 import re
 import subprocess
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -69,15 +69,6 @@ FAILED TEST / DEFECT:
 RETRIEVED CODE CONTEXT:
 {context}
 """
-
-
-def _emit(cb: Optional[ProgressCb], stage: str, status: str, **extra) -> None:
-    """Send one progress update ({stage, status, ...}) to the caller, if listening."""
-    if cb:
-        try:
-            cb({"stage": stage, "status": status, **extra})
-        except Exception:
-            pass
 
 
 def _npm_cmd() -> str:
@@ -133,13 +124,20 @@ def _retrieval_query(failure: str) -> str:
     code chunk out of the top results (measured: the buggy chunk went from rank ~11 → rank 0 once
     removed). The full failure text still goes to the LLM prompt for context; only the vector query
     is cleaned."""
-    q = re.sub(r"\bTC-[A-Za-z]+-\d+\b", " ", failure)
+    q = re.sub(r"\bTC-[A-Za-z0-9]+-\d+\b", " ", failure)   # strip TC-RPS-001 AND TC-E2E-001 style ids
     q = re.sub(r"\b(failed|failure|test case|test|step|steps|expected|observed|actual)\b", " ", q, flags=re.I)
     q = re.sub(r"\s+", " ", q).strip(" .:-")
     return q or failure
 
 
-def retrieve_context(failure: str, top_k: int = 4) -> tuple[str, list[dict]]:
+# File-neighborhood expansion tuning: when a SMALL support module is implicated, show Claude the whole
+# module. Large files (App.tsx) are skipped so context stays focused.
+_SMALL_FILE_MAX_CHUNKS = 25   # a file with ≤ this many indexed chunks is a "small module" → expand fully
+_EXPAND_FILES          = 2    # expand at most this many implicated small modules
+_MAX_CONTEXT_BLOCKS    = 16   # hard cap on chunks handed to the LLM
+
+
+def retrieve_context(failure: str, top_k: int = 6) -> tuple[str, list[dict]]:
     """Semantic search over the Chroma RAG index. Returns (prompt_text, structured_hits)."""
     if not PERSIST_DIR.exists():
         raise RuntimeError(
@@ -156,13 +154,30 @@ def retrieve_context(failure: str, top_k: int = 4) -> tuple[str, list[dict]]:
     code_docs = search(rq, k=top_k, where=code_where)
     general_docs = search(rq, k=2)
 
+    # FILE-NEIGHBORHOOD EXPANSION. A symptom-level failure query ("card not found cross-kiosk") often
+    # ranks the exact buggy function low, but ranks a SIBLING in the same small module high — and the
+    # fix is usually revealed by comparing the buggy line against its correct siblings (e.g. the wrong
+    # `/api/card/` lookup next to the correct `/api/cards` calls in src/lib/storage.ts). So for each
+    # small implicated module we pull ALL of its chunks. Big files (App.tsx) are skipped to stay focused.
+    expanded, seen_files = [], set()
+    for d in code_docs:
+        src = d.metadata.get("source")
+        if not src or src in seen_files:
+            continue
+        siblings = search(rq, k=60, where={"source": src})
+        if 0 < len(siblings) <= _SMALL_FILE_MAX_CHUNKS:
+            expanded.extend(siblings)
+            seen_files.add(src)
+        if len(seen_files) >= _EXPAND_FILES:
+            break
+
     docs, seen = [], set()
-    for d in list(code_docs) + list(general_docs):
+    for d in list(code_docs) + expanded + list(general_docs):
         key = (d.metadata.get("source"), d.metadata.get("start_line"), d.page_content[:40])
         if key not in seen:
             seen.add(key)
             docs.append(d)
-        if len(docs) >= top_k + 2:
+        if len(docs) >= _MAX_CONTEXT_BLOCKS:
             break
 
     hits: list[dict] = []
@@ -211,25 +226,39 @@ def propose_patch(failure: str, context: str) -> RepairPatch:
 
 
 def _demo_fallback_patch() -> Optional[RepairPatch]:
-    """Deterministic fallback for the intentional RPS login bug used in the demo.
+    """Deterministic fallbacks for the three intentional demo bugs (used only when Claude returns no
+    usable patch, e.g. no API key / rate-limited) so the customer demo never dead-ends.
 
-    The planted bug compares the password against `<pw>-bug`, so a VALID user is rejected. Removing
-    the `-bug` suffix restores login. Handles BOTH codebase variants — arm-reachable-area uses
-    `normalizedPassword`, main uses `password` — so the fallback works whichever base the demo runs
-    on. Kept small + specific so it can never match unrelated code."""
+    Each rule is a small, exact find/replace that can only match its planted bug:
+      • login   — `user.password !== `${pw}-bug`` rejects a valid user (pw = password | normalizedPassword).
+      • products — Add to Cart passes a hardcoded 0, so the cart never fills.
+
+    NOTE: the cross-kiosk card-sharing design bug (`demo/rps-design-bug`, wrong `/api/card/` endpoint in
+    src/lib/storage.ts) has NO fallback ON PURPOSE — it's the showcase for Claude reading the design doc
+    ("a card issued at kiosk-1 can be validated and charged at kiosk-2") + the sibling `/api/cards` calls
+    and reasoning out the fix itself.
+    """
     app = CODEBASE_DIR / "src" / "App.tsx"
     if not app.exists():
         return None
     text = app.read_text(encoding="utf-8")
+
+    rules: list[tuple[str, str, str]] = []
     for pw in ("normalizedPassword", "password"):
-        bug = f"user.password !== `${{{pw}}}-bug`"
-        if bug in text:
-            return RepairPatch(
-                file_path=str(app),
-                find=bug,
-                replace=f"user.password !== {pw}",
-                explanation=f"Login compared the password against {pw} + '-bug', rejecting valid credentials; compare against the real password.",
-            )
+        rules.append((
+            f"user.password !== `${{{pw}}}-bug`",
+            f"user.password !== {pw}",
+            f"Login compared the password against {pw} + '-bug', rejecting valid credentials; compare against the real password.",
+        ))
+    rules.append((
+        "onAddToCart(product, 0)",
+        "onAddToCart(product, quantity)",
+        "Add to Cart passed a hardcoded 0 instead of the selected quantity, so the cart never filled; pass the chosen quantity.",
+    ))
+
+    for find, replace, why in rules:
+        if text.count(find) == 1:   # exact + unique → safe to apply
+            return RepairPatch(file_path=str(app), find=find, replace=replace, explanation=why)
     return None
 
 
@@ -315,6 +344,22 @@ def _branch_name(test_id: str, suffix: str = "") -> str:
     return f"{base}-{suffix}" if suffix else base
 
 
+def _current_branch() -> str:
+    """The branch the codebase is on right now (the branch the failing test ran against), or "" if
+    detached. This becomes the PR base so the fix branch diffs against the SAME demo bug branch the
+    app was on — essential when several demo bug branches exist (login/products/design)."""
+    name = _git(["rev-parse", "--abbrev-ref", "HEAD"]).get("output", "").strip()
+    return "" if name in ("", "HEAD") else name
+
+
+def _pr_base(current: str) -> str:
+    """PR base = the current demo branch, unless we're already on a repair branch (or detached), in
+    which case fall back to the configured base so a fix never bases off another fix branch."""
+    if current and not current.startswith("repair/"):
+        return current
+    return settings.repair_pr_base
+
+
 def prepare_pr(patch: RepairPatch, target: Path, failure: str, test_id: str, branch_suffix: str = "") -> dict:
     """Create a local branch + commit for the fix and return the diff + prepared PR fields.
 
@@ -331,6 +376,8 @@ def prepare_pr(patch: RepairPatch, target: Path, failure: str, test_id: str, bra
     if blocked:
         return {"prepared": False, "reason": f"repo not in a clean state — {blocked}", "diff": diff}
 
+    # Capture the demo branch we're on NOW (before checkout -B switches HEAD) → PR base.
+    base_branch = _pr_base(_current_branch())
     branch = _branch_name(test_id, branch_suffix)
     title = f"Auto-repair: fix {test_id or 'kiosk test'}"
     body = (
@@ -351,7 +398,7 @@ def prepare_pr(patch: RepairPatch, target: Path, failure: str, test_id: str, bra
     return {
         "prepared": committed,
         "branch": branch,
-        "base": settings.repair_pr_base,
+        "base": base_branch,
         "remote": settings.repair_pr_remote,
         "commit": head,
         "title": title,
@@ -417,72 +464,80 @@ def open_pull_request(branch: str, base: str, title: str, body: str) -> dict:
     }
 
 
+def delete_pull_request(branch: str) -> dict:
+    """Tear down a raised PR so repeated demo runs don't pile up branches/PRs on GitHub.
+
+    Deleting the head branch on the remote auto-closes any open PR for it (GitHub behaviour), so the
+    gh-less path just does `git push origin --delete <branch>`. If `gh` is present we also `gh pr
+    close --delete-branch` for a clean close. The local repair branch is removed too (never delete
+    the base demo bug branch — it's reused). Never raises; returns a result dict.
+    """
+    remote = settings.repair_pr_remote
+    if not branch or branch.startswith("demo/") or not branch.startswith("repair/"):
+        return {"deleted": False, "output": f"refusing to delete non-repair branch '{branch}'"}
+
+    logs: list[str] = []
+
+    # Best-effort: if gh is available, close the PR and delete its branch in one step.
+    gh = _run(["gh", "pr", "close", branch, "--delete-branch"], CODEBASE_DIR)
+    if gh.get("output"):
+        logs.append(gh["output"])
+
+    # Delete the remote head branch (closes any open PR pointing at it).
+    rd = _git(["push", remote, "--delete", branch])
+    logs.append(rd.get("output", ""))
+    remote_deleted = rd["ok"]
+
+    # Delete the local repair branch too (switch off it first if we're on it).
+    if _current_branch() == branch:
+        _git(["checkout", settings.repair_pr_base])
+    _git(["branch", "-D", branch])
+
+    return {
+        "deleted": bool(remote_deleted or gh["ok"]),
+        "remote_deleted": remote_deleted,
+        "branch": branch,
+        "output": "\n".join(x for x in logs if x),
+    }
+
+
 # ── Orchestration ────────────────────────────────────────────────────────────────
 
 def run_repair(failure: str, test_id: str = "", *, apply: bool = True, auto_pr: bool = False,
                branch_suffix: str = "", progress_cb: Optional[ProgressCb] = None) -> dict:
-    """Run the full retrieve → diagnose → apply → test → build → pr-prep pipeline.
+    """Drive the Auto-Repair LangGraph (retrieve → diagnose → apply → test → build → pr-prep).
 
-    When auto_pr is True and the build is green, the prepared PR is also pushed + opened
-    automatically. Returns a structured result dict (also streamed stage-by-stage via progress_cb).
+    Thin wrapper over the compiled StateGraph in repair_agent/agent.py: it registers the progress
+    callback on the broadcaster (callables stay out of graph state), invokes the graph, and reshapes
+    the final state into the same result dict the API/UI already consumes. When auto_pr is True and
+    the build is green, the prepared PR is pushed + opened inside the pr node. Behaviour is identical
+    to the original linear pipeline; only the structure is now agentic.
     """
-    result: dict = {"failure": failure, "test_id": test_id, "success": False, "stages": {}}
+    # Lazy imports avoid a circular import at module load (nodes import from this module).
+    import uuid
+    from repair_agent.agent import create_repair_agent
+    from repair_agent import broadcaster
 
-    # 1. RETRIEVE
-    _emit(progress_cb, "retrieve", "running")
-    context, hits = retrieve_context(failure)
-    result["stages"]["retrieve"] = {"status": "done", "hits": hits}
-    _emit(progress_cb, "retrieve", "done", hits=hits)
+    rid = uuid.uuid4().hex   # per-invocation key for the progress broadcaster
+    broadcaster.register(rid, progress_cb)
+    try:
+        graph = create_repair_agent()
+        final = graph.invoke({
+            "repair_id": rid, "failure": failure, "test_id": test_id,
+            "apply": apply, "auto_pr": auto_pr, "branch_suffix": branch_suffix,
+            "stages": {},
+        })
+    finally:
+        broadcaster.unregister(rid)
 
-    # 2. DIAGNOSE (Claude)
-    _emit(progress_cb, "diagnose", "running")
-    patch = propose_patch(failure, context)
-    patch_dict = asdict(patch)
-    result["stages"]["diagnose"] = {"status": "done", "patch": patch_dict}
-    _emit(progress_cb, "diagnose", "done", patch=patch_dict)
-
+    result: dict = {
+        "failure": failure,
+        "test_id": test_id,
+        "success": bool(final.get("success")),
+        "stages": final.get("stages", {}),
+    }
     if not apply:
         result["dry_run"] = True
-        return result
-
-    # Guard: never mutate a repo that is mid-merge / mid-rebase / has conflicts. Editing App.tsx and
-    # committing on top of that state produced a garbage "fix" branch carrying a whole merge. Stop
-    # here with a clear message; the operator resolves the repo, then re-runs.
-    blocked = _repo_blocked_reason()
-    if blocked:
-        msg = (f"Repository is not in a clean state: {blocked}. Skipped applying the fix and the PR "
-               f"so the branch can't be corrupted. Clean the repo (see the message), then re-run.")
-        result["stages"]["apply"] = {"status": "failed", "reason": blocked, "observation": msg}
-        result["error"] = msg
-        _emit(progress_cb, "apply", "failed", reason=blocked, observation=msg)
-        return result
-
-    # 3. APPLY
-    _emit(progress_cb, "apply", "running")
-    target = apply_patch(patch)
-    rel = os.path.relpath(str(target), str(CODEBASE_DIR)).replace("\\", "/")
-    result["stages"]["apply"] = {"status": "done", "file": rel}
-    _emit(progress_cb, "apply", "done", file=rel)
-
-    # 4. TEST — type-check (the app ships no unit-test runner); build below is the final gate
-    _emit(progress_cb, "test", "running")
-    test = _unit_test(CODEBASE_DIR)
-    result["stages"]["test"] = {"status": "done" if test["ok"] else "warn", **test}
-    _emit(progress_cb, "test", "done" if test["ok"] else "warn", **test)
-
-    # 5. BUILD (tsc + vite) — the real validation gate
-    _emit(progress_cb, "build", "running")
-    build = _run([_npm_cmd(), "run", "build"], CODEBASE_DIR)
-    result["stages"]["build"] = {"status": "done" if build["ok"] else "failed", **build}
-    _emit(progress_cb, "build", "done" if build["ok"] else "failed", **build)
-
-    # 6. PR PREP (local branch + commit + diff). Auto-open when auto_pr and the build is green.
-    _emit(progress_cb, "pr", "running")
-    pr = prepare_pr(patch, target, failure, test_id, branch_suffix=branch_suffix)
-    if auto_pr and pr.get("prepared") and build["ok"]:
-        pr["opened"] = open_pull_request(pr["branch"], pr["base"], pr["title"], pr["body"])
-    result["stages"]["pr"] = {"status": "done" if pr.get("prepared") else "warn", **pr}
-    _emit(progress_cb, "pr", "done" if pr.get("prepared") else "warn", **pr)
-
-    result["success"] = bool(build["ok"])
+    if final.get("error"):
+        result["error"] = final["error"]
     return result

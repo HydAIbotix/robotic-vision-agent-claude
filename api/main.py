@@ -397,6 +397,60 @@ def start_repair(req: RepairRequest):
     return {"repair_id": repair_id, "status": "pending"}
 
 
+class RepairIndexState:
+    building = False
+    last_message = ""
+
+
+# NOTE: the literal-path index routes MUST be declared before `GET /api/repair/{repair_id}`,
+# otherwise FastAPI matches `/api/repair/index` as get_repair(repair_id="index") → 404.
+@app.post("/api/repair/index", status_code=202)
+def build_repair_index():
+    """(Re)build the Chroma RAG index over the live kiosk app + docs, in the background."""
+    if RepairIndexState.building:
+        return {"status": "building", "message": "Index build already in progress."}
+
+    def _build():
+        from repair_agent.parse_code_and_store import build_codebase_index, CODEBASE_DIR, PERSIST_DIR
+        RepairIndexState.building = True
+        RepairIndexState.last_message = "Building index…"
+        try:
+            n = build_codebase_index()
+            RepairIndexState.last_message = (
+                f"Indexed {n} chunks from {CODEBASE_DIR}" if n
+                else f"Indexed {CODEBASE_DIR} → {PERSIST_DIR}"
+            )
+        except Exception as e:
+            RepairIndexState.last_message = f"Index build failed: {e}"
+        finally:
+            RepairIndexState.building = False
+
+    threading.Thread(target=_build, daemon=True).start()
+    return {"status": "building"}
+
+
+@app.get("/api/repair/index")
+def repair_index_status():
+    from repair_agent.parse_code_and_store import PERSIST_DIR
+    return {
+        "building": RepairIndexState.building,
+        "exists":   PERSIST_DIR.exists(),
+        "message":  RepairIndexState.last_message,
+        "persist_dir": str(PERSIST_DIR),
+    }
+
+
+@app.get("/api/repair")
+def list_repairs():
+    """Dashboard feed: every repair job this backend has run this session, newest first.
+    Each entry is the full job (stages + result) so the UI can render live + historical
+    pipelines without a per-job poll. In-memory only — cleared on backend restart."""
+    with _repair_lock:
+        jobs = [dict(j) for j in _repair_jobs.values()]
+    jobs.sort(key=lambda j: j.get("created_at") or "", reverse=True)
+    return jobs
+
+
 @app.get("/api/repair/{repair_id}")
 def get_repair(repair_id: str):
     with _repair_lock:
@@ -431,42 +485,27 @@ def open_repair_pr(repair_id: str, body: OpenPrRequest):
     return outcome
 
 
-class RepairIndexState:
-    building = False
-    last_message = ""
+@app.post("/api/repair/{repair_id}/delete-pr")
+def delete_repair_pr(repair_id: str):
+    """Tear down a raised PR (delete its remote + local head branch) so repeated demo runs don't pile
+    up branches/PRs on GitHub. Only touches the repair/* fix branch — never the base demo bug branch."""
+    with _repair_lock:
+        job = _repair_jobs.get(repair_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Unknown repair job.")
+    pr = ((job.get("result") or {}).get("stages") or {}).get("pr") or {}
+    branch = pr.get("branch")
+    if not branch:
+        raise HTTPException(status_code=400, detail="No PR branch recorded for this job.")
 
-
-@app.post("/api/repair/index", status_code=202)
-def build_repair_index():
-    """(Re)build the Chroma RAG index over the live kiosk app + docs, in the background."""
-    if RepairIndexState.building:
-        return {"status": "building", "message": "Index build already in progress."}
-
-    def _build():
-        from repair_agent.parse_code_and_store import build_codebase_index, CODEBASE_DIR, PERSIST_DIR
-        RepairIndexState.building = True
-        RepairIndexState.last_message = "Building index…"
-        try:
-            build_codebase_index()
-            RepairIndexState.last_message = f"Indexed {CODEBASE_DIR} → {PERSIST_DIR}"
-        except Exception as e:
-            RepairIndexState.last_message = f"Index build failed: {e}"
-        finally:
-            RepairIndexState.building = False
-
-    threading.Thread(target=_build, daemon=True).start()
-    return {"status": "building"}
-
-
-@app.get("/api/repair/index")
-def repair_index_status():
-    from repair_agent.parse_code_and_store import PERSIST_DIR
-    return {
-        "building": RepairIndexState.building,
-        "exists":   PERSIST_DIR.exists(),
-        "message":  RepairIndexState.last_message,
-        "persist_dir": str(PERSIST_DIR),
-    }
+    from repair_agent.repair_failed_test import delete_pull_request
+    outcome = delete_pull_request(branch)
+    with _repair_lock:
+        prj = _repair_jobs[repair_id].setdefault("result", {}).setdefault("stages", {}).setdefault("pr", {})
+        prj["deleted"] = outcome                       # record the deletion outcome
+        if outcome.get("deleted"):
+            prj.pop("opened", None)                     # the PR/branch is gone → drop the "View PR" link
+    return outcome
 
 
 # ── Test Cases ────────────────────────────────────────────────────────────────

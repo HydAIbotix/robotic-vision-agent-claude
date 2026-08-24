@@ -32,7 +32,7 @@ Three operational phases plus supporting agents:
 ## Tech stack
 
 - **Python ≥ 3.11**, build backend `hatchling` (only `vision_agent` is packaged as a wheel).
-- **Agent framework: LangGraph** (`langgraph>=0.2`) — four independent compiled `StateGraph`s.
+- **Agent framework: LangGraph** (`langgraph>=0.2`) — five independent compiled `StateGraph`s.
 - **LLM: Anthropic Claude, `claude-opus-4-8` uniformly.** No OpenAI. AWS path uses Bedrock
   (`ChatBedrockConverse`, `bedrock_model_id=anthropic.claude-opus-4-8`). Chosen by `VISION_BACKEND`
   (`anthropic` | `bedrock`).
@@ -66,9 +66,12 @@ test_runner/             Phase 2 — test execution (LangGraph)
   nodes/                 load_test_case · parse_steps (3-tier planner) · run_vision_step · run_backend_step · conclusive_verdict · finalize_tests
   reader/excel_reader.py
 defect_agent/            Auto defect intelligence (LangGraph): evaluate → defect_intelligence → publish
-repair_agent/            Self-healing arm of defect intelligence (NOT LangGraph):
+repair_agent/            Self-healing arm of defect intelligence — LangGraph StateGraph:
+  agent.py state.py broadcaster.py   compiled graph + state + progress sink (callables out of state)
+  nodes/                 retrieve · diagnose · apply(+guard) · unit_test · build · prepare_pr
   parse_code_and_store.py  RAG index — Chroma + HuggingFace over the LIVE app + docs (POC code, kept as-is)
-  repair_failed_test.py    retrieve → Claude diagnose → apply → type-check → build → PR-prep (PR push gated)
+  repair_failed_test.py    the tool/helper library the nodes call (RAG search, Claude patch, apply,
+                           tsc/vite, PR prep/open/delete); `run_repair` is a thin graph-driving wrapper
 supervisor/              Parallel multi-robot orchestrator — ThreadPoolExecutor (NOT LangGraph)
 vision_agent/            Core Tier-3 vision sub-agent (original README subject)
   agent.py state.py config.py llm.py prompts.py screen_cache.py
@@ -120,11 +123,15 @@ local PNGs), `generate_test_cases.py` (writes 50 sample TCs to Excel), `inspect_
   dependencies, reference screenshot) plus a `keyboard_map` used by `type_text`. It is **gitignored**
   (removed from tracking) — it's generated, per-environment data.
 
-- **Four LangGraph agents, one thread orchestrator.** Nodes are pure `state -> dict` partial
+- **Five LangGraph agents, one thread orchestrator.** Nodes are pure `state -> dict` partial
   updates; routing via `add_conditional_edges` + small `_route_*` predicates. TestRunner nests
-  VisionAgent as its Tier-3 fallback. `api/main.py` runs TestRunner + DefectAgent in daemon threads
-  and streams `test_started` / `step_result` / defect events over WebSocket
-  (`test_runner/broadcaster.py` maps run_id → callback, keeping callables out of graph state).
+  VisionAgent as its Tier-3 fallback. The Auto-Repair agent (`repair_agent/agent.py`) is the fifth
+  StateGraph: `retrieve → diagnose → guard → apply → unit_test → build → prepare_pr` with conditional
+  edges for dry-run (stop after diagnose) and a dirty-repo guard (stop before apply). `api/main.py`
+  runs TestRunner + DefectAgent + Auto-Repair in daemon threads and streams `test_started` /
+  `step_result` / defect / `repair_started` / `repair_done` events over WebSocket. Each agent keeps
+  callables out of graph state via a broadcaster mapping an id → callback
+  (`test_runner/broadcaster.py` by run_id, `repair_agent/broadcaster.py` by repair_id).
 
 ---
 
@@ -148,9 +155,11 @@ Config `GET/PUT /config`, `PATCH /config/robot`, `PATCH /config/camera`, `PATCH 
 `POST /tc-plan`, `DELETE /tc-plan/{id}` · Exploration `POST /explore` (spawns `run_explorer.py`),
 `GET /explore/{id}`, `GET/PATCH /explore-config` · App map `GET/DELETE /app-map`,
 `DELETE /app-map/{app_id}` · `POST /reset` (clears runs/results/plans/cases; preserves
-exploration + config) · Auto-Repair `POST /repair` (start job), `GET /repair/{id}` (poll stages),
-`POST /repair/{id}/open-pr` (GATED push+PR, confirm=true), `POST|GET /repair/index` (build/status of
-the Chroma RAG index).
+exploration + config) · Auto-Repair `GET /repair` (dashboard list, newest first), `POST /repair`
+(start job — auto-repair fires automatically on a failed run; manual start still available but the UI
+no longer calls it), `GET /repair/{id}` (poll stages), `POST /repair/{id}/open-pr` (GATED push+PR,
+confirm=true), `POST /repair/{id}/delete-pr` (delete the pushed fix branch → closes the PR, for
+repeatable demos), `POST|GET /repair/index` (build/status of the Chroma RAG index).
 
 ---
 
@@ -550,11 +559,144 @@ fired.) Fixes:
   `demo/rps-login-bug`. Origin still has stale `origin/repair/tc-rps-001-fix` / `origin/demo/rps-login-bug`
   from earlier runs — harmless (unique names avoid collisions now); delete them on GitHub if desired.
 
+### Recent progress (2026-08-25) — Auto-Repair page = repairs dashboard + lock-proof index rebuild
+
+- **The Auto-Repair page is now a repairs DASHBOARD, not a manual trigger.** Repairs already run
+  automatically on a failed test (`auto_repair_on_failure`), so the old manual "Failed test description +
+  Run Auto-Repair" form (with a hardcoded `DEFAULT_FAILURE` example) was both redundant and confusing —
+  it looked like "one issue is always shown" when it was just prefill. Removed. The page
+  (`../kiosk-test-studio/src/pages/AutoRepair.tsx`) now polls `GET /api/repair` every 2.5s and lists every
+  repair this backend session has run, newest first — each row shows **test id · auto/manual · source
+  run_id · relative time · failure summary** and expands to the live 6-stage pipeline + result banner +
+  gated Open-PR button. Newest repair auto-expands; empty state explains repairs appear when a test fails.
+  The standalone window Live Monitor pops (`?repair=<id>`) reuses the SAME card (locked open) — so the
+  auto-triggered flow is unchanged.
+- **Route-ordering gotcha (fixed):** the literal-path `GET /api/repair/index` MUST be declared before
+  the parameterized `GET /api/repair/{repair_id}`, or FastAPI matches `/api/repair/index` as
+  `get_repair(repair_id="index")` → 404. That 404 made the index-status poll never see `building:false`,
+  so the UI spun on "Indexing…" even after the build finished. The index routes now sit above
+  `{repair_id}`; a `TestClient` check confirms `/api/repair/index`→200, `/api/repair`→200, unknown id→404.
+- **New backend endpoint `GET /api/repair`** (`api/main.py` `list_repairs`) returns all `_repair_jobs`
+  (full stages + result) sorted by `created_at` desc. In-memory only → **repair history resets on backend
+  restart** (documented in the empty state). `POST /api/repair` (manual start) still exists but the UI no
+  longer calls it; `client.ts` dropped `startRepair`, added `listRepairs`.
+- **Index rebuild is now lock-proof — no restart needed.** The old `build_codebase_index` did
+  `shutil.rmtree(PERSIST_DIR)` then `Chroma.from_documents`, which on Windows hit `WinError 32` (the running
+  backend holds the Chroma sqlite open) and could leave a half-deleted, corrupt index — the "Rebuild index
+  seems stuck" symptom. It now resets the collection **in-place** via the same persistent client
+  (`Chroma(...).delete_collection()` → new `Chroma(...).add_documents(...)`), sidestepping the file lock, and
+  returns the chunk count (surfaced in the index status message + the UI chip). "Rebuild index" works while
+  the backend runs. (Supersedes the run-23 "rebuild only after restart" note.)
+
+### Recent progress (2026-08-25) — repair is now a 5th LangGraph agent · 2 more demo bugs · delete-PR · Agentic View
+
+- **Auto-Repair is now a real LangGraph StateGraph** (`repair_agent/agent.py` + `state.py` + `nodes/` +
+  `broadcaster.py`), matching the other four agents. Nodes are pure `state -> dict` updates calling the
+  same tested helpers in `repair_failed_test.py`; `run_repair()` is now a thin wrapper that registers the
+  progress callback on `repair_agent.broadcaster` (callables stay OUT of graph state, keyed by a
+  per-invocation id), invokes the compiled graph, and reshapes the final state into the **identical**
+  result dict the API/UI already consumes. Conditional edges: dry-run stops after `diagnose`; a dirty-repo
+  guard stops before `apply`. Verified: dry-run streams `retrieve/diagnose` then ends, result shape +
+  Claude's minimal patch unchanged. No API changes; no regression.
+- **Two more intentional demo bugs, each on its OWN branch off `main`** (join the existing
+  `demo/rps-login-bug`): `demo/rps-products-bug` — Add-to-Cart passes a hardcoded `0` (`onAddToCart(product,
+  0)`) so the cart never fills (test: a purchase/E2E); `demo/rps-design-bug` — **cross-kiosk card sharing
+  broken**: `src/lib/storage.ts::refreshCard` hits the singular `/api/card/${num}` instead of the shared card
+  service's `/api/cards/${num}`, so a card issued at the SmartCardStation returns 404 at the Kiosk POS and is
+  dropped from cache ("card not found") — violating the design doc's "a card issued at kiosk-1 can be
+  validated and charged at kiosk-2" (test: **TC-E2E-001**). Both are single-line diffs off main with
+  **unchanged testids** (app_map/plans stay valid).
+- **The design/card bug has NO fallback ON PURPOSE** — it's the showcase for Claude reading the design doc +
+  the sibling `/api/cards` calls and reasoning out the endpoint fix itself. `_demo_fallback_patch` covers only
+  login + products (so those still work if Claude is down). To make the no-fallback path reliable, two general
+  fixes: (a) **file-neighborhood expansion** in `retrieve_context` — when a SMALL support module is implicated
+  (≤25 chunks, e.g. `storage.ts`), pull its WHOLE module so Claude sees the buggy line next to its correct
+  siblings (App.tsx is skipped to stay focused); the code `top_k` is now 6 and `_retrieval_query` also strips
+  `TC-E2E-001`-style ids. (b) **`invoke_json` now recovers a prose-wrapped JSON object** (`_extract_json_object`
+  scans each `{` and returns the first that actually parses — Claude often prefixes analysis whose backticks
+  contain `${num}`). Verified: 3/3 runs produce the exact `/api/card/`→`/api/cards/` fix. Benefits all agents.
+- ⚠️ **Rebuild the RAG index after checking out a demo branch** — the index reflects the code on disk AT BUILD
+  TIME, so the buggy line must be indexed for retrieval to surface it. **Demo flow:** check out the bug's
+  branch → **rebuild index** (Studio button / `POST /api/repair/index`) → run its test → watch auto-repair.
+- **PR base is now dynamic** = the branch the app is on when the test fails (`_current_branch()` /
+  `_pr_base()`), not a hardcoded `demo/rps-login-bug`. This is REQUIRED now that several demo bug branches
+  exist — the fix branch diffs cleanly against whichever demo branch was checked out (falls back to
+  `settings.repair_pr_base` if detached or already on a `repair/*` branch).
+- **Delete-PR** (`POST /api/repair/{id}/delete-pr` → `delete_pull_request`): deletes the pushed `repair/*`
+  head branch on origin (which closes the PR) + the local branch; refuses to touch `demo/*` or non-repair
+  branches. Surfaced as a two-click **🗑 Delete PR** button next to **↗ View PR** on the Auto-Repair
+  dashboard, so repeated demo runs don't pile up PRs.
+- **New "Agentic View" page** (`../kiosk-test-studio/src/pages/AgenticView.tsx`, nav under Overview) — a
+  read-only, big-monitor command center for customer demos: a flowing agent pipeline (App Explorer → Test
+  Runner → Defect Intelligence → Auto-Repair, plus Vision/Supervisor support chips) with live per-agent
+  status (idle/working/complete/findings), headline KPIs (screens mapped, tests executed, defects,
+  auto-repaired), a pass-rate donut, the 0-LLM steady-state story, and a live activity feed. It polls
+  `GET /runs` + `/repair` + `/app-map` + `/runs/{id}/defects` every 3s and **starts/changes nothing** — pure
+  visualization, so it can't regress anything. Self-contained inline styles + keyframes; dark-palette CSS vars.
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login
   loop). Thread intake credentials through `cred_hint`; `.env` holds a real `ANTHROPIC_API_KEY` and is
   gitignored — never expose or commit it.
+
+---
+
+## How the Auto-Repair agent works (retrieve → diagnose → apply → verify → PR)
+
+The end-to-end flow, worked against the TC-RPS-001 login example. Only DIAGNOSE calls Claude;
+retrieval is pure Chroma + HuggingFace.
+
+**0. Trigger — the failed run, not a button.** On a failed run, `api/main.py`'s completion path
+(gated by `auto_repair_on_failure`) spawns `_run_auto_repair(...)` for the FIRST failed test, mints a
+`repair-<8hex>` job, broadcasts `repair_started` (pops the standalone window), and calls `run_repair`.
+`_failure_text_for(tr)` turns the failed `TestResult` into a plain-English defect:
+`"{test_id} failed. {summary}. {vision_summary} Failing steps: {≤3 failed-step observations}"`. That
+raw string flows through the whole pipeline.
+
+**1. RETRIEVE (RAG, no Claude)** — `repair_agent/repair_failed_test.py::retrieve_context`:
+- `_retrieval_query()` strips test-harness jargon from the failure before embedding — the test id
+  (`TC-RPS-001`) and words like `failed/failure/test/step/expected/observed/actual`. Those match the
+  test WORKBOOK far more than the code (measured: buggy chunk rank ~11 → 0 once stripped). Only the
+  **vector query** is cleaned; the **full raw failure** still goes to Claude.
+- Two similarity searches over Chroma, embedded by HuggingFace `all-MiniLM-L6-v2`: a code-filtered one
+  `search(rq, k=4, where={"type":{"$in":["code_block","code_file"]}})` (source only — lockfiles/doc
+  can't crowd out code) plus `search(rq, k=2)` unfiltered for product context. Concatenated
+  **code-first**, deduped by `(source, start_line, content-prefix)`, capped at `top_k+2`.
+- Hits are whole logical units: at index time `parse_code_with_tree_sitter` uses a Tree-sitter TS query
+  capturing function/class/method/arrow-fn nodes → each is one `code_block` doc tagged
+  `source/type/start_line/end_line`. For the login failure, rank 0 is the entire `SignInScreen` function
+  (App.tsx ~1285–1354) — the block holding `user.password !== `${password}-bug``.
+
+**2. DIAGNOSE (the one Claude call)** — `propose_patch` formats `_DIAGNOSE_PROMPT` and makes a single
+`invoke_json(get_llm(), …)` (Opus 4.8). Claude receives: the instruction to use ONLY the retrieved
+context and return one JSON `{file_path, find, replace, explanation}` with the smallest possible fix,
+**preserving every other guard/clause on the line** (this is why it keeps `!user ||` and only edits the
+password comparison); `FAILED TEST / DEFECT:` = the full raw failure; `RETRIEVED CODE CONTEXT:` = the
+4–6 hits rendered `Context N / File / Type / Lines / Snippet`. It returns e.g.
+`find:"user.password !== `${password}-bug`" → replace:"user.password !== password"`. If Claude returns
+nothing usable, `_demo_fallback_patch()` deterministically matches the planted bug (both `password` and
+`normalizedPassword` forms) — the only non-Claude reasoning path.
+
+**3. APPLY** — `apply_patch`/`_locate_file`: prefer Claude's `file_path` if inside `CODEBASE_DIR`, else
+the unique file containing `find`; the `find` string must occur **exactly once** (0/≥2 → refuse), then a
+single `replace(find, replace, 1)`.
+
+**4. TEST → 5. BUILD** — TEST = `node_modules/.bin/tsc -b` (the app ships no unit runner; eslint is
+deliberately excluded — thousands of pre-existing parser errors). BUILD = `npm run build`
+(`tsc -b && vite build`), the real gate; `result["success"] = build.ok`.
+
+**6. PR PREP (+ auto-open)** — `prepare_pr` refuses if `_repo_blocked_reason()` (mid-merge/rebase/
+conflicts), then `git checkout -B repair/<test>-fix-<repairid8>` (unique per run) + a **pathspec commit**
+(`git commit … -- <file>`, only the fixed file) + captures the diff. With `auto_pr` on and a green build,
+`open_pull_request` pushes base + head to `origin` and (no `gh`) returns GitHub's prefilled
+`/compare/<base>...<head>?expand=1` URL. Every stage calls `_emit(progress_cb, …)` → merged into the
+in-memory job the dashboard/standalone window polls.
+
+**Essence:** a jargon-stripped, code-type-filtered semantic search hands Claude the exact offending
+function; Claude returns one minimal find/replace that never touches unrelated guards; the agent applies
+it under uniqueness + repo-state guards, then `tsc`/`vite build` is the objective verdict before a
+single-file PR.
 
 ---
 

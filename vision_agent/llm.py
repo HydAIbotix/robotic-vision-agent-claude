@@ -47,6 +47,45 @@ def _strip_fences(text: str) -> str:
     return text
 
 
+def _extract_json_object(text: str) -> str:
+    """Return the first substring of `text` that is a balanced, parseable JSON object, or "".
+
+    Models sometimes prefix a bare JSON object with prose ("Looking at the flow: `refreshCard` fetches
+    `/api/card/${num}` … {the real object}") with no code fences. That prose can itself contain `{`
+    (e.g. `${num}`), so a naive "first brace" match grabs `{num}` and fails. We therefore try each `{`
+    as a candidate start, brace-match (string-aware) to its close, and return the first candidate that
+    actually `json.loads`. Recovers the answer regardless of surrounding commentary."""
+    for start in range(len(text)):
+        if text[start] != "{":
+            continue
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:i + 1]
+                    try:
+                        json.loads(candidate)
+                        return candidate
+                    except Exception:
+                        break   # this start isn't valid JSON — try the next '{'
+    return ""
+
+
 def invoke_json(llm: BaseChatModel, messages: list, *, retries: int = 2, default=None, label: str = "llm"):
     """Invoke an LLM and parse its response as JSON, resiliently.
 
@@ -68,7 +107,14 @@ def invoke_json(llm: BaseChatModel, messages: list, *, retries: int = 2, default
             raw = _strip_fences(content)
             if not raw:
                 raise ValueError("empty response")
-            return json.loads(raw)
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                # Prose wrapped around a bare JSON object → recover the first balanced {...}.
+                obj = _extract_json_object(raw)
+                if not obj:
+                    raise
+                return json.loads(obj)
         except Exception as exc:   # JSONDecodeError, ValueError, API hiccup, etc.
             last_err = exc
             if attempt <= retries:
