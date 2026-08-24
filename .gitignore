@@ -58,3 +58,5 @@ reference_screens/*.bmp
 reference_screens/*.webp
 !reference_screens/README.md
 /reference_screens
+docs/~$kiosk_e2e_tests.xlsx
+docs/~$osk_POS_and_SmartCardStation_Production_Design.docx
