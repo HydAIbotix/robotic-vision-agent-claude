@@ -324,6 +324,151 @@ def get_run_defects(run_id: str, db: Session = Depends(get_db)):
     ]
 
 
+# ── Auto-Repair (RAG + Claude self-healing) ─────────────────────────────────────
+# The self-healing arm of defect intelligence. A repair job runs the retrieve → diagnose
+# (Claude) → apply → lint → build → pr-prep pipeline in a background thread; stages stream
+# into an in-memory job record the frontend polls. Pushing/opening the PR is a SEPARATE,
+# explicitly-triggered endpoint (never automatic) since it is outward-facing.
+
+_repair_jobs: dict[str, dict] = {}
+_repair_lock = threading.Lock()
+
+
+class RepairRequest(BaseModel):
+    failure: str = ""                    # failed-test message / plain-English defect
+    test_id: str = ""                    # e.g. "TC-RPS-001" (labels the branch/PR)
+    run_id:  Optional[str] = None        # optional link back to the run that failed
+    apply:   bool = True                 # False → dry run (retrieve + diagnose only)
+    auto_pr: Optional[bool] = None       # None → settings.repair_auto_pr; True/False to override
+
+
+def _repair_set(rid: str, **fields):
+    # Positional param is `rid` (not `repair_id`) so callers may also pass repair_id=... in **fields
+    # (it belongs in the job dict for the frontend) without a "multiple values" TypeError.
+    with _repair_lock:
+        _repair_jobs.setdefault(rid, {}).update(fields)
+
+
+def _repair_stage(repair_id: str, update: dict):
+    """Progress callback: merge one stage update into the job's stage map."""
+    with _repair_lock:
+        job = _repair_jobs.setdefault(repair_id, {})
+        stages = job.setdefault("stages", {})
+        stage = update.get("stage", "")
+        if stage:
+            stages[stage] = {**stages.get(stage, {}), **update}
+        job["updated_at"] = datetime.utcnow().isoformat()
+
+
+def _run_repair_job(repair_id: str, req: RepairRequest):
+    from repair_agent.repair_failed_test import run_repair
+    auto_pr = settings.repair_auto_pr if req.auto_pr is None else req.auto_pr
+    _repair_set(repair_id, status="running")
+    try:
+        result = run_repair(
+            req.failure, test_id=req.test_id, apply=req.apply, auto_pr=auto_pr,
+            branch_suffix=repair_id.split("-")[-1],
+            progress_cb=lambda u: _repair_stage(repair_id, u),
+        )
+        with _repair_lock:
+            job = _repair_jobs.setdefault(repair_id, {})
+            job["result"] = result
+            job["status"] = "succeeded" if result.get("success") else "completed"
+            if result.get("error"):
+                job["error"] = result["error"]
+            job["updated_at"] = datetime.utcnow().isoformat()
+    except Exception as e:
+        print(f"  [REPAIR] job {repair_id} failed: {e}")
+        _repair_set(repair_id, status="failed", error=str(e))
+
+
+@app.post("/api/repair", status_code=202)
+def start_repair(req: RepairRequest):
+    if not (req.failure or "").strip():
+        raise HTTPException(status_code=400, detail="A 'failure' description is required.")
+    repair_id = f"repair-{uuid.uuid4().hex[:8]}"
+    _repair_set(
+        repair_id,
+        repair_id=repair_id, status="pending", stages={},
+        failure=req.failure, test_id=req.test_id, run_id=req.run_id,
+        created_at=datetime.utcnow().isoformat(),
+    )
+    threading.Thread(target=_run_repair_job, args=(repair_id, req), daemon=True).start()
+    return {"repair_id": repair_id, "status": "pending"}
+
+
+@app.get("/api/repair/{repair_id}")
+def get_repair(repair_id: str):
+    with _repair_lock:
+        job = _repair_jobs.get(repair_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Unknown repair job.")
+        return dict(job)
+
+
+class OpenPrRequest(BaseModel):
+    confirm: bool = False
+
+
+@app.post("/api/repair/{repair_id}/open-pr")
+def open_repair_pr(repair_id: str, body: OpenPrRequest):
+    """GATED outward-facing step — push the prepared branch and open the PR on GitHub."""
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="Set confirm=true to push and open the PR.")
+    with _repair_lock:
+        job = _repair_jobs.get(repair_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Unknown repair job.")
+    pr = ((job.get("result") or {}).get("stages") or {}).get("pr") or {}
+    if not pr.get("prepared"):
+        raise HTTPException(status_code=400, detail="No prepared PR branch/commit for this job.")
+
+    from repair_agent.repair_failed_test import open_pull_request
+    outcome = open_pull_request(pr["branch"], pr["base"], pr["title"], pr["body"])
+    with _repair_lock:
+        _repair_jobs[repair_id].setdefault("result", {}).setdefault("stages", {}).setdefault("pr", {})
+        _repair_jobs[repair_id]["result"]["stages"]["pr"].update({"opened": outcome})
+    return outcome
+
+
+class RepairIndexState:
+    building = False
+    last_message = ""
+
+
+@app.post("/api/repair/index", status_code=202)
+def build_repair_index():
+    """(Re)build the Chroma RAG index over the live kiosk app + docs, in the background."""
+    if RepairIndexState.building:
+        return {"status": "building", "message": "Index build already in progress."}
+
+    def _build():
+        from repair_agent.parse_code_and_store import build_codebase_index, CODEBASE_DIR, PERSIST_DIR
+        RepairIndexState.building = True
+        RepairIndexState.last_message = "Building index…"
+        try:
+            build_codebase_index()
+            RepairIndexState.last_message = f"Indexed {CODEBASE_DIR} → {PERSIST_DIR}"
+        except Exception as e:
+            RepairIndexState.last_message = f"Index build failed: {e}"
+        finally:
+            RepairIndexState.building = False
+
+    threading.Thread(target=_build, daemon=True).start()
+    return {"status": "building"}
+
+
+@app.get("/api/repair/index")
+def repair_index_status():
+    from repair_agent.parse_code_and_store import PERSIST_DIR
+    return {
+        "building": RepairIndexState.building,
+        "exists":   PERSIST_DIR.exists(),
+        "message":  RepairIndexState.last_message,
+        "persist_dir": str(PERSIST_DIR),
+    }
+
+
 # ── Test Cases ────────────────────────────────────────────────────────────────
 
 @app.get("/api/test-cases")
@@ -2808,6 +2953,14 @@ def _execute_run(run_id: str, req: RunRequest):
                 args=(run_id, req.kiosk_id, failed_results),
                 daemon=True,
             ).start()
+            # Auto-run the self-healing Auto-Repair agent (fix → test → build → raise PR) and pop it
+            # into a new window in the UI. Fires on the FIRST failed test only, once per run.
+            if settings.auto_repair_on_failure:
+                threading.Thread(
+                    target=_run_auto_repair,
+                    args=(run_id, req.kiosk_id, failed_results),
+                    daemon=True,
+                ).start()
 
     except Exception as e:
         try:
@@ -2872,6 +3025,67 @@ def _run_defect_agent(run_id: str, kiosk_id: str, failed_results: list):
         print(f"  [DEFECT] Error: {e}")
     finally:
         _broadcaster.unregister(run_id)
+
+
+def _failure_text_for(tr: dict) -> str:
+    """Build a plain-English failure description for the repair agent from a failed TestResult."""
+    test_id = tr.get("test_id", "")
+    summary = tr.get("summary", "") or ""
+    vision  = tr.get("vision_summary", "") or ""
+    steps   = tr.get("step_results") or []
+    failed  = [s for s in steps if not s.get("success", True)]
+    detail  = "; ".join(
+        str(s.get("observation") or s.get("note") or s.get("step") or "")
+        for s in failed[:3]
+    )
+    return (f"{test_id} failed. {summary}. {vision} "
+            f"Failing steps: {detail}".strip())
+
+
+def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list):
+    """Background thread: auto-run the Auto-Repair agent for the FIRST failed test, streaming its
+    stages into an in-memory repair job and signalling the UI (repair_started/repair_done on the
+    run WS) so it can pop the repair into a new window."""
+    if not failed_results:
+        return
+    tr = failed_results[0]
+    test_id = tr.get("test_id", "")
+    failure = _failure_text_for(tr)
+
+    repair_id = f"repair-{uuid.uuid4().hex[:8]}"
+    _repair_set(
+        repair_id,
+        repair_id=repair_id, status="pending", stages={}, auto=True,
+        failure=failure, test_id=test_id, run_id=run_id,
+        created_at=datetime.utcnow().isoformat(),
+    )
+    print(f"\n  [REPAIR] Auto-repair for run {run_id} / {test_id} → job {repair_id}")
+    _broadcast(run_id, {"event": "repair_started", "run_id": run_id,
+                        "repair_id": repair_id, "test_id": test_id})
+    try:
+        from repair_agent.repair_failed_test import run_repair
+        result = run_repair(
+            failure, test_id=test_id, apply=True, auto_pr=settings.repair_auto_pr,
+            branch_suffix=repair_id.split("-")[-1],
+            progress_cb=lambda u: _repair_stage(repair_id, u),
+        )
+        with _repair_lock:
+            job = _repair_jobs.setdefault(repair_id, {})
+            job["result"] = result
+            job["status"] = "succeeded" if result.get("success") else "completed"
+            if result.get("error"):
+                job["error"] = result["error"]
+            job["updated_at"] = datetime.utcnow().isoformat()
+        pr = (result.get("stages") or {}).get("pr", {}) or {}
+        pr_url = (pr.get("opened") or {}).get("url", "")
+        _broadcast(run_id, {"event": "repair_done", "run_id": run_id, "repair_id": repair_id,
+                            "test_id": test_id, "success": bool(result.get("success")),
+                            "pr_url": pr_url})
+    except Exception as e:
+        print(f"  [REPAIR] Auto-repair error: {e}")
+        _repair_set(repair_id, status="failed", error=str(e))
+        _broadcast(run_id, {"event": "repair_done", "run_id": run_id, "repair_id": repair_id,
+                            "test_id": test_id, "success": False, "error": str(e)})
 
 
 def _run_explorer(explore_id: str, kiosk_url: str, kiosk_id: str = ""):

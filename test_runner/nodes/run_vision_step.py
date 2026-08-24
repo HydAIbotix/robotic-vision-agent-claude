@@ -1686,6 +1686,33 @@ def run_vision_step(state: TestRunnerState) -> dict:
         if outcome in ("failed", "vision_required"):
             last_sr = step_results[-1] if step_results else {}
 
+            # A failed VERIFY is a test ASSERTION failure — the app is genuinely not in the expected
+            # state. Do NOT hand off to Tier-3, which would re-plan and re-attempt the PRECEDING actions
+            # (e.g. re-login) that the test never asked to retry (observed: TC-RPS-001 on a broken login
+            # looped through 3 re-login attempts). Fail terminally. Action-step (tap/type) failures are
+            # NOT assertions — they still hand off so Tier-3 can locate the element via vision and
+            # COMPLETE the step. Gated by settings.verify_failure_stops_run; applies to ALL backends.
+            is_verify_fail = (
+                str(last_sr.get("step", "")).startswith("verify:")
+                and not last_sr.get("verification_gap")
+            )
+            if is_verify_fail and settings.verify_failure_stops_run:
+                why = last_sr.get("observation") or last_sr.get("note") or "verification failed"
+                print(f"\n  [RUN] TIER-1/2 EXECUTION: FAILED at step {len(step_results)} (verify assertion) — {why}")
+                print("  [RUN] → verify assertion FAILED; NOT retrying via Tier-3 "
+                      "(the test did not ask to retry). Failing the test.")
+                if run_id:
+                    broadcaster.emit(run_id, {"event": "log", "run_id": run_id, "test_id": tc["test_id"],
+                                              "message": f"[VERIFY FAILED] {why} — test failed (no retry)"})
+                test_result: TestResult = {
+                    "test_id":        tc["test_id"],
+                    "summary":        tc["summary"],
+                    "outcome":        "failed",
+                    "step_results":   step_results,
+                    "vision_summary": f"Verify assertion failed [{backend}] — Tier-3 skipped (no retry): {why}",
+                }
+                return {"test_results": [*(state.get("test_results") or []), test_result]}
+
             # Never reset to the entry/login screen mid-test.  A reset discards the
             # already-authenticated session and drops the browser back on login, forcing
             # the VisionAgent to re-authenticate — which caused the "logged out, then looped

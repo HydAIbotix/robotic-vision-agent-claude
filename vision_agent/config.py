@@ -316,6 +316,14 @@ class Settings(BaseSettings):
     # are NOT robot faults and still fall through to Tier-3. Real backend only (playwright/demo keep
     # the Tier-3 handoff). Set False to restore the old always-Tier-3 behaviour. See CLAUDE.md.
     robot_error_stops_run: bool = True
+    # A failed `verify` step is a test ASSERTION failure — the app is genuinely not in the expected
+    # state. When True (default), a failed verify FAILS the test immediately instead of handing off to
+    # Tier-3 vision, which would re-attempt the preceding actions (e.g. re-login) the test never asked
+    # to retry (observed: TC-RPS-001 on a broken login looped through 3 re-login attempts). Action
+    # steps (tap/type) that fail still hand off to Tier-3 to locate the element via vision — that
+    # COMPLETES the step, it is not an outcome retry. Applies to ALL backends (playwright/real/demo).
+    # Set False to restore the old always-Tier-3 behaviour. See CLAUDE.md.
+    verify_failure_stops_run: bool = True
     # Save an annotated BEFORE screenshot (the last camera frame with a crosshair at the exact camera
     # pixel the arm will touch) and the AFTER frame (the /screen/click response image) for every real
     # tap, into the run's per-run screenshots folder with identifiable names (before_<cmd>_at_<u>-<v>.png
@@ -336,6 +344,36 @@ class Settings(BaseSettings):
     # so the robot is assumed already parked at the target kiosk. Explicit `move` PLAN steps are
     # unaffected (they always drive the base). Set False to restore the old always-position behaviour.
     agv_move_requires_explicit_step: bool = True
+
+    # ── Auto-Repair agent (RAG + Claude code repair) ─────────────────────────
+    # The self-healing arm of defect intelligence: retrieve the offending code from a local
+    # Chroma vector index (built by repair_agent/parse_code_and_store.py — Chroma + HuggingFace
+    # embeddings, kept exactly as the POC's ParseCodeAndStore.py), ask Claude for ONE minimal
+    # find/replace patch, apply it, lint (unit test) + build, then prepare a PR branch. All paths
+    # are config-driven (no hardcoded C:\ paths) so the module is portable across machines.
+    #   repair_codebase_dir — the app under test that the agent edits AND opens a PR against. This is
+    #        the LIVE kiosk app (a git clone with a GitHub remote), the same code the tests drive —
+    #        NOT a copy — so a fix is real and PR-able. Relative paths resolve from the repo root.
+    #   repair_docs_dir     — folder holding the design doc + test-case workbook artifacts (moved here
+    #        from the POC's own folder); indexed alongside the code so the RAG has product context.
+    #   repair_persist_dir  — where the Chroma index is persisted (gitignored generated data).
+    #   repair_embedding_model — HuggingFace sentence-transformers model (unchanged from the POC).
+    #   repair_pr_remote / repair_pr_base — git remote + base branch a prepared PR targets.
+    repair_codebase_dir: str = "../Kiosk_App/robotics-kiosk-pos"
+    repair_docs_dir: str = "./docs"
+    repair_persist_dir: str = "./docs/chroma_code_db"
+    repair_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    # Auto-run the repair agent when a test run has failures (the first failed test), and
+    # auto-raise the PR (push branches + open GitHub's prefilled compare/PR page — `gh` is not
+    # required). Both default ON per the demo; set to False to keep repair fully manual.
+    auto_repair_on_failure: bool = True
+    repair_auto_pr: bool = True
+    repair_pr_remote: str = "origin"
+    # Branch a prepared PR targets (merge-INTO). For the demo this is the isolated branch that
+    # carries the intentional bug, so the fix produces a real, reviewable diff without ever touching
+    # the working `arm-reachable-area` branch. Point REPAIR_PR_BASE at your real base branch for
+    # production use (bugs that landed on that branch → the agent's fix PR merges back into it).
+    repair_pr_base: str = "demo/rps-login-bug"
 
     # Management API (FastAPI server for management frontend)
     api_host: str = "0.0.0.0"

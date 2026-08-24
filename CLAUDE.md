@@ -66,6 +66,9 @@ test_runner/             Phase 2 — test execution (LangGraph)
   nodes/                 load_test_case · parse_steps (3-tier planner) · run_vision_step · run_backend_step · conclusive_verdict · finalize_tests
   reader/excel_reader.py
 defect_agent/            Auto defect intelligence (LangGraph): evaluate → defect_intelligence → publish
+repair_agent/            Self-healing arm of defect intelligence (NOT LangGraph):
+  parse_code_and_store.py  RAG index — Chroma + HuggingFace over the LIVE app + docs (POC code, kept as-is)
+  repair_failed_test.py    retrieve → Claude diagnose → apply → type-check → build → PR-prep (PR push gated)
 supervisor/              Parallel multi-robot orchestrator — ThreadPoolExecutor (NOT LangGraph)
 vision_agent/            Core Tier-3 vision sub-agent (original README subject)
   agent.py state.py config.py llm.py prompts.py screen_cache.py
@@ -145,7 +148,9 @@ Config `GET/PUT /config`, `PATCH /config/robot`, `PATCH /config/camera`, `PATCH 
 `POST /tc-plan`, `DELETE /tc-plan/{id}` · Exploration `POST /explore` (spawns `run_explorer.py`),
 `GET /explore/{id}`, `GET/PATCH /explore-config` · App map `GET/DELETE /app-map`,
 `DELETE /app-map/{app_id}` · `POST /reset` (clears runs/results/plans/cases; preserves
-exploration + config).
+exploration + config) · Auto-Repair `POST /repair` (start job), `GET /repair/{id}` (poll stages),
+`POST /repair/{id}/open-pr` (GATED push+PR, confirm=true), `POST|GET /repair/index` (build/status of
+the Chroma RAG index).
 
 ---
 
@@ -394,6 +399,156 @@ with no regression (full suite: 98 passed, same 8 pre-existing env-only failures
   `card_service_url` (appends `?cardServiceUrl=…`) so cards persist server-side regardless of the clear.
 - New robot capabilities `focus_by_testid` / `tap_by_testid` / `get_page_error_text` live in
   `playwright_stubs.py` (real) and `stubs.py` (shared fallback → False/"" so real-arm/demo are unchanged).
+
+### Recent progress (2026-08-24) — Auto-Repair agent (RAG + Claude self-healing) + demo
+
+New **`repair_agent/`** module: the self-healing arm of defect intelligence. It takes a failed-test
+message and runs one pipeline — **retrieve → diagnose → apply → unit-test → build → PR-prep** — surfaced
+live in a new Kiosk Test Studio page.
+
+- **`repair_agent/parse_code_and_store.py`** — the POC's `ParseCodeAndStore.py` brought in almost
+  verbatim. The retrieval brain (Tree-sitter chunking, HuggingFace `all-MiniLM-L6-v2` embeddings, Chroma
+  vector store) is **LEFT AS-IS**. Refinements only: paths are config-driven (`settings.repair_*`), it
+  indexes the **live** kiosk app (`../Kiosk_App/robotics-kiosk-pos`) + the design-doc/test-workbook
+  artifacts (moved to `./docs`), tree-sitter is imported lazily (falls back to text chunking), and the
+  walk now skips dot-dirs + stray folders. **Gotcha that bit us:** a leftover `.rag/kiosk_rag_index.json`
+  (1.1 MB) + `repair_brief.md` inside the live app dominated similarity search and fed Claude stale,
+  hallucinated markup → wrong patch. `SKIP_DIRS` + dot-dir skipping fixed it (5208 → 371 real chunks).
+- **`repair_agent/repair_failed_test.py`** — **Claude does the reasoning** (`get_llm()` Opus 4.8 via
+  `invoke_json`): retrieve top-k from Chroma → ask for ONE minimal find/replace patch → apply
+  (single-occurrence + in-codebase guards, LLM path tolerated) → **unit test** (a TS type-check via
+  `node_modules/.bin/tsc -b`; the app ships no test runner, and its **eslint is broken with 5357
+  pre-existing parser errors** so lint is intentionally NOT the gate) → **build** (`npm run build` =
+  `tsc -b && vite build`, the real validation) → **PR-prep** (local branch + commit + diff). A demo
+  fallback rule handles the planted bug if Claude is unavailable.
+- **PR is gated.** `run_repair()` only *prepares* a local branch/commit/diff. Pushing + `gh pr create`
+  is a SEPARATE `open_pull_request()` behind `POST /api/repair/{id}/open-pr` (confirm=true) — outward-
+  facing, never automatic. Base branch = `settings.repair_pr_base` (`REPAIR_PR_BASE`).
+- **API** (`api/main.py`): `POST /api/repair` (bg thread, streams stages into an in-memory job) ·
+  `GET /api/repair/{id}` (poll) · `POST /api/repair/{id}/open-pr` (gated push+PR) ·
+  `POST /api/repair/index` + `GET /api/repair/index` (build/status of the Chroma index).
+- **Frontend** (`../kiosk-test-studio`): new **Auto-Repair** page (`src/pages/AutoRepair.tsx`, nav group
+  "Self-Healing") — a live vertical stepper of the 6 stages with per-stage detail (RAG hits, the Claude
+  red/green diff, tsc/vite output, the git diff) and an "Open PR" button (two-click confirm). Polls
+  `GET /api/repair/{id}`.
+- **The demo (RPS login).** The arm-reachable login flow sets `allowAnyCredentials=true`, which bypasses
+  the password comparison — so the POC's `${password}-bug` would NOT fail the live test. Instead the
+  planted bug is in the Sign-In submit **gate**: `credentialsReady = … && password.trim().length < 0`
+  (Sign In never enables). It lives on an **isolated `demo/rps-login-bug` branch** of the live app (bug
+  committed there; `arm-reachable-area` is untouched — no regression). The agent's fix reverts `< 0` → `> 0`;
+  because a pure revert nets to zero against a clean base, the PR base IS `demo/rps-login-bug` so the fix
+  shows as a real, reviewable diff. Verified end-to-end: Claude finds the exact line, type-check + build
+  pass, branch `repair/tc-rps-001-fix` + commit + diff prepared. To replay from the UI, the live app must
+  be on `demo/rps-login-bug` (buggy) with no stale `repair/tc-rps-001-fix` branch.
+- **Config** (`vision_agent/config.py`): `repair_codebase_dir`, `repair_docs_dir`, `repair_persist_dir`
+  (gitignored), `repair_embedding_model`, `repair_pr_remote`, `repair_pr_base`.
+- **RESTART the backend** to load the new `repair_agent` module + `api/main.py` routes (uvicorn has no
+  `--reload`). Build the index once (`POST /api/repair/index` or `python -m repair_agent.parse_code_and_store`).
+
+#### Update (2026-08-24, later) — auto-trigger, new window, auto-PR, standard-layout bug
+
+- **Kiosk layout for RPS testing is now `standard`, not arm-reachable.** The RPS login test uses
+  `http://localhost:5173/?screenLayout=standard&flowMode=full`. `standard` → `allowAnyCredentials=false`,
+  so the REAL password comparison runs (arm-reachable bypasses it). `playwright_stubs._kiosk_url()` now
+  **respects an explicit `screenLayout` already on the configured URL** (won't force-append the default),
+  so the configured kiosk-2 URL wins.
+- **The demo bug changed to "valid user REJECTED"** (more visible than a disabled button). On
+  `demo/rps-login-bug`, `App.tsx:1900` compares `user.password !== ` `` `${normalizedPassword}-bug` `` — so a
+  valid `tester@kiosk.local / Password123` login is rejected with *"Username or password is incorrect."*
+  The agent's minimal fix drops the `-bug` suffix (guard clauses preserved — the prompt now forbids
+  simplifying unrelated logic). `arm-reachable-area` stays untouched.
+- **Auto-repair now runs AUTOMATICALLY on a failed run** (`settings.auto_repair_on_failure`, default on):
+  the run-completion path spawns `_run_auto_repair` for the FIRST failed test, which streams stages into an
+  in-memory job and broadcasts `repair_started` / `repair_done` on the run WebSocket.
+- **New window.** Live Monitor listens for `repair_started` and pops a standalone Auto-Repair window
+  (`window.open('?repair=<id>')`; `App.tsx` renders `<AutoRepair standaloneRepairId>` chrome-free) plus a
+  prominent in-page banner (popup-blocker fallback). The banner shows the live status and the PR link.
+- **PR is now RAISED AUTOMATICALLY** (`settings.repair_auto_pr`, default on) after a green build. `gh` is
+  NOT installed, so `open_pull_request` pushes BOTH branches (base `demo/rps-login-bug` + head
+  `repair/tc-rps-001-fix`) to `origin` and returns GitHub's prefilled **compare URL**
+  (`/compare/<base>...<head>?expand=1`). ⚠️ This **pushes the demo bug branch to the GitHub remote**
+  (`srik-g/robotics-kiosk-pos`) — required so the PR has a non-empty diff (the fix is a pure revert). Set
+  `REPAIR_AUTO_PR=false` to keep it local. The `/api/repair/{id}/open-pr` endpoint remains as a manual path.
+- **RAG retrieval hardened** (this was the bug that made Claude refuse): a failure like "TC-RPS-001 login
+  rejected" matched the **test workbook + `package-lock.json`** far more than the code, so no source reached
+  the LLM. Fixes in `parse_code_and_store` / `repair_failed_test`: skip lock files (`SKIP_FILES`); a metadata
+  filter pulls **code chunks first** (`search(where={"type":{"$in":["code_block","code_file"]}})`); and
+  `_retrieval_query()` strips test-id / test-jargon from the vector query (the buggy chunk went rank ~11 → 0).
+  The full failure text still goes to the LLM prompt. Rebuild the index after any of these.
+
+### Recent progress (2026-08-24, run-18) — false-PASS fix: uncharted expected_screen
+
+Symptom (`results/run-18-191056-2408`): TC-RPS-001 on the buggy login **PASSED** even though the
+products screen never appeared. Two linked causes:
+
+- **The App Explorer can't log in on `demo/rps-login-bug`** — the intentional bug rejects valid
+  credentials, so exploration never reaches (never charts) the `products` screen. This is *expected*
+  given the bug; the sign-in screen itself charts fine (the test's type/tap steps worked).
+- **The false PASS (the real bug):** a `verify` whose `expected_screen` isn't in the app_map returned
+  `success=None` (a "verification gap"), and `run_vision_step` recorded that as `success=True`
+  ("don't fail over an uncharted screen"). So a login that stayed on sign-in still passed.
+
+Fix (`vision_agent/nodes/validate_pipeline.py`, playwright only — real/demo keep the gap since they
+have no live DOM): when `expected_screen` isn't charted, **confirm against the LIVE DOM instead of
+free-passing**. `get_dom_screen_id()` (normalizes `products-screen`→`products`, `signin-screen`→
+`sign_in`) is compared to the expected screen via `_screens_equivalent` (ignores case/separators,
+substring-tolerant), with the expected on-screen text (`expected_text` or a quoted phrase parsed from
+the step) as a secondary confirm. Match → PASS (`dom_screen`/`dom_text`); neither → FAIL as a
+`screen_id` mismatch (so the strict Claude intent-judge in `run_vision_step` can still rescue a
+genuinely-correct-but-differently-named screen). Verified live on the running kiosk: buggy login →
+DOM stays `signin` + no products text → **FAIL**; fixed login → DOM `products-screen` → **PASS**.
+Note the error-banner selector is unreliable here (missed the login-failed popup, false-matched a
+"Sign Out" button), so screen-identity is the decisive signal, not the banner.
+
+Consequence for the demo: the incomplete app_map (no `products`) no longer matters — the verify checks
+the live DOM, so TC-RPS-001 now correctly FAILS on the bug (→ auto-repair triggers) and PASSES once
+fixed. Re-exploring against a *working* build only matters if you want `products` charted for other
+purposes.
+
+### Recent progress (2026-08-24, run-20) — no-retry on verify fail + auto-repair crash fix
+
+`results/run-20-193041-2408`: the verify correctly FAILED now, but two follow-on issues:
+
+- **Unwanted login RETRIES.** A failed `verify` handed off to Tier-3 vision, which re-planned and
+  re-attempted the whole login 3× (RETRY 1/2/3) — the test never asked to retry. **Fix**
+  (`run_vision_step.py`, gated by `settings.verify_failure_stops_run`, default on, **all backends**): a
+  failed `verify` is a test ASSERTION failure → **fail terminally, no Tier-3 handoff**. Action steps
+  (tap/type) that fail still hand off so Tier-3 can locate the element via vision and COMPLETE the
+  step (not an outcome retry) — so no regression to element-recovery. Cross-kiosk is unaffected: the
+  verify's kiosk-switch (`_kid_of_screen`) and the Claude intent-rescue both run BEFORE the failure
+  finalizes, so only a genuine assertion failure reaches the terminal guard. This is the playwright
+  analogue of the real-backend `robot_error_stops_run` "no Tier-3 wandering" rule.
+- **Auto-repair never fired** — `_run_auto_repair` crashed with `TypeError: _repair_set() got multiple
+  values for argument 'repair_id'` (the helper's positional param collided with a `repair_id=` kwarg
+  callers pass for the job dict). **Fix:** renamed the positional to `rid` so `repair_id=` lands in
+  `**fields`. Both `start_repair` and `_run_auto_repair` were affected.
+
+### Recent progress (2026-08-24, run-23) — repair git-safety + single base branch
+
+`repair/tc-rps-001-fix` came out full of garbage (a whole main↔arm-reachable merge, no clean fix
+commit, PR failed). Root cause was **git STATE, not the fix logic**: the demo base had been rebuilt off
+`main`, an earlier run's `origin/repair/tc-rps-001-fix` (arm-reachable lineage) got `git pull`ed into
+the new main-lineage branch → a stuck merge with conflicts; the auto-repair then branched/committed on
+top of that mess. (The test-side fixes from run-20 worked: verify failed cleanly, no retry, auto-repair
+fired.) Fixes:
+
+- **Single base branch: `demo/rps-login-bug`, based off `main`** (bug `App.tsx:1292`
+  `user.password !== ` `` `${password}-bug` ``). All intentional bugs + all repair branches live off this.
+  `arm-reachable-area` is no longer used for the repair demo. `REPAIR_PR_BASE=demo/rps-login-bug`.
+- **Repo-state guard** (`repair_failed_test._repo_blocked_reason`): the agent now REFUSES to apply/commit
+  when the codebase is mid-merge / mid-rebase / has unresolved conflicts — it stops with a clear message
+  instead of sweeping a merge into the fix branch. Checked before APPLY (in `run_repair`) and again in
+  `prepare_pr`.
+- **Unique per-run branch names** (`repair/<test_id>-fix-<repair_id8>`) so a fresh push never collides
+  with (and later gets merged into) a previous run's origin branch on a different lineage.
+- **Pathspec commit** — `git commit -m … -- <file>` commits ONLY the fixed file, so nothing else can leak
+  into the branch. **Generalized demo fallback** matches BOTH bug forms (`normalizedPassword` and `password`).
+- **RAG index lock** — on Windows the running backend holds the Chroma DB open, so a CLI rebuild hits
+  `WinError 32`. `build_codebase_index` now raises a clear message; **rebuild via the studio's "Rebuild
+  index" button right after a backend RESTART, before running any repair** (fresh process = no open handle).
+- The stuck merge was aborted, the garbage `repair/tc-rps-001-fix` deleted, working tree clean on
+  `demo/rps-login-bug`. Origin still has stale `origin/repair/tc-rps-001-fix` / `origin/demo/rps-login-bug`
+  from earlier runs — harmless (unique names avoid collisions now); delete them on GitHub if desired.
 
 ### Never
 

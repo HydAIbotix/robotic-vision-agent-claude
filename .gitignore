@@ -30,6 +30,10 @@ results/
 test_plans/
 app_map.json
 
+# ── Auto-Repair RAG index (Chroma + HuggingFace, generated per-environment) ─────
+docs/chroma_code_db/
+**/chroma_code_db/
+
 # ── Test artefacts ────────────────────────────────────────────────────────────
 .pytest_cache/
 .coverage

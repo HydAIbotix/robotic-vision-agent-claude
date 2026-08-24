@@ -38,6 +38,23 @@ from vision_agent import robot
 from vision_agent.config import settings
 
 
+def _quoted_phrase(text: str) -> str:
+    """Extract the longest single/double-quoted phrase from a step description, e.g. the expected
+    on-screen text in 'RPS shows the products screen with \\'Select Product and Quantity\\''."""
+    phrases = [a or b for a, b in re.findall(r"'([^']{3,})'|\"([^\"]{3,})\"", text or "")]
+    return max(phrases, key=len) if phrases else ""
+
+
+def _screens_equivalent(a: str, b: str) -> bool:
+    """Compare two screen ids ignoring case and separators (so 'products' == 'products-screen',
+    'signin' == 'sign_in'). Treats one being a substring of the other as a match."""
+    na = re.sub(r"[^a-z0-9]", "", (a or "").lower())
+    nb = re.sub(r"[^a-z0-9]", "", (b or "").lower())
+    if not na or not nb:
+        return False
+    return na == nb or na in nb or nb in na
+
+
 def run_validate_pipeline(
     expected_screen: str,
     expected_text: str | None,
@@ -71,7 +88,53 @@ def run_validate_pipeline(
     if expected_screen:
         screen_in_map = expected_screen in (app_map.get("screens") or {})
         if not screen_in_map:
-            # Screen not yet explored — not a test failure, just a gap in the map.
+            # Screen not yet charted in the app_map. On PLAYWRIGHT we still have full DOM access, so an
+            # uncharted expected_screen is NOT a free pass — a login that never reached the products
+            # screen must FAIL, not slip through as a "gap" (observed: TC-RPS-001 with a broken login
+            # stayed on sign-in yet the verify passed). Confirm against the LIVE DOM: the expected
+            # on-screen text (from expected_text or a quoted phrase in the step) and any error banner.
+            if backend == "playwright":
+                # Identify the CURRENT screen from the live DOM (get_dom_screen_id normalizes a
+                # top-level testid: "products-screen" → "products", "signin-screen" → "signin"), and
+                # confirm the expected on-screen text as a secondary signal. Either one confirms the
+                # landing; neither → the app is NOT on the expected screen → FAIL.
+                actual = robot.get_dom_screen_id() or ""
+                screen_ok = _screens_equivalent(actual, expected_screen)
+                exp_text = (expected_text or "").strip() or _quoted_phrase(step_description)
+                text_ok = robot.text_is_present(exp_text) if exp_text else False
+                if screen_ok or text_ok:
+                    return {
+                        "success":       True,
+                        "screen_match":  True,
+                        "text_match":    True if text_ok else None,
+                        "method":        "dom_screen" if screen_ok else "dom_text",
+                        "actual_screen": actual,
+                        "observation":   (
+                            f"On '{actual or expected_screen}' — matches expected '{expected_screen}' "
+                            f"(uncharted screen, confirmed via live DOM)."
+                        ),
+                        "note": "confirmed by live DOM (uncharted screen)",
+                    }
+                try:
+                    err_text = robot.get_page_error_text()
+                except AttributeError:
+                    err_text = ""
+                # Not on the expected screen → real failure. Report as a screen_id mismatch so the
+                # strict Claude intent-judge (run_vision_step) can still rescue a genuinely-correct
+                # screen, while a broken login (still on sign-in) stays FAILED.
+                obs = (f"Expected screen '{expected_screen}' but the app is on "
+                       f"'{actual or 'unknown'}'"
+                       + (f" showing an error: \"{err_text}\"" if err_text else "") + ".")
+                return {
+                    "success":       False,
+                    "screen_match":  False,
+                    "text_match":    False if exp_text else None,
+                    "method":        "screen_id",
+                    "actual_screen": actual,
+                    "observation":   obs,
+                    "note": "uncharted expected_screen not confirmed on the live DOM",
+                }
+            # Non-playwright (no live DOM): genuinely can't confirm — a real gap in the map.
             return {
                 "success":       None,
                 "screen_match":  None,

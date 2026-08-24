@@ -47,7 +47,10 @@ def _kiosk_url() -> str:
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}cardServiceUrl={svc}"
     layout = (getattr(settings, "kiosk_screen_layout", "") or "").strip()
-    if layout:
+    # Respect an explicit screenLayout already on the configured kiosk URL (e.g. the studio's
+    # kiosk-2 URL pins ?screenLayout=standard&flowMode=full) — only force the default layout when
+    # the URL doesn't specify one, so the configured URL always wins.
+    if layout and "screenlayout=" not in url.lower():
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}screenLayout={layout}"
     # During EXPLORATION only (run_explorer.py sets explore_demo_card), pre-fill the RPS mock-card field
