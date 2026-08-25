@@ -1,6 +1,7 @@
 """PR node — local branch + pathspec commit + diff; auto-push/open when auto_pr and the build is green."""
 from pathlib import Path
 
+from repair_agent import canceller
 from repair_agent.broadcaster import emit
 from repair_agent.repair_failed_test import RepairPatch, open_pull_request, prepare_pr
 from repair_agent.state import RepairAgentState
@@ -8,6 +9,7 @@ from repair_agent.state import RepairAgentState
 
 def prepare_pr_node(state: RepairAgentState) -> dict:
     rid = state.get("repair_id", "")
+    canceller.bail_if_cancelled(rid)
     emit(rid, "pr", "running")
     patch = RepairPatch(**state["patch"])
     target = Path(state["target"])

@@ -139,6 +139,31 @@ def get_llm() -> BaseChatModel:
     )
 
 
+def get_local_llm() -> BaseChatModel:
+    """Local, self-hosted backup model for Auto-Repair DIAGNOSE — Ollama (Qwen2.5-Coder by default).
+
+    Used only by the repair pipeline as the backup/alternate to Claude (see `repair_llm_backend`).
+    `langchain_ollama` is imported LAZILY and only here, so the rest of the system carries no new
+    dependency and nothing changes unless the local path is actually selected or hit as a fallback.
+    Requires an Ollama server (`repair_local_base_url`) with the model pulled
+    (`ollama pull qwen2.5-coder:14b`). A clear ImportError is raised if the package is missing — the
+    repair fallback chain catches it and moves on, so a missing backup never crashes a run."""
+    try:
+        from langchain_ollama import ChatOllama
+    except ImportError as e:   # pragma: no cover - environment-dependent
+        raise ImportError(
+            "Local repair LLM requires the 'langchain-ollama' package. Install it with "
+            "`pip install langchain-ollama` and run an Ollama server."
+        ) from e
+    return ChatOllama(
+        model=settings.repair_local_model,
+        base_url=settings.repair_local_base_url,
+        num_ctx=settings.repair_local_num_ctx,
+        temperature=0,
+        client_kwargs={"timeout": settings.repair_local_timeout_s},
+    )
+
+
 def get_explorer_llm() -> BaseChatModel:
     """Opus 4.8 — used for app exploration reasoning.
 

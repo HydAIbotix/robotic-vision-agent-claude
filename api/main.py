@@ -332,6 +332,12 @@ def get_run_defects(run_id: str, db: Session = Depends(get_db)):
 
 _repair_jobs: dict[str, dict] = {}
 _repair_lock = threading.Lock()
+# repair_id → cancel Event. The /cancel endpoint sets it; run_repair polls it (cooperative cancel).
+_repair_cancel: dict[str, threading.Event] = {}
+
+
+def _repair_terminal(status: str) -> bool:
+    return status in ("succeeded", "completed", "failed", "cancelled")
 
 
 class RepairRequest(BaseModel):
@@ -363,23 +369,31 @@ def _repair_stage(repair_id: str, update: dict):
 def _run_repair_job(repair_id: str, req: RepairRequest):
     from repair_agent.repair_failed_test import run_repair
     auto_pr = settings.repair_auto_pr if req.auto_pr is None else req.auto_pr
+    cancel_event = threading.Event()
+    with _repair_lock:
+        _repair_cancel[repair_id] = cancel_event
     _repair_set(repair_id, status="running")
     try:
         result = run_repair(
             req.failure, test_id=req.test_id, apply=req.apply, auto_pr=auto_pr,
             branch_suffix=repair_id.split("-")[-1],
             progress_cb=lambda u: _repair_stage(repair_id, u),
+            cancel_event=cancel_event,
         )
         with _repair_lock:
             job = _repair_jobs.setdefault(repair_id, {})
             job["result"] = result
-            job["status"] = "succeeded" if result.get("success") else "completed"
+            job["status"] = ("cancelled" if result.get("cancelled")
+                             else "succeeded" if result.get("success") else "completed")
             if result.get("error"):
                 job["error"] = result["error"]
             job["updated_at"] = datetime.utcnow().isoformat()
     except Exception as e:
         print(f"  [REPAIR] job {repair_id} failed: {e}")
         _repair_set(repair_id, status="failed", error=str(e))
+    finally:
+        with _repair_lock:
+            _repair_cancel.pop(repair_id, None)
 
 
 @app.post("/api/repair", status_code=202)
@@ -506,6 +520,25 @@ def delete_repair_pr(repair_id: str):
         if outcome.get("deleted"):
             prj.pop("opened", None)                     # the PR/branch is gone → drop the "View PR" link
     return outcome
+
+
+@app.post("/api/repair/{repair_id}/cancel")
+def cancel_repair(repair_id: str):
+    """Cancel a running Auto-Repair job. Cooperative: sets the job's cancel Event; the pipeline stops
+    at the next stage boundary and interrupts a slow DIAGNOSE call (so a stuck/slow model can't pin
+    it). A job that has already finished is returned as-is."""
+    with _repair_lock:
+        job = _repair_jobs.get(repair_id)
+        ev = _repair_cancel.get(repair_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Unknown repair job.")
+    status = job.get("status", "")
+    if _repair_terminal(status) or ev is None:
+        return {"status": status or "unknown", "cancelling": False,
+                "message": "Repair already finished — nothing to cancel."}
+    ev.set()
+    _repair_set(repair_id, status="cancelling")
+    return {"status": "cancelling", "cancelling": True}
 
 
 # ── Test Cases ────────────────────────────────────────────────────────────────
@@ -694,6 +727,9 @@ def get_config(db: Session = Depends(get_db)):
         "card_service_url": settings.card_service_url,
         "viewport":         {"width": settings.viewport_width, "height": settings.viewport_height},
         "camera":           {"width": settings.robot_camera_width, "height": settings.robot_camera_height},
+        "repair_llm":       {"backend": settings.repair_llm_backend,          # claude | local
+                             "local_model": settings.repair_local_model,
+                             "local_base_url": settings.repair_local_base_url},
         "kiosks":           [_kiosk_summary(k) for k in kiosks],
         "devices":          [_device_summary(d) for d in devices],
     }
@@ -714,6 +750,26 @@ def set_card_service(req: CardServiceRequest):
     settings.card_service_url = url
     _persist_env({"CARD_SERVICE_URL": url})
     return {"status": "ok", "card_service_url": url}
+
+
+class RepairLlmRequest(BaseModel):
+    backend: str   # "claude" | "local"
+
+
+@app.patch("/api/config/repair-llm")
+def set_repair_llm(req: RepairLlmRequest):
+    """Choose which model the Auto-Repair DIAGNOSE step tries FIRST: Claude (default) or the local
+    Ollama model. The other stays as an automatic backup; the deterministic demo rule is the last
+    resort. Applied LIVE (propose_patch reads settings.repair_llm_backend at call time, so the next
+    repair uses the new choice with no restart) and persisted to .env so it survives restarts."""
+    backend = (req.backend or "").strip().lower()
+    if backend not in ("claude", "local"):
+        raise HTTPException(400, "backend must be 'claude' or 'local'")
+    settings.repair_llm_backend = backend
+    _persist_env({"REPAIR_LLM_BACKEND": backend})
+    return {"status": "ok", "repair_llm": {"backend": backend,
+                                           "local_model": settings.repair_local_model,
+                                           "local_base_url": settings.repair_local_base_url}}
 
 
 # ── Robot connection config (backend / ip / port) — settable from the UI ──────────
@@ -3067,7 +3123,14 @@ def _run_defect_agent(run_id: str, kiosk_id: str, failed_results: list):
 
 
 def _failure_text_for(tr: dict) -> str:
-    """Build a plain-English failure description for the repair agent from a failed TestResult."""
+    """Build a plain-English failure description for the repair agent from a failed TestResult.
+
+    We lead with the test's DESIGN INTENT (its description + preconditions + expected results, pulled
+    from the test case) and steer toward the ROOT CAUSE, so the repair fixes the behaviour that produced
+    the wrong state — not the surface symptom. A failing assertion like "expected 'PURCHASE' but the
+    screen shows 'LOAD'" otherwise tempts a cosmetic relabel instead of fixing why the purchase was never
+    persisted / reflected. The design intent also sharpens RAG retrieval toward the code that PRODUCES
+    the state (e.g. the cross-kiosk persistence path) rather than the code that only displays a label."""
     test_id = tr.get("test_id", "")
     summary = tr.get("summary", "") or ""
     vision  = tr.get("vision_summary", "") or ""
@@ -3077,8 +3140,65 @@ def _failure_text_for(tr: dict) -> str:
         str(s.get("observation") or s.get("note") or s.get("step") or "")
         for s in failed[:3]
     )
-    return (f"{test_id} failed. {summary}. {vision} "
-            f"Failing steps: {detail}".strip())
+
+    # Design intent (what the app SHOULD do) from the test case — so the fix targets behaviour, not text.
+    description = preconditions = expected = ""
+    if test_id:
+        try:
+            from api.database import SessionLocal
+            db = SessionLocal()
+            try:
+                tc = db.query(models.TestCase).filter_by(test_id=test_id).first()
+                if tc:
+                    description   = (tc.description or "").strip()
+                    preconditions = (tc.preconditions or "").strip()
+                    expected      = (tc.expected_results_raw or "").strip()
+            finally:
+                db.close()
+        except Exception:
+            pass
+
+    # The ordered ACTIONS the test performed, redacted. This gives BOTH the RAG retrieval query and
+    # Claude the vocabulary of what the test was DOING when it failed (e.g. "Sign In", "add to cart",
+    # "check balance") — which anchors retrieval to the code path UNDER TEST rather than to the
+    # navigation symptom in the failed assertion. Without it, a login failure reads only as "wrong
+    # screen: expected products got login", which semantically matches screen/config code and buries
+    # the credential-check code that is actually broken (observed: the SignInScreen auth chunk fell to
+    # rank ~11, outside the retrieved set, so the repair had "insufficient context"). Type VALUES are
+    # redacted so a typed password never reaches the prompt/embedding; an email (a non-secret
+    # identifier) is kept because it adds useful retrieval signal and leaks nothing sensitive.
+    import re as _re
+    step_labels = []
+    for s in steps:
+        lbl = str(s.get("step") or "").strip()
+        if not lbl:
+            continue
+        m = _re.match(r"(?i)^\s*type:\s*(.*)$", lbl)
+        if m:
+            val = m.group(1).strip()
+            if not ("@" in val and " " not in val):   # keep an email identifier; redact anything else
+                lbl = "type: <redacted>"
+        if not s.get("success", True):
+            lbl += " [FAILED HERE]"
+        step_labels.append(lbl)
+
+    parts = [f"{test_id} failed. {summary}."]
+    intent = " ".join(p for p in (description, preconditions, expected) if p).strip()
+    if intent:
+        parts.append(f"EXPECTED BEHAVIOUR (design intent): {intent}")
+    if step_labels:
+        parts.append("Steps attempted (in order): " + " ; ".join(step_labels))
+    if vision:
+        parts.append(f"OBSERVED: {vision}")
+    if detail:
+        parts.append(f"Failing assertions: {detail}")
+    parts.append(
+        "Fix the ROOT CAUSE of why the expected behaviour did not happen — not the surface symptom. "
+        "If the expected outcome is a value that should have been persisted or shared across "
+        "screens/kiosks (a balance, a transaction), correct the code that PRODUCES or PERSISTS that "
+        "state, NOT code that merely displays or labels it."
+    )
+    return " ".join(parts).strip()
 
 
 def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list):
@@ -3101,17 +3221,22 @@ def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list):
     print(f"\n  [REPAIR] Auto-repair for run {run_id} / {test_id} → job {repair_id}")
     _broadcast(run_id, {"event": "repair_started", "run_id": run_id,
                         "repair_id": repair_id, "test_id": test_id})
+    cancel_event = threading.Event()
+    with _repair_lock:
+        _repair_cancel[repair_id] = cancel_event
     try:
         from repair_agent.repair_failed_test import run_repair
         result = run_repair(
             failure, test_id=test_id, apply=True, auto_pr=settings.repair_auto_pr,
             branch_suffix=repair_id.split("-")[-1],
             progress_cb=lambda u: _repair_stage(repair_id, u),
+            cancel_event=cancel_event,
         )
         with _repair_lock:
             job = _repair_jobs.setdefault(repair_id, {})
             job["result"] = result
-            job["status"] = "succeeded" if result.get("success") else "completed"
+            job["status"] = ("cancelled" if result.get("cancelled")
+                             else "succeeded" if result.get("success") else "completed")
             if result.get("error"):
                 job["error"] = result["error"]
             job["updated_at"] = datetime.utcnow().isoformat()
@@ -3119,12 +3244,15 @@ def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list):
         pr_url = (pr.get("opened") or {}).get("url", "")
         _broadcast(run_id, {"event": "repair_done", "run_id": run_id, "repair_id": repair_id,
                             "test_id": test_id, "success": bool(result.get("success")),
-                            "pr_url": pr_url})
+                            "cancelled": bool(result.get("cancelled")), "pr_url": pr_url})
     except Exception as e:
         print(f"  [REPAIR] Auto-repair error: {e}")
         _repair_set(repair_id, status="failed", error=str(e))
         _broadcast(run_id, {"event": "repair_done", "run_id": run_id, "repair_id": repair_id,
                             "test_id": test_id, "success": False, "error": str(e)})
+    finally:
+        with _repair_lock:
+            _repair_cancel.pop(repair_id, None)
 
 
 def _run_explorer(explore_id: str, kiosk_url: str, kiosk_id: str = ""):

@@ -375,6 +375,27 @@ class Settings(BaseSettings):
     # production use (bugs that landed on that branch → the agent's fix PR merges back into it).
     repair_pr_base: str = "demo/rps-login-bug"
 
+    # ── Auto-Repair DIAGNOSE model selection ──────────────────────────────────────────────────
+    # The repair pipeline makes exactly ONE LLM call (DIAGNOSE → propose_patch). This toggle picks
+    # which model that call TRIES FIRST; the other acts as an automatic backup, and the deterministic
+    # demo rule (`_demo_fallback_patch`) is always the last resort. Set from the Configuration page.
+    #   "claude" (default) — Claude Opus 4.8 primary; local LLM used only if Claude is unreachable.
+    #   "local"            — the local Ollama model primary (used to TEST the backup path); Claude backup.
+    # The local backend is Ollama (http, no cloud). It stays OFF unless explicitly selected or reached
+    # as a fallback, and `langchain_ollama` is imported LAZILY — so nothing changes / no new hard
+    # dependency until you use it. Requires `pip install langchain-ollama` + an Ollama server with the
+    # model pulled (`ollama pull qwen2.5-coder:14b`).
+    repair_llm_backend: str = "claude"          # claude | local
+    repair_local_model: str = "qwen2.5-coder:14b"
+    repair_local_base_url: str = "http://localhost:11434"
+    repair_local_num_ctx: int = 8192            # context window for the local model (tokens)
+    repair_local_timeout_s: int = 120           # per-call timeout for the local model
+    # Hard wall-clock cap on EACH provider's DIAGNOSE call so a stuck/slow model (e.g. a cold local
+    # Ollama load, or a hung request) can never freeze the repair — on timeout the chain moves to the
+    # next provider, then the demo fallback. Keep < repair_local_timeout_s is fine; this is the outer
+    # guarantee regardless of whether the provider honours its own timeout.
+    repair_diagnose_timeout_s: int = 90
+
     # Management API (FastAPI server for management frontend)
     api_host: str = "0.0.0.0"
     api_port: int = 8001

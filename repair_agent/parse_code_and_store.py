@@ -181,6 +181,16 @@ def parse_text_file(file_path):
 
 
 def extract_docx_text(file_path):
+    """Index the design doc SECTION-BY-SECTION (split on Word Heading styles), not as a few giant
+    windows.
+
+    The doc uses Heading1 styles ("Payment and Card Reader Design", "Shared Card and Balance Design",
+    …). Chunking the whole doc into 2200-char windows buried key spec sentences (e.g. "if the purchase
+    succeeds … a PURCHASE transaction is recorded") inside a big averaged chunk that ranked below the
+    retrieval cut, so the repair agent never saw the rule it needed. Splitting per heading makes each
+    section its own focused, well-ranking chunk; the heading is prepended (and stored in metadata) so
+    the section is self-describing and its terms boost retrieval. Falls back to one section when the
+    doc has no heading styles."""
     if not Path(file_path).exists():
         return []
 
@@ -188,14 +198,39 @@ def extract_docx_text(file_path):
         xml_content = docx.read("word/document.xml")
 
     root = ET.fromstring(xml_content)
-    namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-    paragraphs = []
-    for paragraph in root.findall(".//w:p", namespace):
-        text = "".join(node.text or "" for node in paragraph.findall(".//w:t", namespace)).strip()
-        if text:
-            paragraphs.append(text)
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    val_key = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val"
 
-    return chunk_text("\n".join(paragraphs), file_path, "design_document")
+    sections: list[tuple[str, list[str]]] = []   # (heading, [paragraph texts])
+    cur_heading, cur_paras = "", []
+    for paragraph in root.findall(".//w:p", ns):
+        text = "".join(node.text or "" for node in paragraph.findall(".//w:t", ns)).strip()
+        if not text:
+            continue
+        style = paragraph.find("./w:pPr/w:pStyle", ns)
+        style_val = (style.get(val_key) or "").lower() if style is not None else ""
+        if style_val.startswith("heading") or style_val == "title":
+            if cur_heading or cur_paras:
+                sections.append((cur_heading, cur_paras))
+            cur_heading, cur_paras = text, []
+        else:
+            cur_paras.append(text)
+    if cur_heading or cur_paras:
+        sections.append((cur_heading, cur_paras))
+
+    documents = []
+    for heading, paras in sections:
+        body = "\n".join(paras).strip()
+        section_text = (f"{heading}\n{body}" if heading else body).strip()
+        if not section_text:
+            continue
+        # Smaller windows than the default so each section stays focused; a long section still splits.
+        documents.extend(chunk_text(
+            section_text, file_path, "design_document",
+            chunk_size=1000, overlap=150,
+            extra_metadata={"section": heading} if heading else None,
+        ))
+    return documents
 
 
 def extract_xlsx_text(file_path):
@@ -296,6 +331,21 @@ def build_codebase_index():
             documents=all_documents, embedding=embedding_model,
             persist_directory=str(PERSIST_DIR),
         )
+    # Drop chromadb's per-process client cache so a SEARCH in this same process (the running backend
+    # that just rebuilt in-place) reopens the collection and reads the freshly written chunks instead
+    # of a cached handle to the pre-rebuild collection UUID. Without this, an in-running "Rebuild
+    # index" could silently keep serving the OLD index (observed: a rebuild appeared to succeed yet
+    # retrieval still returned pre-edit code, so the repair diagnosed against stale source). Best-effort
+    # across chromadb versions; a fresh process has no cache so this is a no-op there.
+    for _clear in (
+        lambda: __import__("chromadb.api.shared_system_client", fromlist=["SharedSystemClient"]).SharedSystemClient.clear_system_cache(),
+        lambda: __import__("chromadb").api.client.SharedSystemClient.clear_system_cache(),
+    ):
+        try:
+            _clear()
+            break
+        except Exception:
+            continue
     print(f"Indexing complete! {len(all_documents)} chunks persisted at {PERSIST_DIR}.")
     return len(all_documents)
 

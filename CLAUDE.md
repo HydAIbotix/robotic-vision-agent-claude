@@ -661,6 +661,266 @@ Fixes (both in `repair_agent/`, no behaviour change to WHICH chunks are retrieve
   end-to-end for both the App.tsx (login) and storage.ts (design) bug shapes. This helps every agent that
   calls `search()`. **RESTART the backend** to load the change (uvicorn has no `--reload`).
 
+### Recent progress (2026-08-25) — Auto-Repair local-LLM backup (Claude primary, Ollama fallback)
+
+The Auto-Repair DIAGNOSE step (the pipeline's ONE LLM call) can now fall back to a **local, self-hosted
+model** when Claude can't be reached — Claude stays primary and default. A Configuration-page toggle drives
+which model is tried first.
+
+- **Fallback chain** (`repair_agent/repair_failed_test.py`): `propose_patch` iterates an ordered provider
+  list from `_diagnose_providers()`, driven by `settings.repair_llm_backend` (`claude` | `local`):
+  `claude` → **[Claude, local]** (Claude primary, local backup — the "Claude unreachable" case);
+  `local` → **[local, Claude]** (used to TEST the local path). Each provider is wrapped in try/except; a
+  missing/unreachable one (Ollama server down, `langchain-ollama` not installed → clean `ImportError`) is
+  skipped and the next is tried. The deterministic `_demo_fallback_patch` remains the final last resort.
+  Provider factories are LAZY, so selecting `claude` never touches Ollama and vice-versa — no behavior
+  change / no new hard dependency until the local path is actually used.
+- **Local model = Ollama + Qwen2.5-Coder-14B** (`vision_agent/llm.py::get_local_llm`, lazy-imports
+  `langchain_ollama.ChatOllama`). Config in `vision_agent/config.py`: `repair_llm_backend` (default
+  `claude`), `repair_local_model` (`qwen2.5-coder:14b`), `repair_local_base_url`
+  (`http://localhost:11434`), `repair_local_num_ctx` (8192), `repair_local_timeout_s` (120). `invoke_json`'s
+  existing fence-strip + prose-wrapped-JSON recovery is what makes a weaker local model's messier output
+  usable.
+- **`RepairPatch` now carries `source` (`claude`|`local`|`demo-fallback`) + `model`**, flowing through
+  `asdict` → diagnose stage → the job the UI polls. The Auto-Repair dashboard shows a **"produced by" badge**
+  on the diagnose step (☁ Claude / 🖥 Local LLM · model / ⚙ Demo fallback) — a visual confirmation of which
+  model actually made the fix.
+- **UI toggle** — Configuration page → **Auto-Repair Model** card (two radio cards, Claude default). Backend:
+  `GET /api/config` returns `repair_llm{backend,local_model,local_base_url}`; `PATCH /api/config/repair-llm`
+  `{backend}` sets it **LIVE** (`propose_patch` reads `settings.repair_llm_backend` at call time → next
+  repair uses the new choice, **no restart**) and persists `REPAIR_LLM_BACKEND` to `.env` via `_persist_env`
+  (API key + other lines untouched).
+- **To enable the local path:** `pip install langchain-ollama`, install Ollama, `ollama pull
+  qwen2.5-coder:14b` (~9 GB VRAM at Q4; runs on a 12 GB consumer GPU / Apple Silicon, CPU-only works but is
+  slow — fine for a rare fallback). Not installing it changes nothing (Claude-only, as before).
+- **To TEST it:** Configuration → Auto-Repair Model → **Local LLM** → Save (chip shows the model). Check out a
+  demo bug branch, rebuild the RAG index, run its test → it fails → the diagnose badge reads **🖥 Local LLM ·
+  qwen2.5-coder:14b**. To verify the *automatic backup*, leave it on **Claude** but stop the network / unset
+  the key → the run falls through to Local automatically (badge shows Local). Simpler bugs (login `-bug`,
+  products `0`) fix reliably on 14B; the design-doc card-sharing bug is weaker locally — that's expected for
+  a backup. `python -m repair_agent` internals verified end-to-end with fakes (order + fallback + demo
+  last-resort). **No regression:** default is Claude, lazy imports, frontend `tsc + vite build` clean.
+
+### Recent progress (2026-08-25) — 4th demo bug (cross-kiosk txn) + TC-VPS-009 false-PASS fix
+
+- **New demo bug branch `demo/rps-vps-txn-bug`** (off `main`, single-line, testids unchanged): in
+  `src/App.tsx` `createApprovedStatusFromCardNumber`, the purchase-persistence guard is
+  `if (balanceAfter !== undefined && !issuedSmartCard)`, so an RPS (Kiosk POS) purchase against an
+  **issued** ValuePass smart card skips `recordCardTransaction` (deduct + log PURCHASE). The purchase
+  still shows approved on RPS, but the shared card store never sees it → when the card is later checked
+  on the VPS SmartCardStation the **balance is unchanged from its initial load and the PURCHASE
+  transaction is missing** — violating the design (a purchase at kiosk-2 must reflect in balance +
+  history at kiosk-1). The fix reverts the guard to `if (balanceAfter !== undefined)`. Contradicts the
+  comment right below it → diagnosable; **no `_demo_fallback_patch`** for it (genuine LLM test, like the
+  card-sharing design bug). Chosen write-side (not a VPS read-side "don't refresh") because VPS/RPS are
+  **same-origin** (`localhost:5173`) and share `localStorage`, so a read-side bug wouldn't reproduce.
+- **False-PASS fix — TC-VPS-009 was asserting the wrong thing** (`results/run-30-145029-2508`): the
+  test PASSED on the buggy build even though the screenshot showed no purchase in the history. Root
+  cause: the plan's final `verify` had `expected_value:"0005322931"` — the card number **typed two
+  steps earlier** — so the Tier-1 DOM check found it and passed; the transaction ledger was never
+  asserted (a tautology — asserting a value you just typed proves nothing about the outcome). Fix
+  (targeted, deterministic, 0-LLM; user chose this over a general engine guard, and to keep the test
+  **check-only**): the verify now asserts **`expected_value:"PURCHASE"`** — the VPS ledger renders each
+  row as `<small>{txn.type} · {txn.kioskId} · …</small>`, so a real purchase shows the text `PURCHASE`,
+  absent under the bug (playwright `_check_text` → deterministic `False` when absent → verify FAILS →
+  auto-repair fires). `PURCHASE` appears **only** in the ledger on the station screen (other "purchase"
+  strings live on unmounted screens), so no false match. Applied to: the **DB** `test_cases`
+  `expected_results_raw` (rewritten to explicitly name `'PURCHASE'` so a Tier-2 re-plan also asserts it)
+  AND a **pre-written cached plan** at the new cache key (`test_plans/TC-VPS-009_f019e1af98.json`;
+  cache key = `md5(planner_ver|test_id|steps_raw|expected_results_raw|map_version)`, so changing the
+  expected text re-keys it — the old `_c8123c2039.json` was orphaned and removed). Verified end-to-end:
+  Tier-1 HIT + `is_valid` on the new plan, final verify `expected_value=='PURCHASE'`.
+  - ⚠️ **Dependency of the check-only design:** TC-VPS-009 does NOT itself purchase — it just checks
+    card 0005322931. Run it **after** a test that makes an RPS purchase with that card, or it fails
+    regardless of the bug (no purchase to show). Precondition documents this.
+  - ⚠️ The **Excel workbook** (`docs/kiosk_e2e_tests.xlsx`, row 18 "Expected Results"/"Preconditions")
+    was **NOT** updated — the file was locked (open). Re-importing test cases from it would revert the
+    DB `expected_results_raw` and orphan the new plan. Sync it (paste the DB's new expected text, which
+    must byte-match) before any re-import, or the fix silently reverts.
+
+### Recent progress (2026-08-25) — Auto-Repair DIAGNOSE timeout + cancel button
+
+Two robustness fixes after a repair hung (Anthropic credits were exhausted → Claude 400'd fast → the
+chain fell through to the local Ollama/Qwen-14B backup, which was slow/cold-loading and appeared stuck):
+
+- **Per-provider DIAGNOSE timeout** (`settings.repair_diagnose_timeout_s`, default 90s): `propose_patch`
+  runs each provider's `invoke_json` on a daemon thread via `_invoke_with_deadline` and abandons it on
+  timeout → moves to the next provider, then the demo fallback. A stuck/slow model can NEVER freeze the
+  repair now. The abandoned daemon thread finishes harmlessly (daemon → never blocks shutdown). Verified:
+  a hanging primary times out and the backup completes; provider order + fallback unchanged.
+- **Cancel** — cooperative, since Python can't force-kill a thread: `repair_agent/canceller.py` maps the
+  graph's internal id → a `threading.Event`; every node calls `bail_if_cancelled()` at its boundary and
+  the DIAGNOSE wait polls it, so a cancel stops at the next stage / interrupts a slow diagnose (raising
+  `RepairCancelled`, caught by `run_repair` → result `{cancelled:True}`). API owns the Event:
+  `POST /api/repair/{id}/cancel` sets it + marks the job `cancelling` (→ `cancelled` when it unwinds);
+  `_repair_cancel` dict, cleaned up in `finally`. `run_repair(..., cancel_event=…)` registers it under the
+  internal rid. Frontend: a **⨯ Cancel** button on each running Auto-Repair card (`AutoRepair.tsx`,
+  `api.cancelRepair`), new `cancelling`/`cancelled` badges + a neutral "Cancelled — no changes committed"
+  banner. **No regression:** normal dry-run/full runs stream identically; only a set Event changes behaviour.
+- ⚠️ **The real trigger here was billing:** `run-37` shows `Your credit balance is too low to access the
+  Anthropic API` — Claude calls (verdict, validation, diagnose-primary) 400 instantly. Top up credits (or
+  switch Auto-Repair Model → Local LLM) or the diagnose will always fall to the local/back-up path.
+
+### Recent progress (2026-08-25) — sharper failure text steers repair to ROOT CAUSE (not the label)
+
+The TC-VPS-009 repair kept proposing a WRONG fix — relabeling a VPS transaction `type: 'LOAD'` → `'PURCHASE'`
+(run-37/38) — because the failure text handed to the agent led with the surface symptom ("expected 'PURCHASE'
+but the screen shows 'LOAD'"), which both misled Claude AND made RAG retrieve the ledger/label code instead of
+the real bug (the `&& !issuedSmartCard` persistence guard in the RPS purchase path). Two fixes:
+
+- **`_failure_text_for` (api/main.py) now leads with DESIGN INTENT + a root-cause steer.** It pulls the test
+  case's `description` + `preconditions` + `expected_results_raw` from the DB and frames the failure as
+  `EXPECTED BEHAVIOUR (design intent): … OBSERVED: … Failing assertions: … Fix the ROOT CAUSE … correct the code
+  that PRODUCES or PERSISTS that state, NOT code that merely displays or labels it.` This sharpens the RAG query
+  too — verified: retrieval now surfaces `createApprovedStatusFromCardNumber` (App.tsx L312-389, the buggy guard),
+  which it previously missed. General win for every auto-repair (design intent + anti-symptom framing).
+- **Anti-relabel rule in `_DIAGNOSE_PROMPT`:** "If the failure is a wrong/missing VALUE, LABEL or on-screen TEXT,
+  do NOT make it pass by hardcoding or relabeling a string … Relabeling the displayed text (e.g. changing a
+  transaction 'type' from one label to another) is almost never the correct fix." Safe for the other demo bugs
+  (all root-cause single-token fixes).
+- ⚠️ **"Patch find-text was not found in the target file" = a STALE RAG index** (built on a different branch than
+  what's on disk — here the messy `repair/tc-vps-009-fix-*` branch that carried BOTH the guard bug and the earlier
+  wrong relabel). The LLM proposes a `find` from indexed code that no longer matches disk → apply refuses. **Fix:
+  check out the clean `demo/rps-vps-txn-bug`, REBUILD the RAG index, then run.** And this bug only truly PASSES
+  after a fresh RPS purchase with the fixed code (check-only test) — and needs Anthropic credits for Claude to
+  diagnose. RESTART the backend to load these changes.
+
+### Recent progress (2026-08-25) — repair now retrieves the DESIGN SPEC (root-cause fix for the relabel loop)
+
+The TC-VPS-009 repair kept mis-fixing (relabel `type:'LOAD'`→`'PURCHASE'`) even after the sharper failure text
+got the right CODE (`createApprovedStatusFromCardNumber`) into context — because the **design document was never
+in the retrieved context**, so Claude couldn't reason from the spec and hallucinated. Diagnosis:
+- The design doc **is** indexed (`extract_docx_text` → 3 `design_document` chunks; one holds the "Payment and Card
+  Reader Design" section with *"if the purchase succeeds, the card balance is reduced and a PURCHASE transaction is
+  recorded"*). It IS retrievable via a `where={"type":"design_document"}` search.
+- BUT `retrieve_context` did **code-first** retrieval + only `general_docs = search(rq, k=2)` unfiltered, and the
+  design chunk ranked ~#5 → it never made the cut. Claude got code but no spec → guessed wrong.
+- **Fix** (`retrieve_context`): a dedicated `design_docs = search(rq, k=_DESIGN_DOCS=2, where={"type":"design_document"})`
+  pass, inserted **right after the code hits** (before the `_MAX_CONTEXT_BLOCKS=16` cap) so the spec is ALWAYS
+  included; design chunks render with a `DESIGN SPEC (authoritative: the code MUST conform to this)` header so the
+  LLM weighs them as ground truth. Verified for the TC-VPS-009 failure: context now contains BOTH the buggy
+  `&& !issuedSmartCard` guard function AND the "PURCHASE transaction is recorded" spec sentence. This is what lets
+  Claude reason "the spec requires recording a PURCHASE for an issued card → the guard that skips it is the bug"
+  instead of relabeling. General win — every repair now sees the relevant spec (helps the card-sharing design bug too).
+- This is a RETRIEVAL-logic fix (no re-index needed — the design chunks were already indexed); just **RESTART the
+  backend**. Separately, the "find-text not found" error is still a STALE-index/branch-mismatch symptom — rebuild the
+  index on the clean `demo/rps-vps-txn-bug` before running. (Optional further improvement: the design doc is only 3
+  coarse chunks; finer paragraph/section chunking in `extract_docx_text` would sharpen design retrieval further.)
+
+### Recent progress (2026-08-25) — the REAL root cause: snippet truncation hid the buggy line + coarse design chunks
+
+The repair STILL mis-fixed even after design retrieval was added — three compounding retrieval bugs, now fixed:
+- **Snippet truncation cut the buggy line out of the context (the decisive bug).** `retrieve_context` rendered
+  each chunk as `page_content[:1800]`. The buggy `createApprovedStatusFromCardNumber` chunk is 2837 chars and its
+  guard `&& !issuedSmartCard` sits at offset **1910** — PAST the cut. So Claude retrieved the right function but
+  literally never saw the buggy line; it saw the opening + the "LOAD" symptom and guessed (relabel). Fix: caps
+  raised to `_SNIPPET_PROMPT=4000` / `_SNIPPET_HIT=2500` so a whole function reaches the LLM. **This is why the
+  fix kept being wrong and why apply hit "find-text not found"** (a guess targets code that isn't there).
+- **Design doc was 3 giant 2200-char windows** → key sentences diluted below the retrieval cut. `extract_docx_text`
+  now splits **by Word Heading style** (11 Heading1 sections) into ~12 focused `design_document` chunks (heading
+  prepended + stored in `section` metadata, `chunk_size=1000`). Requires an index REBUILD (chunking change).
+- **Symptom-side query ranked the CAUSE-side design section low.** The VPS-check failure query ranks "Payment and
+  Card Reader Design" (the section with "if the purchase succeeds … a PURCHASE transaction is recorded") ~#4 among
+  design chunks, so `_DESIGN_DOCS` was bumped 2→**5** to reliably include it.
+- Verified end-to-end for the TC-VPS-009 failure: context now contains ALL of — the design spec sentence, the buggy
+  `balanceAfter !== undefined && !issuedSmartCard` guard LINE, and the `type: 'PURCHASE'` (proving the label is
+  already correct, so the bug is the guard, not a relabel). The guard line is unique on disk → a correct fix applies
+  cleanly. **RESTART the backend** (truncation + `_DESIGN_DOCS` are runtime) and the index is rebuilt (216 chunks).
+- **Branch note:** `demo/rps-vps-txn-bug` has NO auto-repair commits — just the bug (`51466cf`) + one manual
+  `e8c1cb1 "fix smartcard mock load card number"` (makes the mock-card button issue the fixed demo card 0005322931).
+  The "find-text not found" was the truncation bug above, NOT branch pollution. Strip `e8c1cb1` only if you want
+  bug-only (it changes mock-card behaviour the demo may rely on).
+
+### Recent progress (2026-08-25) — re-exploration flakiness: separator-insensitive screen-identity match
+
+Symptom (`results/run-2-182823-2508`): after an **App re-exploration**, the simple TC-RPS-001 login test
+suddenly FAILED at the very FIRST `verify` — `Wrong screen: expected 'login', got 'sign_in' [dom]` — even
+though nothing about the login screen changed. Root cause was a **separator-sensitivity bug** in playwright
+screen-identity, exposed by re-exploration reshuffling the exact string:
+- The app_map keys the screen `login` with `dom_id: "signin"` (all its elements are `signin-*`). The live
+  DOM normalizes the container to **`sign_in`** (underscore). The reverse-lookup cache
+  (`_load_dom_to_screen_cache`) was keyed by the **raw** recorded `dom_id` (`"signin"`), so a live `sign_in`
+  MISSED it, and `get_dom_screen_id()` returned `sign_in` unresolved. Then the **charted** verify path
+  (`verify_current_screen`) did a **strict `==`** compare (`"sign_in" == "login"` → False → FAIL). (The
+  *uncharted* path already tolerated this via `_screens_equivalent`; the charted path did not — an asymmetry.)
+- **Fix** (`vision_agent/robot/playwright_stubs.py`): a new `_norm_sid()` collapses a screen id to its
+  separator-insensitive lowercase core (`signin`/`sign_in`/`sign-in`/`Sign In` → `signin`). (a) The reverse
+  cache is now keyed by the NORMALIZED dom_id **and** the normalized screen key (key→itself), and
+  `get_dom_screen_id()` looks up by `_norm_sid(sid)` — so any separator style resolves to the canonical
+  `login` for EVERY caller. (b) `verify_current_screen` now matches the live id against the normalized
+  **expected key AND that screen's `dom_id`**, using **exact normalized equality (never substring)** so
+  distinct screens can't collide — a defensive second layer immune even if the dom_id/cache is stale.
+  Verified against the live app_map: `sign_in`/`signin`/`login` all → match `login`; `products` → no match.
+- ⚠️ **Operational note (separate from the code bug):** the run failed on a build where the login bug was
+  ABSENT — the kiosk app was checked out on a LEFTOVER `repair/tc-rps-001-fix-<8hex>` branch (an old
+  auto-repair fix branch), NOT `demo/rps-login-bug`. That's also why re-exploration charted `products`
+  (login succeeded). For the login-bug demo, **check out `demo/rps-login-bug`** first, then re-explore /
+  rebuild the index. **RESTART the backend** to load this fix (the dom→screen cache is a module global,
+  cleared on restart; uvicorn has no `--reload`).
+
+### Recent progress (2026-08-25) — repair retrieval regression: two-lane (intent + action) code search
+
+Symptom (`results/run-3-184426-2508`): after the screen-match fix above, TC-RPS-001 correctly FAILED on
+the login bug (step 1 login-screen verify PASSES; the products-screen verify FAILS because the bug rejects
+valid credentials and stays on sign-in) — but Auto-Repair's DIAGNOSE said *"Insufficient context: the
+credential-authentication code … was not retrieved."* The `SignInScreen` chunk holding the buggy
+`user.password !== ` `` `${password}-bug` `` line ranked **#11** in code retrieval — outside the retrieved set.
+Root cause: the failure manifests as a **navigation symptom** ("did not reach the products screen"), and the
+enriched failure text's **design-intent navigation vocabulary** ("lands on the products screen", "Select
+Product and Quantity") — the SAME enrichment that VPS-009 needs to reach its persistence code — dominates the
+embedding and pulls retrieval toward screen/config code (`developerSettings.ts`), burying the credential
+check. A single blended query can't serve both failure shapes at once.
+
+Fix (all in `repair_agent/repair_failed_test.py` + `api/main.py`, additive / degrades cleanly):
+- **`_failure_text_for` (api/main.py) now appends "Steps attempted (in order): …"** — the ordered ACTIONS
+  the test performed. This gives retrieval (and Claude) the ACTION vocabulary of the code path UNDER TEST
+  ("Sign In", "add to cart", "check balance") instead of only the outcome symptom. Type VALUES are redacted
+  so a typed **password never reaches the prompt/embedding** (an email identifier is kept — non-secret, adds
+  signal); the failed step is marked `[FAILED HERE]`.
+- **Two-lane interleaved code retrieval in `retrieve_context`:** Lane 1 (intent/symptom) = the full failure
+  (unchanged — surfaces the code that PRODUCES the wrong outcome, e.g. a cross-kiosk persistence guard —
+  VPS-009 path preserved). Lane 2 (action) = `_action_query()` built from summary + the Steps-attempted line
+  + failing assertion (surfaces the code for the ACTION that failed — the credential check). The two lanes'
+  hits are **interleaved round-robin, deduped, capped at `top_k`** so neither vocabulary buries the other,
+  and DESIGN/general docs still fit the `_MAX_CONTEXT_BLOCKS=16` budget (design still = 5). `top_k` 6→8 for a
+  small margin. When a failure has no Steps line the action query collapses to the intent query → identical
+  single-lane behaviour (no regression).
+- Verified end-to-end on the run-3 failure: the `SignInScreen` auth chunk (with `-bug`) is now included at
+  block 5, design chunks still 5, the failure text does not leak the password. VPS-009's intent lane is
+  unchanged (its index lives on `demo/rps-vps-txn-bug`, not testable on the login-bug index, so the change was
+  kept a strict superset of the intent path it relies on). **RESTART the backend** to load these runtime
+  changes (retrieval-logic only — no re-index needed).
+- Note: retrieved CODE legitimately contains the app's own demo password (it's in the source) — that is the
+  code the repair must see and is NOT a failure-text leak; only the failure DESCRIPTION is redacted.
+
+### Recent progress (2026-08-25) — VPS-009 "wrong fix" was a STALE INDEX, not the two-lane retrieval
+
+Symptom (`results/run-6-195052-2508`): after the two-lane retrieval change, TC-VPS-009 on
+`demo/rps-vps-txn-bug` still got a WRONG fix even though the design-doc spec ("…a PURCHASE transaction
+is recorded") WAS retrieved. It looked like a retrieval regression; it was not.
+
+Root cause — the persisted RAG index was STALE:
+- The live `docs/chroma_code_db` `langchain` collection held the **FIXED** `createApprovedStatusFromCardNumber`
+  (guard `if (balanceAfter !== undefined)`), while disk had the **buggy** `&& !issuedSmartCard` guard
+  (`App.tsx:361`). The last successful rebuild had indexed fixed code (the branch has fix/revert churn,
+  e.g. `c9ac86c "Reverted the auto-repair change"`); the buggy disk was never re-indexed. So Claude never
+  saw the buggy line and guessed. Proven: the tree-sitter chunker DOES capture `&& !issuedSmartCard` from
+  current disk (1 chunk, 2837 chars), and a fresh temp-dir rebuild → `retrieve_context` puts that buggy
+  chunk at **block 2** with the design spec present. The two-lane change was exonerated (it retrieved the
+  right FUNCTION; only the persisted CONTENT was stale). **User rebuilt the index → TC-VPS-009 fixed correctly.**
+- Diagnostic tell: `search(...)` returns code whose lines don't match disk (here the guard line differed);
+  the persist dir had accumulated **7 orphan collection-UUID dirs** from repeated in-place rebuilds.
+- **Hardening** (`repair_agent/parse_code_and_store.py`): `build_codebase_index` now clears chromadb's
+  per-process client cache (`SharedSystemClient.clear_system_cache()`, best-effort across versions) after a
+  rebuild, so a SEARCH in the same running-backend process reopens the collection and reads the freshly
+  written chunks instead of a cached handle to the pre-rebuild collection UUID (a known way an in-running
+  "Rebuild index" could appear to succeed yet keep serving the OLD index). Verified: rebuild → in-process
+  search reads fresh; chunk count unchanged (221); no build regression.
+- **Rule reinforced:** after checking out / reverting on a demo bug branch, **REBUILD the RAG index against
+  the on-disk code before running the repair** — the index reflects code AT BUILD TIME, and a rebuild done
+  while the branch was transiently fixed leaves the buggy line unindexed. HNSW ranking varies slightly build
+  to build; the buggy chunk lands at block ~2 with `top_k=8`, comfortably included.
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login

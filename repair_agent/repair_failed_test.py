@@ -22,6 +22,7 @@ import os
 import platform
 import re
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -29,7 +30,8 @@ from typing import Callable, Optional
 from langchain_core.messages import HumanMessage
 
 from vision_agent.config import settings
-from vision_agent.llm import get_llm, invoke_json
+from vision_agent.llm import get_llm, get_local_llm, invoke_json
+from repair_agent.canceller import RepairCancelled
 from repair_agent.parse_code_and_store import CODEBASE_DIR, PERSIST_DIR, SKIP_DIRS, search
 
 
@@ -42,6 +44,8 @@ class RepairPatch:
     find: str
     replace: str
     explanation: str
+    source: str = "claude"   # which provider produced it: claude | local | demo-fallback
+    model: str = ""          # the concrete model name (for UI/telemetry)
 
 
 _DIAGNOSE_PROMPT = """You are a senior software repair agent fixing a FAILED automated test for a
@@ -62,6 +66,12 @@ Rules:
 - Keep "find" and "replace" nearly identical except for the exact buggy fragment.
 - "find" must appear EXACTLY ONCE in the target file so the replacement is unambiguous.
 - Do not reformat unrelated code. Do not invent files or symbols not in the context.
+- Fix the ROOT CAUSE, not the symptom. If the failure is a wrong/missing VALUE, LABEL or on-screen
+  TEXT, do NOT make it pass by hardcoding or relabeling a string to match the expected text. Find and
+  fix the code that PRODUCES or PERSISTS that value/state — a wrong guard/condition that skips a write,
+  a wrong endpoint, a dropped update — even when it lives in a different function or file than where the
+  text is displayed. Relabeling the displayed text (e.g. changing a transaction "type" from one label
+  to another) is almost never the correct fix.
 
 FAILED TEST / DEFECT:
 {failure}
@@ -130,15 +140,46 @@ def _retrieval_query(failure: str) -> str:
     return q or failure
 
 
+def _action_query(failure: str) -> str:
+    """A second, ACTION-focused retrieval query built from what the test was DOING (its executed
+    steps) rather than what it was supposed to achieve (the design intent).
+
+    The full failure text is dominated by the design intent + the failed-assertion SYMPTOM, whose
+    vocabulary points at the outcome/navigation (e.g. a login failure reads as "did not reach the
+    products screen") — semantically far from the code that is actually broken (the credential
+    check). The executed steps ("Enter tester email", "Tap Sign In to submit credentials") carry the
+    ACTION vocabulary that anchors retrieval to the code path under test. Running this as a SEPARATE
+    query (interleaved with the intent query in retrieve_context) means neither vocabulary can bury
+    the other — the design-intent lane still surfaces persistence/spec code (needed for the
+    cross-kiosk value bugs), while this lane surfaces the code for the action that failed. Falls back
+    to the full jargon-stripped query when the failure carries no recognisable steps line."""
+    summary = failure.split("EXPECTED BEHAVIOUR")[0]
+    m = re.search(r"Steps attempted \(in order\):(.*?)(?: OBSERVED:| Fix the ROOT CAUSE|$)", failure, re.S)
+    steps = m.group(1) if m else ""
+    fa = re.search(r"Failing assertions:(.*?)(?: Fix the ROOT CAUSE|$)", failure, re.S)
+    parts = summary + " " + steps + " " + (fa.group(1) if fa else "")
+    aq = _retrieval_query(parts)
+    return aq if (steps.strip() and aq.strip()) else _retrieval_query(failure)
+
+
 # File-neighborhood expansion tuning: when a SMALL support module is implicated, show Claude the whole
 # module. Large files (App.tsx) are skipped so context stays focused.
 _SMALL_FILE_MAX_CHUNKS = 25   # a file with ≤ this many indexed chunks is a "small module" → expand fully
 _EXPAND_FILES          = 2    # expand at most this many implicated small modules
 _MAX_CONTEXT_BLOCKS    = 16   # hard cap on chunks handed to the LLM
+_DESIGN_DOCS           = 5    # design-doc chunks to ALWAYS include (the spec that reveals the root cause).
+                              # The doc is small (~12 focused section chunks); a symptom-side failure query
+                              # can rank the CAUSE-side section (e.g. "Payment and Card Reader Design") ~#4,
+                              # so pull a few to reliably include it without bloating context.
 
 
-def retrieve_context(failure: str, top_k: int = 6) -> tuple[str, list[dict]]:
-    """Semantic search over the Chroma RAG index. Returns (prompt_text, structured_hits)."""
+def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
+    """Semantic search over the Chroma RAG index. Returns (prompt_text, structured_hits).
+
+    top_k is the number of CODE chunks pulled (was 6). A real buggy chunk can sit at rank ~7–8 when
+    the failure query is dominated by symptom/navigation vocabulary (e.g. a login failure reads as
+    "wrong screen: products vs login"); a slightly wider code window keeps that chunk in the set
+    without crowding out the design-doc / general context (final cap `_MAX_CONTEXT_BLOCKS`)."""
     if not PERSIST_DIR.exists():
         raise RuntimeError(
             f"RAG index not found at {PERSIST_DIR}. Build it first: "
@@ -151,7 +192,42 @@ def retrieve_context(failure: str, top_k: int = 6) -> tuple[str, list[dict]]:
     # general hits (design doc / test cases) for product context. Code always comes first.
     rq = _retrieval_query(failure)
     code_where = {"type": {"$in": ["code_block", "code_file"]}}
-    code_docs = search(rq, k=top_k, where=code_where)
+    # TWO-LANE code retrieval, interleaved. Lane 1 (intent/symptom) = the full failure — surfaces the
+    # code that PRODUCES the wrong outcome (a cross-kiosk persistence guard, a value path). Lane 2
+    # (action) = the executed steps — surfaces the code for the ACTION that failed (a credential
+    # check, an add-to-cart). A single blended query lets whichever vocabulary is heavier bury the
+    # other (observed: the design-intent "products screen" navigation words pushed the login
+    # credential code out of the retrieved set → "insufficient context"). Interleaving guarantees
+    # both lanes are represented. When there is no distinct steps line the action query collapses to
+    # the intent query, so this degrades cleanly to the previous single-lane behaviour.
+    rq_action = _action_query(failure)
+    intent_code = search(rq, k=top_k, where=code_where)
+    if rq_action == rq:
+        code_docs = intent_code
+    else:
+        action_code = search(rq_action, k=top_k, where=code_where)
+        code_docs, _cseen = [], set()
+        for a, b in zip(intent_code, action_code):
+            for d in (a, b):
+                ck = (d.metadata.get("source"), d.metadata.get("start_line"), d.page_content[:40])
+                if ck not in _cseen:
+                    _cseen.add(ck)
+                    code_docs.append(d)
+        # append any tail (unequal lengths) preserving order, still deduped
+        for d in list(intent_code) + list(action_code):
+            ck = (d.metadata.get("source"), d.metadata.get("start_line"), d.page_content[:40])
+            if ck not in _cseen:
+                _cseen.add(ck)
+                code_docs.append(d)
+        # Keep only the interleaved top-`top_k` so the two lanes don't crowd the DESIGN/general docs
+        # out of the final `_MAX_CONTEXT_BLOCKS` budget (both lanes' best hits are up front).
+        code_docs = code_docs[:top_k]
+    # DESIGN INTENT. The design doc states the SPEC ("if the purchase succeeds … a PURCHASE transaction
+    # is recorded"), which is what tells the LLM the ROOT CAUSE — e.g. that a guard skipping the record
+    # for issued cards is the bug, not a label to relabel. It IS indexed but ranks below code in a plain
+    # search, so a code-first retrieval never surfaced it and the LLM had to guess. Pull it EXPLICITLY by
+    # type and include it up-front so the spec always reaches Claude alongside the offending code.
+    design_docs = search(rq, k=_DESIGN_DOCS, where={"type": "design_document"})
     general_docs = search(rq, k=2)
 
     # FILE-NEIGHBORHOOD EXPANSION. A symptom-level failure query ("card not found cross-kiosk") often
@@ -176,8 +252,11 @@ def retrieve_context(failure: str, top_k: int = 6) -> tuple[str, list[dict]]:
         if len(seen_files) >= _EXPAND_FILES:
             break
 
+    # Order: the offending CODE first, then the DESIGN spec (the intent that reveals the root cause),
+    # then expanded neighbours, then general product context. Design goes before the cap so it is never
+    # crowded out by code/expansion.
     docs, seen = [], set()
-    for d in list(code_docs) + expanded + list(general_docs):
+    for d in list(code_docs) + list(design_docs) + expanded + list(general_docs):
         key = (d.metadata.get("source"), d.metadata.get("start_line"), d.page_content[:40])
         if key not in seen:
             seen.add(key)
@@ -185,49 +264,136 @@ def retrieve_context(failure: str, top_k: int = 6) -> tuple[str, list[dict]]:
         if len(docs) >= _MAX_CONTEXT_BLOCKS:
             break
 
+    # Show the WHOLE retrieved chunk to the LLM, up to a generous cap. A tree-sitter code chunk is a
+    # single function; the previous 1800-char cut truncated a ~2.8 KB function BEFORE its buggy line
+    # (the guard at offset ~1910), so the LLM saw the function's opening + the symptom and guessed. The
+    # cap only guards against a pathologically large chunk.
+    _SNIPPET_PROMPT = 4000
+    _SNIPPET_HIT    = 2500
     hits: list[dict] = []
     blocks: list[str] = []
     for i, doc in enumerate(docs, start=1):
         meta = doc.metadata
+        is_design = meta.get("type") == "design_document"
         hits.append({
             "file": meta.get("source", ""),
             "type": meta.get("type", ""),
             "start_line": meta.get("start_line"),
             "end_line": meta.get("end_line"),
-            "snippet": doc.page_content[:1400],
+            "snippet": doc.page_content[:_SNIPPET_HIT],
         })
+        header = ("Context %d — DESIGN SPEC (authoritative: the code MUST conform to this; use it to "
+                  "judge the correct behaviour)" % i) if is_design else f"Context {i}"
         blocks.append("\n".join([
-            f"Context {i}",
+            header,
             f"File: {meta.get('source')}",
             f"Type: {meta.get('type')}",
             f"Lines: {meta.get('start_line')} - {meta.get('end_line')}",
             "Snippet:",
-            doc.page_content[:1800],
+            doc.page_content[:_SNIPPET_PROMPT],
         ]))
     return "\n\n".join(blocks), hits
 
 
-# ── 2. DIAGNOSE (Claude) ────────────────────────────────────────────────────────
+# ── 2. DIAGNOSE (Claude primary, local LLM backup) ──────────────────────────────
 
-def propose_patch(failure: str, context: str) -> RepairPatch:
-    """Ask Claude for one minimal find/replace patch; fall back to the POC demo rule."""
+def _diagnose_providers() -> list[tuple[str, Callable[[], object]]]:
+    """Ordered (label, llm-factory) list for the DIAGNOSE call, driven by `repair_llm_backend`.
+
+    The pipeline makes exactly ONE LLM call, so this is the whole model-selection surface. The UI
+    toggle picks which model is TRIED FIRST; the other is the automatic backup so a single provider
+    being unreachable (Claude API down, or the local Ollama server not running) doesn't dead-end the
+    repair. The deterministic demo rule remains the final last resort below.
+      claude → [Claude, local]   (default: Claude primary, local backup — the "backup if Claude can't
+                                  be reached" case)
+      local  → [local, Claude]   (used to TEST the local path; Claude still backs it up)
+    Factories are lazy (called only when that provider's turn comes), so selecting "claude" never
+    touches Ollama and vice-versa."""
+    claude = ("claude", get_llm)
+    local = ("local", get_local_llm)
+    return [local, claude] if settings.repair_llm_backend == "local" else [claude, local]
+
+
+class _DiagnoseTimeout(Exception):
+    """A single provider's DIAGNOSE call exceeded its wall-clock budget."""
+
+
+def _invoke_with_deadline(fn, timeout, cancel_check):
+    """Run `fn()` on a daemon thread and wait up to `timeout` seconds, polling `cancel_check`.
+
+    A blocking LLM call (a cold local model, a hung request) can't be interrupted in-thread, so we
+    run it on a daemon thread and watch it: on cancel we raise RepairCancelled, on timeout we raise
+    _DiagnoseTimeout — either way the caller moves on immediately and the daemon thread is left to
+    finish harmlessly (daemon → never blocks shutdown). timeout=None / <=0 means wait indefinitely."""
+    box: dict = {}
+    done = threading.Event()
+
+    def worker():
+        try:
+            box["value"] = fn()
+        except Exception as exc:          # provider raised — surface it to the caller
+            box["error"] = exc
+        finally:
+            done.set()
+
+    threading.Thread(target=worker, daemon=True).start()
+    waited = 0.0
+    step = 0.5
+    while not done.wait(step):
+        waited += step
+        if cancel_check and cancel_check():
+            raise RepairCancelled()
+        if timeout and timeout > 0 and waited >= timeout:
+            raise _DiagnoseTimeout()
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
+def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None) -> RepairPatch:
+    """Produce one minimal find/replace patch: try the selected model, then the backup model, then
+    the deterministic demo rule. `repair_llm_backend` chooses primary vs backup order. Each provider
+    call is bounded by `timeout` (seconds) and interruptible via `cancel_check` so a stuck/slow model
+    never freezes the repair."""
     prompt = _DIAGNOSE_PROMPT.format(failure=failure, context=context)
-    data = invoke_json(get_llm(), [HumanMessage(content=prompt)], default=None, label="repair")
 
-    if data and data.get("find") and data.get("replace") is not None:
-        return RepairPatch(
-            file_path=str(data.get("file_path", "")),
-            find=data["find"],
-            replace=data["replace"],
-            explanation=data.get("explanation", "Claude-proposed repair."),
-        )
+    for label, make_llm in _diagnose_providers():
+        if cancel_check and cancel_check():
+            raise RepairCancelled()
+        try:
+            llm = make_llm()   # lazy — a missing/unreachable backup raises here, we move on
+        except Exception as exc:
+            print(f"  [REPAIR] DIAGNOSE provider '{label}' unavailable ({exc}) — trying next.")
+            continue
+        try:
+            data = _invoke_with_deadline(
+                lambda: invoke_json(llm, [HumanMessage(content=prompt)], default=None, label=f"repair/{label}"),
+                timeout, cancel_check,
+            )
+        except _DiagnoseTimeout:
+            print(f"  [REPAIR] DIAGNOSE provider '{label}' timed out after {timeout}s — trying next.")
+            continue
+        if data and data.get("find") and data.get("replace") is not None:
+            model_name = (
+                settings.repair_local_model if label == "local" else settings.anthropic_model
+            )
+            print(f"  [REPAIR] DIAGNOSE patch from '{label}' ({model_name}).")
+            return RepairPatch(
+                file_path=str(data.get("file_path", "")),
+                find=data["find"],
+                replace=data["replace"],
+                explanation=data.get("explanation", f"{label}-proposed repair."),
+                source=label,
+                model=model_name,
+            )
+        print(f"  [REPAIR] DIAGNOSE provider '{label}' returned no usable patch — trying next.")
 
     fallback = _demo_fallback_patch()
     if fallback:
-        print("  [REPAIR] Claude returned no usable patch — using demo fallback rule.")
+        print("  [REPAIR] No model produced a usable patch — using demo fallback rule.")
         return fallback
 
-    raise RuntimeError("No repair patch could be produced (Claude returned nothing and no fallback matched).")
+    raise RuntimeError("No repair patch could be produced (no model returned a usable patch and no fallback matched).")
 
 
 def _demo_fallback_patch() -> Optional[RepairPatch]:
@@ -263,7 +429,8 @@ def _demo_fallback_patch() -> Optional[RepairPatch]:
 
     for find, replace, why in rules:
         if text.count(find) == 1:   # exact + unique → safe to apply
-            return RepairPatch(file_path=str(app), find=find, replace=replace, explanation=why)
+            return RepairPatch(file_path=str(app), find=find, replace=replace, explanation=why,
+                               source="demo-fallback", model="deterministic")
     return None
 
 
@@ -509,7 +676,8 @@ def delete_pull_request(branch: str) -> dict:
 # ── Orchestration ────────────────────────────────────────────────────────────────
 
 def run_repair(failure: str, test_id: str = "", *, apply: bool = True, auto_pr: bool = False,
-               branch_suffix: str = "", progress_cb: Optional[ProgressCb] = None) -> dict:
+               branch_suffix: str = "", progress_cb: Optional[ProgressCb] = None,
+               cancel_event=None) -> dict:
     """Drive the Auto-Repair LangGraph (retrieve → diagnose → apply → test → build → pr-prep).
 
     Thin wrapper over the compiled StateGraph in repair_agent/agent.py: it registers the progress
@@ -521,10 +689,11 @@ def run_repair(failure: str, test_id: str = "", *, apply: bool = True, auto_pr: 
     # Lazy imports avoid a circular import at module load (nodes import from this module).
     import uuid
     from repair_agent.agent import create_repair_agent
-    from repair_agent import broadcaster
+    from repair_agent import broadcaster, canceller
 
-    rid = uuid.uuid4().hex   # per-invocation key for the progress broadcaster
+    rid = uuid.uuid4().hex   # per-invocation key for the progress broadcaster + canceller
     broadcaster.register(rid, progress_cb)
+    canceller.register(rid, cancel_event)
     try:
         graph = create_repair_agent()
         final = graph.invoke({
@@ -532,8 +701,13 @@ def run_repair(failure: str, test_id: str = "", *, apply: bool = True, auto_pr: 
             "apply": apply, "auto_pr": auto_pr, "branch_suffix": branch_suffix,
             "stages": {},
         })
+    except RepairCancelled:
+        # Cooperative cancel — the streamed stages are already in the job dict via progress_cb.
+        return {"failure": failure, "test_id": test_id, "success": False,
+                "cancelled": True, "stages": {}, "error": "Cancelled by user."}
     finally:
         broadcaster.unregister(rid)
+        canceller.unregister(rid)
 
     result: dict = {
         "failure": failure,

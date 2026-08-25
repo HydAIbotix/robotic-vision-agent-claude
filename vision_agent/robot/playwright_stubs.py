@@ -20,7 +20,17 @@ _browser = None
 _page    = None
 _keyboard_map: dict = {}   # populated by set_keyboard_map() after App Explorer runs
 _progress_injected: bool = False  # True once the HUD overlay div has been created
-_dom_to_screen_id: dict | None = None  # reverse lookup: dom_id → app_map screen_id
+_dom_to_screen_id: dict | None = None  # reverse lookup: normalized dom_id/key → app_map screen_id
+
+
+def _norm_sid(s: str) -> str:
+    """Collapse a screen id to its separator-insensitive, lowercase core so that 'signin',
+    'sign_in', 'sign-in' and 'Sign In' all compare equal (mirrors validate_pipeline._screens_equivalent).
+    This is the bridge between how the Explorer RECORDS a screen (dom_id 'signin') and how the live DOM
+    normalizes it at runtime ('sign_in'): the two forms differ only by separators, so a raw-string map
+    or '==' compare spuriously misses. Normalizing both sides removes that fragility."""
+    import re
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 
 def _vp() -> tuple[int, int]:
@@ -84,9 +94,17 @@ def _load_dom_to_screen_cache() -> dict:
             for screen_key, screen_data in data.get("screens", {}).items():
                 if not isinstance(screen_data, dict):
                     continue
+                # Key by the NORMALIZED (separator-insensitive) forms of both the recorded dom_id
+                # AND the screen key itself, so a live DOM id in any separator style resolves back to
+                # the canonical app_map key. The screen key maps to itself so a direct key hit still
+                # works; the dom_id alias handles Explorer-named ≠ testid cases (login ↔ signin).
+                nk = _norm_sid(screen_key)
+                if nk:
+                    mapping.setdefault(nk, screen_key)
                 dom_id = (screen_data.get("dom_id") or "").strip()
-                if dom_id:
-                    mapping[dom_id] = screen_key
+                nd = _norm_sid(dom_id)
+                if nd:
+                    mapping[nd] = screen_key
             _dom_to_screen_id = mapping
             return mapping
     except Exception:
@@ -493,9 +511,12 @@ def get_dom_screen_id() -> str:
 
     # Resolve to the canonical app_map screen_id via dom_id reverse lookup.
     # Handles cases where Explorer named a screen differently from its data-testid
-    # (e.g. app_map "login" ↔ data-testid "signin-screen" → DOM sid "signin").
+    # (e.g. app_map "login" ↔ data-testid "signin-screen" → DOM sid "signin"). The lookup is
+    # separator-insensitive (keys are normalized) so a live "sign_in"/"signin"/"sign-in" all map
+    # back to the same canonical key — the recorded dom_id and the runtime form can differ only by
+    # separators, which previously caused a miss and a spurious wrong-screen failure.
     dom_map = _load_dom_to_screen_cache()
-    return dom_map.get(sid, sid)
+    return dom_map.get(_norm_sid(sid), sid)
 
 
 def verify_current_screen(expected_screen_id: str, app_map: dict, save_path: str = "") -> dict:
@@ -505,9 +526,22 @@ def verify_current_screen(expected_screen_id: str, app_map: dict, save_path: str
     Same speed as before; save_path is accepted but unused (no image captured).
     """
     actual = get_dom_screen_id()
+    # Separator-insensitive match against BOTH the expected screen key and that screen's recorded
+    # dom_id. get_dom_screen_id() already resolves to the canonical key via the reverse cache, but
+    # comparing normalized forms here too makes the charted verify immune to the same
+    # signin/sign_in/login separator drift even when the reverse cache or dom_id is missing/stale
+    # (the uncharted path already used this tolerance via _screens_equivalent; this brings the
+    # charted path to parity). Exact normalized equality — never substring — so distinct screens
+    # can't collide.
+    na = _norm_sid(actual)
+    candidates = {_norm_sid(expected_screen_id)}
+    screen = (app_map.get("screens") or {}).get(expected_screen_id)
+    if isinstance(screen, dict):
+        candidates.add(_norm_sid(screen.get("dom_id") or ""))
+    candidates.discard("")
     return {
         "actual_screen": actual,
-        "match": bool(actual) and (actual == expected_screen_id),
+        "match": bool(na) and na in candidates,
         "method": "dom",
     }
 
