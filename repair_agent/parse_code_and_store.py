@@ -270,7 +270,7 @@ def build_codebase_index():
     print(f"Extracted {len(all_documents)} searchable chunks.")
 
     print("Generating embeddings and saving to ChromaDB...")
-    embedding_model = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
+    embedding_model = _get_embedding_model()   # cached, shared with search (same model name)
 
     # Reset the collection IN-PLACE rather than deleting the folder. On Windows the running backend
     # keeps the Chroma sqlite open (a prior repair query), so `shutil.rmtree(PERSIST_DIR)` fails with
@@ -300,9 +300,30 @@ def build_codebase_index():
     return len(all_documents)
 
 
+_EMBEDDING_MODEL = None
+
+
+def _get_embedding_model():
+    """Load the HuggingFace embedding model once per process and reuse it.
+
+    Loading all-MiniLM-L6-v2 pulls ~90 MB of weights + torch init — SECONDS each time, and it is the
+    real cost of a repair retrieve (the vector lookup over a few hundred chunks is milliseconds). The
+    old code re-instantiated the model on EVERY `search()` call, and one `retrieve_context` fires
+    several searches (code + general + per-file expansion), so a single retrieve reloaded the model
+    4-8×. Caching it at module scope makes retrieve fast once the index is built. The model is stateless
+    w.r.t. the index, so this is safe across an in-place "Rebuild index" (see `_vector_db`)."""
+    global _EMBEDDING_MODEL
+    if _EMBEDDING_MODEL is None:
+        _EMBEDDING_MODEL = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
+    return _EMBEDDING_MODEL
+
+
 def _vector_db():
-    embedding_model = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
-    return Chroma(persist_directory=str(PERSIST_DIR), embedding_function=embedding_model)
+    # Reuse the cached embedding model (expensive to load); always open a FRESH Chroma handle so every
+    # search reflects the CURRENT on-disk collection. This keeps the speedup while staying immune to an
+    # in-place "Rebuild index" — whether triggered in this backend process or a separate one — with no
+    # stale-handle risk. Opening the handle just reads the small sqlite; the model load was the bottleneck.
+    return Chroma(persist_directory=str(PERSIST_DIR), embedding_function=_get_embedding_model())
 
 
 def search(query_text, k=4, where=None):

@@ -159,11 +159,16 @@ def retrieve_context(failure: str, top_k: int = 6) -> tuple[str, list[dict]]:
     # fix is usually revealed by comparing the buggy line against its correct siblings (e.g. the wrong
     # `/api/card/` lookup next to the correct `/api/cards` calls in src/lib/storage.ts). So for each
     # small implicated module we pull ALL of its chunks. Big files (App.tsx) are skipped to stay focused.
-    expanded, seen_files = [], set()
+    expanded, seen_files, probed = [], set(), set()
     for d in code_docs:
         src = d.metadata.get("source")
-        if not src or src in seen_files:
+        # `probed` guards against re-searching the SAME file: a big file (App.tsx — the login bug lives
+        # there) never enters `seen_files` because it exceeds the small-module cap, so without this guard
+        # the loop fired a fresh k=60 search (each reloading the model in the old code) for every one of
+        # its chunks in the top hits — wasted work that produced no expansion. Probe each source at most once.
+        if not src or src in probed:
             continue
+        probed.add(src)
         siblings = search(rq, k=60, where={"source": src})
         if 0 < len(siblings) <= _SMALL_FILE_MAX_CHUNKS:
             expanded.extend(siblings)

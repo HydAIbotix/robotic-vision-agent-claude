@@ -634,6 +634,33 @@ fired.) Fixes:
   `GET /runs` + `/repair` + `/app-map` + `/runs/{id}/defects` every 3s and **starts/changes nothing** — pure
   visualization, so it can't regress anything. Self-contained inline styles + keyframes; dark-palette CSS vars.
 
+### Recent progress (2026-08-25) — repair RETRIEVE latency fix (embedding-model caching)
+
+Symptom (observed on the TC-RPS-001 auto-repair): the **retrieve** stage was slow even though the RAG
+index was already built — a built index should make retrieval near-instant. Root cause was NOT the
+Chroma lookup (milliseconds over ~200 chunks) but **the embedding model being reloaded on every search
+call**. `parse_code_and_store._vector_db()` did `HuggingFaceEmbeddings(model_name=…)` (loads
+`all-MiniLM-L6-v2` — ~90 MB of weights + torch init, SECONDS) on EVERY `search()`, and one
+`retrieve_context` fires several searches (code-filtered + general + per-file expansion), so a single
+retrieve reloaded the model **4–8×**. For the login bug it was worse: the buggy code lives in the LARGE
+`App.tsx`, which exceeds the small-module expansion cap, so the file-neighborhood loop re-probed
+`App.tsx` (a fresh k=60 search, each reloading the model) once per top hit — none of which expanded.
+
+Fixes (both in `repair_agent/`, no behaviour change to WHICH chunks are retrieved):
+- **Embedding-model singleton** (`parse_code_and_store._get_embedding_model` + `_EMBEDDING_MODEL`): the
+  model loads **once per backend process** and is reused. `_vector_db()` still opens a **fresh Chroma
+  handle per search** so every search reflects the CURRENT on-disk collection — immune to an in-place
+  "Rebuild index" (this process or a separate one) with no stale-handle risk (opening the handle just
+  reads the small sqlite; the model load was the cost). `build_codebase_index` uses the same cached model.
+- **Expansion-loop dedup** (`repair_failed_test.retrieve_context`): track `probed` sources so each file
+  is searched **at most once**. A big file like `App.tsx` (never added to `seen_files` because it exceeds
+  `_SMALL_FILE_MAX_CHUNKS`) is no longer re-probed for every one of its top chunks.
+- Measured: warm `retrieve_context` dropped from seconds to **~0.1s** (first retrieve of a process still
+  pays the one-time ~10s cold torch/model load). Small-module expansion (e.g. `storage.ts` for the
+  card-sharing design bug) still pulls the whole module — no regression to retrieval content, verified
+  end-to-end for both the App.tsx (login) and storage.ts (design) bug shapes. This helps every agent that
+  calls `search()`. **RESTART the backend** to load the change (uvicorn has no `--reload`).
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login
