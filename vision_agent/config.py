@@ -165,6 +165,12 @@ class Settings(BaseSettings):
     #   layout the arm photographs; for a Playwright-only target keep the default 1400×900.
     viewport_width: int = 1400
     viewport_height: int = 900
+
+    # Demo hold — seconds to keep the Playwright browser open AFTER the final step of a run, before
+    # closing it, so a live demo can show the last screen. Applies ONLY to the playwright backend's
+    # end-of-run teardown (robot.stop()); it does NOT affect execution timing, step logic, or the
+    # demo/real backends. 0 = close immediately (legacy behaviour). Set PLAYWRIGHT_DEMO_HOLD_S in .env.
+    playwright_demo_hold_s: float = 20.0
     # robot_camera_* = a PRE-CALIBRATION SEED for the rectified /capture resolution, NOT the live
     #   value. Default 1280×720 = the Intel RealSense D405's native resolution (16:9). It is only used
     #   as the viewport→camera scale numerator BEFORE the first /capture; every /capture response then

@@ -154,7 +154,7 @@ def _ensure_page():
     _page.goto(_kiosk_url())
     _page.wait_for_load_state("networkidle")
     print(f"\n  [PLAYWRIGHT] Browser opened  →  {_kiosk_url()}")
-    atexit.register(stop)
+    atexit.register(_close_browser)   # shutdown closes immediately — the demo hold is only on stop()
     return _page
 
 
@@ -928,7 +928,8 @@ def set_demo_screens(paths: list[str]) -> None:
     pass
 
 
-def stop() -> None:
+def _close_browser() -> None:
+    """Tear down the Playwright browser immediately (no demo hold). Shared by stop() and atexit."""
     global _pw, _browser, _page, _progress_injected
     try:
         if _browser:
@@ -940,3 +941,21 @@ def stop() -> None:
     _pw = _browser = _page = None
     _progress_injected = False
     print("  [PLAYWRIGHT] Browser closed")
+
+
+def stop() -> None:
+    # Demo hold: keep the last screen visible for a configurable pause BEFORE teardown, so a live
+    # demo can show the final step. Only when a browser is actually open (skips crash/no-op teardown)
+    # and only for a positive delay. Purely a sleep before close — no effect on execution or results.
+    # This runs on the explicit end-of-run teardown (api/main.py calls robot.stop()); the atexit hook
+    # uses _close_browser() directly so an interpreter shutdown never incurs the hold.
+    try:
+        if _browser and _page is not None:
+            from vision_agent.config import settings
+            hold_s = float(getattr(settings, "playwright_demo_hold_s", 0) or 0)
+            if hold_s > 0:
+                print(f"  [PLAYWRIGHT] Demo hold — keeping last screen for {hold_s:.0f}s before close")
+                time.sleep(hold_s)
+    except Exception:
+        pass
+    _close_browser()
