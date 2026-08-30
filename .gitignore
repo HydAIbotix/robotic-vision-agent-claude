@@ -60,3 +60,9 @@ reference_screens/*.webp
 /reference_screens
 docs/~$kiosk_e2e_tests.xlsx
 docs/~$osk_POS_and_SmartCardStation_Production_Design.docx
+docs/agentcore-design.md
+docs/AWS-Component-Portability-Analysis.docx
+docs/current-vs-proposed-comparison.md
+docs/Current-vs-Proposed-Pipeline.docx
+docs/GraphRAG_datasets/CODE_GUIDE.md
+docs/rca-selfheal-design.md
