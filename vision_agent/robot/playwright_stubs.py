@@ -136,21 +136,28 @@ def _ensure_page():
     from vision_agent.config import settings
 
     _pw      = sync_playwright().start()
+    # Demo display scale — scales ONLY the visible on-screen rendering (device-scale-factor), so the
+    # app fills a high-res demo monitor (e.g. 2.0 on a 3840×2160 4K display). The CSS viewport below
+    # stays viewport_width×viewport_height (the app_map coordinate space), and screenshots are pinned to
+    # CSS resolution (scale="css" in capture_screen), so tap/screenshot math is unchanged. 1.0 = legacy.
+    _ui_scale = float(getattr(settings, "playwright_ui_scale", 1.0) or 1.0)
     _browser = _pw.chromium.launch(
         headless=False,
         args=[
             "--disable-features=VirtualKeyboard",  # suppress Windows touch keyboard
             "--disable-touch-adjustment",
-            "--force-device-scale-factor=1",        # prevent DPI scaling in screenshots
+            f"--force-device-scale-factor={_ui_scale:g}",  # on-screen DPI zoom (1 = none; 2 fills a 4K monitor)
+            "--start-maximized",                    # demo visibility: open the OS window maximized…
+            "--start-fullscreen",                   # …and fullscreen (no chrome) so the app fills the screen
         ],
     )
     _vw, _vh = settings.viewport_width, settings.viewport_height
     _page = _browser.new_page(
         viewport={"width": _vw, "height": _vh},
-        has_touch=False,           # prevent touch-mode input focus from triggering OS keyboard
-        device_scale_factor=1.0,   # screenshot pixels == viewport pixels, so coords are exact
+        has_touch=False,             # prevent touch-mode input focus from triggering OS keyboard
+        device_scale_factor=_ui_scale,  # visible zoom only; screenshots stay CSS-res (see capture_screen)
     )
-    print(f"  [PLAYWRIGHT] viewport {_vw}×{_vh}  (app_map coordinate space)")
+    print(f"  [PLAYWRIGHT] viewport {_vw}×{_vh}  (app_map coordinate space)  ui_scale={_ui_scale:g}")
     _page.goto(_kiosk_url())
     _page.wait_for_load_state("networkidle")
     print(f"\n  [PLAYWRIGHT] Browser opened  →  {_kiosk_url()}")
@@ -162,7 +169,10 @@ def capture_screen(save_path: str) -> dict:
     """Take a screenshot of the live browser — replaces robot arm camera."""
     page = _ensure_page()
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-    page.screenshot(path=save_path, full_page=False)
+    # scale="css" → one image pixel per CSS pixel, so the screenshot is ALWAYS viewport-sized
+    # (1 CSS px == 1 app_map coord) regardless of playwright_ui_scale's on-screen zoom. Keeps
+    # tap_image_point / template-match / OCR / Tier-3 vision identical to a scale=1 run.
+    page.screenshot(path=save_path, full_page=False, scale="css")
     return {"success": True, "image_path": save_path, "timestamp": time.time()}
 
 

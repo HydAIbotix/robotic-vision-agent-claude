@@ -171,6 +171,14 @@ class Settings(BaseSettings):
     # end-of-run teardown (robot.stop()); it does NOT affect execution timing, step logic, or the
     # demo/real backends. 0 = close immediately (legacy behaviour). Set PLAYWRIGHT_DEMO_HOLD_S in .env.
     playwright_demo_hold_s: float = 20.0
+
+    # Demo display scale — device-scale-factor for the visible Playwright window, so the app renders
+    # LARGE on a high-res demo monitor (e.g. 2.0 fills a 3840×2160 4K display from the 1920×1080
+    # coordinate space). This scales ONLY the on-screen rendering: the CSS viewport (app_map coordinate
+    # space) stays viewport_width×viewport_height, taps run in CSS-pixel space, and screenshots are
+    # pinned to CSS resolution (scale="css"), so tap accuracy, template-match, OCR and Tier-3 vision are
+    # byte-for-byte unaffected. 1.0 = legacy behaviour (no scaling). Set PLAYWRIGHT_UI_SCALE in .env.
+    playwright_ui_scale: float = 1.0
     # robot_camera_* = a PRE-CALIBRATION SEED for the rectified /capture resolution, NOT the live
     #   value. Default 1280×720 = the Intel RealSense D405's native resolution (16:9). It is only used
     #   as the viewport→camera scale numerator BEFORE the first /capture; every /capture response then
