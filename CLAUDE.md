@@ -997,6 +997,14 @@ endpoint" maps to a **Bedrock Claude call**, not a self-hosted trained model (ou
 advantage). Every cloud hook must stay behind a `*_backend` toggle defaulting to local. See
 `[[aws-readiness-2026-07-20]]`.
 
+> **POC vs production — not a contradiction.** The above is about the *production* migration (deferred
+> until the real-robot E2E run). A separate, near-term **demo/POC** track is scoped in `AWS_READINESS.md`
+> (the 2026-09-02 section) and in [`docs/AWS_POC_WebApps.md`](docs/AWS_POC_WebApps.md): a **web/desktop-app
+> QA POC with NO robot testing** (physical-robot QA is its own later POC). It keeps the current Auto-Repair
+> (Claude + Chroma + HuggingFace, no Neptune GraphRAG) and lands on **Docker → ECS Fargate → Bedrock → S3**
+> (no EKS, no Neptune, no OpenSearch) — inside/near Free Tier. Use that doc for demo planning; use this
+> pointer's assessment for the eventual full production topology.
+
 ---
 
 ## Conventions
