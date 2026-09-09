@@ -17,6 +17,12 @@ from typing import Optional
 
 _CACHE_DIR = Path(__file__).parent.parent / "test_plans"
 
+
+def _cache_dir() -> Path:
+    """Tenant-scoped plan-cache directory (== _CACHE_DIR when single-tenant, so no MVP change)."""
+    from ports import paths as tenant_paths
+    return tenant_paths.test_plans_dir()
+
 # Bump this whenever the planner model or PLAN_FROM_MAP prompt changes materially.
 # It is part of the cache key, so bumping it invalidates every previously-cached plan
 # and forces a fresh Tier-2 re-plan.  "v6" retires plans generated before the walkthrough wrote
@@ -33,8 +39,9 @@ def _key(test_id: str, steps_raw: str, app_map_version: str, expected_results_ra
 
 
 def _cache_path(test_id: str, cache_key: str) -> Path:
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return _CACHE_DIR / f"{test_id}_{cache_key}.json"
+    d = _cache_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{test_id}_{cache_key}.json"
 
 
 def load(test_id: str, steps_raw: str, app_map_version: str, expected_results_raw: str = "") -> Optional[dict]:

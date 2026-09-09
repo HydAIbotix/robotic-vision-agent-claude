@@ -32,7 +32,8 @@ def finalize_tests(state: TestRunnerState) -> dict:
         "failed":       failed,
         "test_results": results,
     }
-    out_dir  = Path(settings.results_dir)
+    from ports import paths as tenant_paths   # tenant-scoped in multi-tenant; == MVP when single
+    out_dir  = tenant_paths.results_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"suite_{int(time.time())}.json"
     out_path.write_text(json.dumps(doc, indent=2))

@@ -1,0 +1,22 @@
+# Public entry point. Works on any cloud's ingress controller (NGINX Ingress, or swap the class
+# for Azure AGIC / GKE Ingress / AWS ALB) — the agnostic analogue of API Gateway. TLS via
+# cert-manager or the platform's managed certs. WebSocket upgrades pass through NGINX by default.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kioskqa
+  namespace: kioskqa
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"   # long-lived WebSocket connections
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: kioskqa.example.com          # replace with your DNS
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kioskqa-api
+                port: { number: 80 }

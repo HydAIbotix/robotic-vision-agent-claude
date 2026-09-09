@@ -921,6 +921,218 @@ Root cause — the persisted RAG index was STALE:
   while the branch was transiently fixed leaves the buggy line unindexed. HNSW ranking varies slightly build
   to build; the buggy chunk lands at block ~2 with `top_k=8`, comfortably included.
 
+### Recent progress (2026-09-09) — cloud-agnostic foundation [branch `cloud-agnostic-agent`]
+
+A run-anywhere counterpart to `aws-based`: the SAME functionality using open-source, portable
+components so ONE codebase deploys on **Azure, GCP, EC2 or on-prem** with no lock-in. **Claude is
+unchanged** (remote call via `VISION_BACKEND=anthropic`|`bedrock`) — it powers App Explorer / Test
+Planner / Auto-Repair exactly as before, wherever the code runs. Branch cut from `mvp-vision-agent`
+(NOT `aws-based`), so this is the clean local core + agnostic infra bindings. Design + rationale:
+`docs/CLOUD_AGNOSTIC_DECISION.md`; deploy + code walkthrough: `docs/CLOUD_AGNOSTIC_DEPLOY.md`.
+**Nothing committed yet** (per the commit-only-when-asked rule).
+
+- **Ports-and-adapters, config-only selection.** Every AWS-managed piece maps to an agnostic one,
+  chosen purely from `vision_agent/config.py` (new **"CLOUD-AGNOSTIC DEPLOYMENT"** section):
+  DynamoDB→**Postgres** (`persistence_backend`/`db_url`), S3→**MinIO/any S3-compatible**
+  (`storage_backend`∈`{s3,minio,gcs,azure}` + `s3_endpoint_url`), API-GW-WS+Streams→**FastAPI WS +
+  Redis pub/sub** (`event_bus_backend`), Step-Functions/AgentCore→**in-process now, containers/
+  Temporal later**, AgentCore-Browser→**self-hosted Playwright** (already present). Full mapping
+  table in the decision doc.
+- **No-regression by construction — defaults reproduce the pure-local MVP byte-for-byte.** All new
+  config fields default to local/sqlite/memory/single-tenant; new code paths are additive and
+  config-gated. `tests/test_cloud_agnostic.py` asserts defaults==MVP + tenancy + event-bus behaviour
+  (6/6 pass). Full suite: 104 passed, **same 8 pre-existing env-only failures** (template-match asset
+  paths + vision tests needing a live Claude key) — all in code paths this branch never touched.
+- **New `ports/` package** (hexagonal seams, all with lazy imports so no new hard deps until used):
+  `ports/event_bus.py` — `EventBus` with `InMemoryEventBus` (default, = MVP single-server) and
+  `RedisEventBus` (cross-replica realtime, the agnostic analogue of API-GW-WS + DynamoDB-Streams);
+  `get_event_bus()` singleton built from config. `ports/tenancy.py` — `current_tenant()` /
+  `set_current_tenant()` / `tenant_key()` + a FastAPI `tenant_dependency`; single-tenant mode makes
+  `current_tenant()` the constant `default`, so call sites prefix keys/rows unconditionally and work
+  in BOTH deployment models (pooled SaaS vs. dedicated).
+- **Object store made cloud-agnostic:** `vision_agent/storage/aws.py::S3Storage` now takes
+  `endpoint_url`/`region`/static-keys/`path_style` → one class drives AWS S3, MinIO, GCS (interop),
+  Azure-via-S3; `get_storage()` routes `s3|minio|gcs|azure` to it, `local` unchanged. All extra knobs
+  inert when blank (real-AWS default cred chain preserved).
+- **Observability:** `GET /api/health` now returns a `platform` block (active vision / persistence /
+  object-store / event-bus / tenancy / deployment backends) so any environment self-reports what it
+  resolved to. Only route touched.
+- **Multi-tenancy = one codebase, two go-to-markets** (see decision doc §2): **pooled SaaS** (many
+  customers in our cloud, `MULTI_TENANT_ENABLED=true`, isolated by `tenant_id`-leading keys) and
+  **dedicated/self-hosted** (each customer runs the same image+manifests in THEIR cloud;
+  account boundary = isolation; `tenant_id` then separates their internal sub-teams). The
+  cloud-agnostic packaging is what makes the dedicated model feasible — `aws-based` only supports
+  pooled-in-our-AWS.
+- **Docker↔K8s is a deploy-time switch (same image, same env keys).** New `Dockerfile` (uvicorn
+  WITHOUT `--reload`, per the #1 gotcha) + `.dockerignore`; `docker-compose.yml` brings up the whole
+  agnostic stack (postgres + minio + redis + app) on any Docker host; `deploy/k8s/` (namespace,
+  configmap, secret.example, api-deployment **+ Service + HPA**, worker-deployment, ingress,
+  kustomization, README) runs the identical image with env in a ConfigMap/Secret — stateless pods,
+  HPA auto-scales the API tier, worker tier scales independently. **When to use which:** Compose for
+  demo/pilot/a-few-tenants; K8s only when you need horizontal scale / independent API+worker tiers /
+  per-tenant quotas (decision doc §3).
+- **Packaging:** new `pyproject.toml` `[cloud]` extra (`psycopg[binary]`, `redis`, `boto3`) — all
+  optional; `pip install -e .` unchanged. `storage_backend` Literal widened to include minio/gcs/azure.
+- **Next (each incremental + still config-gated):** thread `tenant_key()` through object-store call
+  sites + add a `tenant_id` DB column & filter; wire the Redis bus into the WebSocket broadcaster for
+  multi-replica realtime; a queue-driven `SERVICE_ROLE=worker` consumer; optional Temporal
+  orchestration; OpenTelemetry/Langfuse tracing; pgvector Memory. See the decision doc's "Next" list.
+
+#### Update (2026-09-09, Phase 1a) — tenant-scoped storage call sites + Postgres confirmed
+
+- **All blob STORAGE call sites are now tenant-aware, gated on `MULTI_TENANT_ENABLED`** — single-tenant
+  is byte-identical to the MVP (all default-mode tests green), multi-tenant isolates every tenant's
+  blobs under `.../tenants/<id>/...`. Primitives in `ports/tenancy.py`: `scoped(key)` (identity when
+  single-tenant, else `tenants/<id>/<key>`) and `scoped_dir(base)`; filesystem roots in
+  **`ports/paths.py`**: `app_map_path()` / `results_dir()` / `screens_dir()` / `test_plans_dir()`.
+- **Object store:** `get_storage()` wraps the backend in `_TenantScopedStorage` **only** in
+  multi-tenant mode (single-tenant returns the raw `LocalStorage`/`S3Storage`, so the existing type
+  contract holds). Writes (`save`/`save_json`) are scoped; `load()` is NOT (it takes explicit,
+  already-resolved paths like a captured screenshot). Covers `vision_agent/nodes/finalize.py` result
+  docs + any future S3 write with zero call-site edits.
+- **Filesystem wiring** (`api/main.py`): `_base_screens_dir`/`_run_results_dir`/`_next_run_number`
+  reset now go through `tenant_paths`; **all 19 `settings.app_map_path` refs → `tenant_paths.app_map_path()`**;
+  `test_runner/plan_cache.py` (`_cache_dir()`) and `test_runner/nodes/finalize_tests.py` scoped too.
+  `screens_dir()` derives from `app_map_path()` so a tenant's map + its screenshots stay co-located.
+- **Thread/subprocess boundaries handled** (contextvars don't cross them): the tenant is captured in
+  the request context and (a) passed to `_execute_run(..., tenant_id)` which re-binds it at the top of
+  the run thread, and (b) passed to `_run_explorer(..., app_map_path)` which sets `APP_MAP_PATH` in the
+  explorer subprocess env so exploration writes the correct tenant's map. `app_map_path()` idempotently
+  mkdirs the tenant dir so writers never hit a missing-parent error.
+- **Postgres for persistent data — confirmed and hardened.** The ORM models
+  (`api/models.py`) use only PG-safe SQLAlchemy types (`Integer/String/Text/JSON/Float/DateTime/
+  ForeignKey`), so `db_url=postgresql+psycopg://…` works with **no model changes** (the `store/`
+  rewrite the `aws-based` branch did for DynamoDB is NOT needed for Postgres — SQLAlchemy already
+  abstracts the engine). `api/database.py::init_db()` now logs the active engine and **warns on a
+  `PERSISTENCE_BACKEND` vs `DB_URL` mismatch** (e.g. label says postgres but URL is sqlite).
+  `docker-compose.yml` + `deploy/k8s/configmap.yaml` set Postgres by default;
+  `check_same_thread` is applied only for sqlite. Local dev stays on SQLite (`sqlite:///./management.db`).
+- **Not yet scoped (documented next steps):** DB **rows** (add a `tenant_id` column + `current_tenant()`
+  filter for row-level isolation — the blob level is done); the `supervisor`/`run_parallel.py` path.
+  Multi-tenant remains opt-in/experimental until those land; single-tenant (the default, and every
+  current deployment) is fully covered and unchanged.
+
+#### Update (2026-09-09, Phase 1b) — row-level DB tenant isolation
+
+- **Every business table now carries `tenant_id`** (`api/models.py::TenantMixin`, `declared_attr` →
+  per-table `String(64)` col, default `"default"`, `server_default`, indexed). Mixed into all 8
+  models (`KioskConfig`, `AppMapRecord`, `TestCase`, `TestRun`, `TestResult`, `Defect`,
+  `DeviceConfig`, `RobotEvent`).
+- **Isolation is enforced centrally by two global SQLAlchemy Session events**
+  (`api/database.py::_register_tenant_scope`, registered once in `init_db`), so the ~40 query sites in
+  `api/main.py` are UNTOUCHED and no filter can be forgotten:
+  - `do_orm_execute` → `with_loader_criteria(TenantMixin, lambda cls: cls.tenant_id == tid)` adds
+    `WHERE tenant_id = current_tenant()` to every SELECT **and** ORM UPDATE/DELETE. ⚠️ Gotcha: the
+    tenant must be resolved OUTSIDE the lambda and closed over as a literal (`tid = current_tenant()`)
+    — a `current_tenant()` call *inside* the lambda raises `InvalidRequestError` (the lambda-SQL
+    system extracts bound values without invoking the fn).
+  - `before_flush` → stamps `tenant_id = current_tenant()` on `session.new` rows that didn't set it.
+- **Both handlers no-op unless `MULTI_TENANT_ENABLED`** → single-tenant is byte-identical to the MVP
+  (rows default to `"default"`, nothing filtered). Verified: multi-tenant → each tenant sees only its
+  rows (auto-stamped); single-tenant → all rows visible. Full suite 111 passed (+2 DB isolation
+  tests), same 8 pre-existing env-only fails.
+- **Migration:** `_run_lightweight_migrations` idempotently `ALTER TABLE … ADD COLUMN tenant_id
+  VARCHAR(64) NOT NULL DEFAULT 'default'` + `CREATE INDEX IF NOT EXISTS` on all 8 tables — existing
+  rows become the `"default"` tenant. Verified on the live `management.db` (all 8 migrated; re-run
+  skips). Works on SQLite and Postgres.
+- ⚠️ **Known caveat (follow-up):** the unique constraints on `kiosk_id`/`test_id`/`run_id`/`alias`
+  are still GLOBAL. A pooled DB where two tenants use the SAME id needs a composite
+  `(tenant_id, <key>)` unique migration — straightforward on Postgres (the pooled target), awkward on
+  SQLite. READ/WRITE isolation is complete; only cross-tenant id REUSE is constrained until then.
+- **Request tenant binding is wired:** a pure-ASGI `_TenantASGIMiddleware` in `api/main.py` binds the
+  `X-Tenant-Id` header per request (pure-ASGI, NOT `BaseHTTPMiddleware`, so the contextvar reliably
+  reaches sync endpoints via anyio's threadpool context copy). No-op unless `MULTI_TENANT_ENABLED`.
+  Combined with the run/explorer-thread binding, every DB query + blob write is now tenant-correct
+  end-to-end through the API.
+
+#### Update (2026-09-09, Phase 1c) — composite uniques · JWT · supervisor · Redis WebSocket
+
+The four follow-ups from Phase 1b, all config-gated (single-tenant/in-memory = MVP), 116 tests pass:
+
+- **Composite per-tenant unique constraints** (`api/models.py`): the natural keys are now unique
+  `(tenant_id, key)` via `UniqueConstraint` in `__table_args__` (`kiosk_id`, `test_id`, `run_id`,
+  `alias`), and the three FKs that referenced them (`app_maps.kiosk_id`, `test_results.run_id`,
+  `defects.run_id`) are now composite `ForeignKeyConstraint(['tenant_id','<key>'], [...])`. The
+  `TestRun.results ↔ TestResult.run` relationship carries an explicit `primaryjoin`+`foreign_keys`
+  (composite FK → SQLAlchemy needs the join spelled out). Verified: two tenants can hold the same
+  `run-1`; a same-tenant duplicate raises IntegrityError; the relationship loads. Fresh SQLite/PG get
+  this from `create_all` (single-tenant behaves like the old global unique since tenant_id is
+  constant); existing-pooled-PG migration SQL is in `docs/CLOUD_AGNOSTIC_DEPLOY.md`. ⚠️ SQLite FK
+  enforcement is off by default, so the composite FK is enforced on Postgres (the pooled target).
+- **JWT-claim tenant resolution** (`ports/tenancy.resolve_tenant_from_headers` + `_tenant_from_jwt`,
+  `vision_agent/config` `tenant_jwt_*`): when `TENANT_JWT_ENABLED`, the tenant is read from a signed
+  `Authorization: Bearer` JWT claim (`tenant_jwt_claim`, HS256 default, PyJWT **lazy-imported** — in
+  the `[cloud]` extra), with the `X-Tenant-Id` header as fallback. A malformed/wrong-secret token
+  returns None → header fallback (never 500s). The tenant middleware + WS endpoint both use this
+  resolver.
+- **Supervisor / CLI path:** `supervisor/worker.py` loads the app_map via `tenant_paths.app_map_path()`
+  and each worker thread re-binds the tenant from the `TENANT_ID` env (contextvars don't cross the
+  ThreadPoolExecutor boundary); `run_parallel.py` binds `TENANT_ID` at startup and writes its
+  aggregate JSON under `tenant_paths.results_dir()`. Single-tenant unchanged (`./results`).
+- **Redis-backed WebSocket for multi-replica realtime** (`api/main.py`): `_broadcast` now
+  **publishes** the event to the event bus (`_ws_channel = ws:run:<tenant>:<run_id>`) instead of
+  writing sockets directly; the WS endpoint **subscribes** this replica to that channel on connect
+  (ref-counted per run_id, unsubscribed when the last local socket closes) and delivers to local
+  sockets via `_deliver_local`. In-memory bus → identical single-replica behaviour (verified
+  end-to-end: a TestClient WS client receives a `_broadcast`); Redis bus → an event published by the
+  worker on ANY replica fans out to every replica's clients. Channel is tenant-namespaced. The WS
+  handshake resolves its tenant from headers (the HTTP middleware doesn't see WebSocket scopes).
+  ⚠️ This means K8s no longer needs sticky WebSocket sessions — any replica can serve any client.
+
+#### Update (2026-09-09, Phase 2) — worker queue · Temporal · tracing · pgvector memory
+
+The four AgentCore-layer analogues, all config-gated to MVP defaults (120 tests pass, same 8
+pre-existing env-only fails). New `ports/` modules + a `worker/` package + an `orchestration/` package:
+
+- **Queue-driven worker** (`ports/queue.py`, `ports/orchestration.py`, `worker/__main__.py`): the
+  AgentCore-Runtime analogue. `start_run` now submits via `submit_run(payload, _run_job)` instead of
+  spawning a thread directly. `TASK_QUEUE_BACKEND=inline` (default) → a same-process daemon thread
+  (byte-identical to the MVP); `=redis` → the API `RPUSH`es a job and a `SERVICE_ROLE=worker` process
+  (`python -m worker`, BLPOP loop) runs it. `_run_job(payload)` reconstructs the `RunRequest` and calls
+  the SAME `_execute_run`, so every backend shares the run logic. **Composes with the Redis WS:** the
+  worker publishes events to the bus, the API replica holding the client's socket delivers them — the
+  API/worker split works end-to-end. `docker-entrypoint.sh` dispatches API vs worker by `SERVICE_ROLE`;
+  compose gained a `worker` service; the k8s configmap sets `TASK_QUEUE_BACKEND=redis`.
+- **Temporal orchestration (optional)** (`orchestration/temporal_app.py`): `ORCHESTRATOR_BACKEND=temporal`
+  runs the suite as a durable Temporal workflow + `run_suite` activity that wraps the same `_run_job`
+  (durability/retry/visibility around unchanged run logic). `python -m worker --temporal` hosts it.
+  `temporalio` lazy-imported; default `inprocess` = the queue path. `[temporal]` extra.
+- **Tracing** (`ports/tracing.py`): `TRACING_BACKEND=none|otel|langfuse`. `otel` = OTLP spans to any
+  collector; `langfuse` = LLM-native traces via the LangChain callback handler. Wired at the ONE central
+  LLM path — `vision_agent/llm.invoke_json` passes `config={"callbacks": llm_callbacks()}` (empty →
+  plain `invoke`, so `none` is a true no-op). `span(name)` context manager for work units. Lazy SDKs,
+  `[tracing]` extra.
+- **pgvector Memory** (`ports/memory.py`): `MEMORY_BACKEND=none|chroma|pgvector` — the AgentCore-Memory
+  analogue. `remember()/search()` over a Chroma or Postgres+pgvector collection (reuses the repair
+  HuggingFace embedding singleton), **tenant-namespaced**. Wired (gated) into
+  `app_explorer/nodes/finalize_map.py::_index_screens_in_memory` — each charted screen is indexed when
+  enabled, so an agent can recall similar screens; `none` (default) = no-op, explorer unchanged.
+  `[memory]` extra.
+- All four surface in `/api/health` (`task_queue`/`orchestrator`/`tracing`/`memory`) and are documented
+  in `.env.example` + the decision doc's component table. Nothing is imported or changed until selected.
+- ⚠️ **Worker needs the same env as the API** (DB_URL, S3_*, REDIS_URL, ANTHROPIC_API_KEY). ⚠️ With
+  `TASK_QUEUE_BACKEND=redis` the API only enqueues — a worker MUST be running or runs never execute
+  (health still 200). ⚠️ `docker-entrypoint.sh` is CR-stripped in the Dockerfile (Windows-authored).
+
+#### Update (2026-09-09, Phase 2b) — hardening + architecture doc
+
+- **Per-test fan-out (Temporal):** `orchestration/temporal_app.py` `RunSuiteWorkflow` now runs one
+  `run_test` activity PER id in parallel when `payload["fanout_test_ids"]` is set — each an INDEPENDENT
+  sub-run (`<parent>::<test_id>`, its own filter) so parallel shards don't race on shared run state /
+  global settings (run shards on separate workers, or activity-concurrency=1 on one worker). Falls back
+  to the single `run_suite` activity otherwise. Worker registers both activities.
+- **OTel spans around agent work:** `_execute_run` opens a root `agent.run.execute` span (manual
+  enter/exit in the finally, no reindent); `vision_agent/llm.invoke_json` wraps each Claude call in a
+  child `llm.invoke` span **labelled by role** (planner/explorer/validate/repair/…). No-op unless
+  `TRACING_BACKEND=otel`; nests into an end-to-end per-run trace.
+- **Memory-informed exploration:** `app_explorer/nodes/explore_screen._recall_similar_screens` queries
+  `ports.memory.search` for semantically-similar prior screens and logs them (gated on `MEMORY_BACKEND`;
+  never raises). Completes the loop with `finalize_map._index_screens_in_memory` (write side). Purely
+  additive — does not alter screen identification.
+- **Architecture doc:** `docs/Cloud_Agnostic_Architecture.docx` — a component-view diagram (tiers +
+  AWS→agnostic mapping table) and a run sequence diagram (14-step start-to-finish use case), generated
+  with PIL + python-docx. 120 tests still pass; single-node/single-tenant behaviour unchanged.
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login

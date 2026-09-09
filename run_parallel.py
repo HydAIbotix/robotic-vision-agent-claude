@@ -64,15 +64,21 @@ for i, arg in enumerate(sys.argv[1:], 1):
             assignments = json.load(f)
         break
 
+# Bind the tenant for this batch run (single-tenant → the default; set TENANT_ID for a pooled run).
+import os
+from ports.tenancy import set_current_tenant
+from ports import paths as tenant_paths
+set_current_tenant(os.environ.get("TENANT_ID"))
+
 from supervisor import run_parallel
 
 summary = run_parallel(assignments)
 
-# Write combined results JSON
+# Write combined results JSON (tenant-scoped; == ./results when single-tenant)
 import datetime
 ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-out_path = Path("results") / f"parallel_{ts}.json"
-out_path.parent.mkdir(exist_ok=True)
+out_path = tenant_paths.results_dir() / f"parallel_{ts}.json"
+out_path.parent.mkdir(parents=True, exist_ok=True)
 out_path.write_text(json.dumps({
     "timestamp":    datetime.datetime.now().isoformat(),
     "wall_time_s":  summary.wall_time_s,

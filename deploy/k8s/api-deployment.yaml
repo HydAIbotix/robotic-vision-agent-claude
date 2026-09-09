@@ -1,0 +1,60 @@
+# API replicas — stateless, horizontally scalable. Because state lives in Postgres + object
+# store + Redis (never on the pod), you can run N replicas behind the Service and the HPA scales
+# them on load. Redis makes their WebSocket events consistent across replicas.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kioskqa-api
+  namespace: kioskqa
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: kioskqa, role: api }
+  template:
+    metadata:
+      labels: { app: kioskqa, role: api }
+    spec:
+      containers:
+        - name: api
+          image: REGISTRY/kioskqa:latest      # GHCR / Harbor / ACR / GAR / ECR — any OCI registry
+          ports: [{ containerPort: 8001 }]
+          env:
+            - { name: SERVICE_ROLE, value: "api" }
+          envFrom:
+            - configMapRef: { name: kioskqa-config }
+            - secretRef:    { name: kioskqa-secrets }
+          readinessProbe:
+            httpGet: { path: /api/health, port: 8001 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /api/health, port: 8001 }
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits:   { cpu: "1",    memory: "1Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kioskqa-api
+  namespace: kioskqa
+spec:
+  selector: { app: kioskqa, role: api }
+  ports: [{ port: 80, targetPort: 8001 }]
+---
+# Horizontal Pod Autoscaler — the agnostic analogue of serverless scale-out. Scales API pods on
+# CPU; raise maxReplicas as customer load grows.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: kioskqa-api
+  namespace: kioskqa
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: kioskqa-api }
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }

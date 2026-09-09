@@ -48,6 +48,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from vision_agent.config import settings
+from ports import paths as tenant_paths   # tenant-aware blob roots (single-tenant == MVP paths)
+from ports.tenancy import current_tenant, set_current_tenant
+from ports.event_bus import get_event_bus   # realtime fan-out: in-memory (1 replica) | redis (N)
 from api.database import get_db, init_db
 from api import models
 
@@ -60,9 +63,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Live WebSocket connections keyed by run_id
+
+class _TenantASGIMiddleware:
+    """Bind the request's tenant (X-Tenant-Id header) for the duration of the call, so the DB
+    tenant-filter and tenant-scoped blob paths use it. Pure-ASGI (not BaseHTTPMiddleware) so the
+    contextvar set here reliably propagates into the endpoint — including sync endpoints dispatched
+    to the threadpool, which anyio runs with a copy of this context. No-op unless MULTI_TENANT_ENABLED
+    (single-tenant → the default tenant everywhere), so it never affects existing single-tenant use."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and settings.multi_tenant_enabled:
+            from ports.tenancy import resolve_tenant_from_headers
+            hdrs = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+            set_current_tenant(resolve_tenant_from_headers(hdrs))   # JWT claim or X-Tenant-Id header
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_TenantASGIMiddleware)
+
+# Live WebSocket connections keyed by run_id (LOCAL to this replica).
 _ws_connections: dict[str, list[WebSocket]] = {}
+# One event-bus subscription per run_id per replica (ref-counted by the sockets above). With the
+# Redis event bus this is what makes realtime work across MULTIPLE replicas: the worker on any
+# replica publishes an event, Redis fans it out to every replica, and each delivers to ITS local
+# sockets. With the in-memory bus (single replica) it behaves exactly as the original in-process WS.
+_ws_subs: dict[str, "callable"] = {}
 _ws_lock = threading.Lock()
+
+
+def _ws_channel(run_id: str) -> str:
+    """Event-bus channel for a run's live events, namespaced by tenant so a run_id reused across
+    tenants (per-tenant unique) never crosses streams. Single-tenant → 'ws:run:default:<run_id>'."""
+    return f"ws:run:{current_tenant()}:{run_id}"
 
 # Active run threads
 _active_runs: dict[str, dict] = {}
@@ -84,7 +119,25 @@ async def startup():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+    # Report the ACTIVE cloud-agnostic backends so an operator can confirm, at a glance, which
+    # adapters a given deployment resolved to (local box vs. Azure/GCP/EC2). Purely informational.
+    return {
+        "status": "ok",
+        "timestamp": datetime.utcnow().isoformat(),
+        "platform": {
+            "vision_backend":    settings.vision_backend,      # anthropic | bedrock (Claude either way)
+            "persistence":       settings.persistence_backend,  # sqlite | postgres
+            "object_store":      settings.storage_backend,      # local | s3 | minio | gcs | azure
+            "event_bus":         settings.event_bus_backend,    # memory | redis
+            "task_queue":        settings.task_queue_backend,   # inline | redis
+            "orchestrator":      settings.orchestrator_backend, # inprocess | temporal
+            "tracing":           settings.tracing_backend,      # none | otel | langfuse
+            "memory":            settings.memory_backend,       # none | chroma | pgvector
+            "multi_tenant":      settings.multi_tenant_enabled,
+            "deployment_mode":   settings.deployment_mode,      # docker | k8s
+            "service_role":      settings.service_role,         # all | api | worker
+        },
+    }
 
 
 # ── Test Runs ─────────────────────────────────────────────────────────────────
@@ -113,7 +166,8 @@ def list_runs(limit: int = 50, db: Session = Depends(get_db)):
 
 
 def _base_screens_dir() -> Path:
-    return Path(settings.app_map_path).parent / "screenshots"
+    # Tenant-scoped in multi-tenant mode; identical to the MVP path when single-tenant.
+    return tenant_paths.screens_dir()
 
 
 def _run_screens_dir(run_id: str) -> Path:
@@ -122,8 +176,9 @@ def _run_screens_dir(run_id: str) -> Path:
 
 def _run_results_dir(run_id: str) -> Path:
     """Per-run results folder: results/<run_id>/ — holds results.json + run.log so every run's
-    output is PRESERVED (unique per run_id, never overwritten by a later run)."""
-    return Path(settings.results_dir) / run_id
+    output is PRESERVED (unique per run_id, never overwritten by a later run). Tenant-scoped in
+    multi-tenant mode; identical to the MVP path when single-tenant."""
+    return tenant_paths.results_dir() / run_id
 
 
 class _Tee:
@@ -217,8 +272,9 @@ def _write_run_artifacts(run_id: str, run, test_results: list, robot_events: lis
 
 
 def _next_run_number() -> int:
-    """Monotonic run counter persisted in results/.run_seq.  Reset deletes it → restarts at 1."""
-    p = Path(settings.results_dir) / ".run_seq"
+    """Monotonic run counter persisted in results/.run_seq.  Reset deletes it → restarts at 1.
+    Tenant-scoped so each tenant numbers its own runs independently (== global when single-tenant)."""
+    p = tenant_paths.results_dir() / ".run_seq"
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         n = int(p.read_text().strip()) if p.exists() else 0
@@ -250,16 +306,25 @@ def start_run(req: RunRequest, db: Session = Depends(get_db)):
     db.add(run)
     db.commit()
 
-    # Start runner in background thread
-    t = threading.Thread(
-        target=_execute_run,
-        args=(run_id, req),
-        daemon=True,
-    )
-    _active_runs[run_id] = {"thread": t, "req": req}
-    t.start()
+    # Submit the run through the orchestration seam. Capture the tenant HERE (request context) — it
+    # does not cross a thread/process boundary — and carry it in the job payload.
+    #   inprocess + inline  → a same-process daemon thread (the MVP; single node)
+    #   inprocess + redis   → a SERVICE_ROLE=worker process consumes it (API/worker split)
+    #   temporal            → a durable Temporal workflow
+    # All paths ultimately call _execute_run(run_id, req, tenant), so behaviour is identical.
+    from ports.orchestration import submit_run
+    payload = {"run_id": run_id, "req": req.model_dump(), "tenant": current_tenant()}
+    _active_runs[run_id] = {"req": req}
+    submit_run(payload, _run_job)
 
     return {"run_id": run_id, "status": "pending"}
+
+
+def _run_job(payload: dict) -> None:
+    """Shared run entry point for every orchestration/queue backend: reconstruct the request and
+    execute the suite. Runs in whichever context the backend provides (thread / worker / activity)."""
+    req = RunRequest(**payload["req"])
+    _execute_run(payload["run_id"], req, payload.get("tenant", ""))
 
 
 @app.get("/api/runs/{run_id}")
@@ -285,8 +350,18 @@ def get_run(run_id: str, db: Session = Depends(get_db)):
 @app.websocket("/api/runs/{run_id}/ws")
 async def run_ws(run_id: str, ws: WebSocket):
     await ws.accept()
+    # Bind the client's tenant (from the handshake headers) so the channel matches the publisher's.
+    # The HTTP tenant middleware doesn't see WebSocket scopes, so resolve it here. No-op single-tenant.
+    if settings.multi_tenant_enabled:
+        from ports.tenancy import resolve_tenant_from_headers
+        set_current_tenant(resolve_tenant_from_headers({k.lower(): v for k, v in ws.headers.items()}))
+    channel = _ws_channel(run_id)
     with _ws_lock:
         _ws_connections.setdefault(run_id, []).append(ws)
+        # First local socket for this run_id → subscribe this replica to the run's bus channel.
+        if run_id not in _ws_subs:
+            _ws_subs[run_id] = get_event_bus().subscribe(
+                channel, lambda data, rid=run_id: _deliver_local(rid, data))
     try:
         while True:
             await asyncio.sleep(30)  # keep alive
@@ -297,6 +372,15 @@ async def run_ws(run_id: str, ws: WebSocket):
             conns = _ws_connections.get(run_id, [])
             if ws in conns:
                 conns.remove(ws)
+            # Last local socket gone → drop this replica's subscription for the run.
+            if not conns:
+                _ws_connections.pop(run_id, None)
+                unsub = _ws_subs.pop(run_id, None)
+                if unsub:
+                    try:
+                        unsub()
+                    except Exception:
+                        pass
 
 
 @app.get("/api/runs/{run_id}/defects")
@@ -1121,7 +1205,7 @@ def _vision_test_dir() -> Path:
     # screenshots/ — so an App Explorer "clear all" (which nukes top-level screenshot files) never
     # wipes captured camera frames. Every frame the /capture and /upload endpoints return is saved
     # here automatically for later inspection.
-    d = Path(settings.app_map_path).parent / "camera_captures"
+    d = Path(tenant_paths.app_map_path()).parent / "camera_captures"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -1129,7 +1213,7 @@ def _vision_test_dir() -> Path:
 def _coords_export_dir() -> Path:
     # Dedicated project-root folder for the Camera Vision Test coordinate exports (one .xlsx per run of
     # the tool). Sibling to camera_captures/ so an App Explorer "clear all" never touches it.
-    d = Path(settings.app_map_path).parent / "coordinate_exports"
+    d = Path(tenant_paths.app_map_path()).parent / "coordinate_exports"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -1746,7 +1830,7 @@ def vision_test_analyze(req: VisionAnalyzeRequest):
     except Exception as e:
         raise HTTPException(500, f"Could not hash image: {e}")
 
-    app_map = app_map_store.load(settings.app_map_path) if Path(settings.app_map_path).exists() else {"screens": {}}
+    app_map = app_map_store.load(tenant_paths.app_map_path()) if Path(tenant_paths.app_map_path()).exists() else {"screens": {}}
     screens = app_map.get("screens") or {}
 
     def _hamming(a: str, b: str) -> int:
@@ -1992,7 +2076,7 @@ def vision_test_element_coords(req: ElementCoordsRequest):
     if not img_w or not img_h:
         raise HTTPException(400, "Could not read the frame dimensions")
 
-    app_map = app_map_store.load(settings.app_map_path) if Path(settings.app_map_path).exists() else {"screens": {}}
+    app_map = app_map_store.load(tenant_paths.app_map_path()) if Path(tenant_paths.app_map_path()).exists() else {"screens": {}}
     screens = app_map.get("screens") or {}
     if req.screen_id not in screens:
         raise HTTPException(404, f"Screen {req.screen_id!r} is not in the app map")
@@ -2251,8 +2335,8 @@ def get_tc_plan(req: TcPlanRequest, db: Session = Depends(get_db)):
 
     # Load app map once — needed for both cache key and element inventory
     app_map = None
-    if Path(settings.app_map_path).exists():
-        app_map = app_map_store.load(settings.app_map_path)
+    if Path(tenant_paths.app_map_path()).exists():
+        app_map = app_map_store.load(tenant_paths.app_map_path())
     # Scope to THIS test's kiosk(s) so Claude only ever sees the target app(s)' screens: a VPS test
     # is never planned against RPS's login screen, and a cross-kiosk E2E test sees BOTH apps it
     # touches.  Same choke point the runner uses — so the cache key (version_hash of the scoped map)
@@ -2481,9 +2565,12 @@ def start_explore(req: ExploreRequest, db: Session = Depends(get_db)):
 
     explore_id = f"explore-{uuid.uuid4().hex[:8]}"
     _explore_jobs[explore_id] = {"status": "running", "message": "Exploration in progress…"}
+    # Resolve the tenant-scoped app_map path NOW, in the request context (the tenant binding is a
+    # contextvar that won't propagate into the background thread), and hand it to the explorer.
+    _explore_map_path = tenant_paths.app_map_path()
     t = threading.Thread(
         target=_run_explorer,
-        args=(explore_id, req.kiosk_url, req.kiosk_id),
+        args=(explore_id, req.kiosk_url, req.kiosk_id, _explore_map_path),
         daemon=True,
     )
     t.start()
@@ -2534,15 +2621,16 @@ def reset_all(db: Session = Depends(get_db)):
             elif child.name.startswith(_EXEC_PREFIXES):
                 child.unlink(missing_ok=True)
 
-    # Results JSON (suite_*.json) + run counter → numbering restarts at 1.
-    results_dir = Path(settings.results_dir)
+    # Results JSON (suite_*.json) + run counter → numbering restarts at 1. Tenant-scoped so a
+    # reset clears only the calling tenant's outputs (== the single global dir when single-tenant).
+    results_dir = tenant_paths.results_dir()
     if results_dir.exists():
         for f in results_dir.glob("*.json"):
             f.unlink(missing_ok=True)
     (results_dir / ".run_seq").unlink(missing_ok=True)
 
-    # Generated test plans (test_plans/<test_id>_<hash>.json).
-    plans_dir = Path(__file__).resolve().parent.parent / "test_plans"
+    # Generated test plans (test_plans/<test_id>_<hash>.json), tenant-scoped.
+    plans_dir = tenant_paths.test_plans_dir()
     if plans_dir.exists():
         for f in plans_dir.glob("*.json"):
             f.unlink(missing_ok=True)
@@ -2636,7 +2724,7 @@ def _gc_orphan_shots() -> int:
     """Delete exploration screenshots whose screen is no longer in the map (orphans left by
     earlier map-clears that didn't remove files). Keeps shots for screens still in the map."""
     from app_map import store as app_map_store
-    p = Path(settings.app_map_path)
+    p = Path(tenant_paths.app_map_path())
     if not p.exists():
         return _delete_exploration_shots(None)
     try:
@@ -2664,7 +2752,7 @@ def _gc_orphan_shots() -> int:
 @app.delete("/api/app-map", status_code=204)
 def delete_app_map():
     """Clear the ENTIRE app map + all exploration screenshots (clean slate)."""
-    p = Path(settings.app_map_path)
+    p = Path(tenant_paths.app_map_path())
     if p.exists():
         p.unlink()
     n = _delete_exploration_shots(None)
@@ -2678,7 +2766,7 @@ def delete_app_map_app(app_id: str):
     Other apps' screens and screenshots are preserved. If this was the only app, everything is wiped.
     """
     from app_map import store as app_map_store
-    p = Path(settings.app_map_path)
+    p = Path(tenant_paths.app_map_path())
     if not p.exists():
         _delete_exploration_shots(None)
         return
@@ -2715,7 +2803,7 @@ def delete_app_map_app(app_id: str):
 @app.get("/api/screenshots/annotated")
 def list_annotated_screenshots():
     """List annotated screenshots grouped by screen_id."""
-    shots_dir = Path(settings.app_map_path).parent / "screenshots" / "annotated"
+    shots_dir = Path(tenant_paths.app_map_path()).parent / "screenshots" / "annotated"
     if not shots_dir.exists():
         return {}
     result: dict[str, list[str]] = {}
@@ -2732,7 +2820,7 @@ def list_annotated_screenshots():
 @app.get("/api/screenshots/annotated/{filename}")
 def get_annotated_screenshot(filename: str):
     from fastapi.responses import FileResponse
-    shots_dir = Path(settings.app_map_path).parent / "screenshots" / "annotated"
+    shots_dir = Path(tenant_paths.app_map_path()).parent / "screenshots" / "annotated"
     path = shots_dir / filename
     if not path.exists() or not path.is_file():
         raise HTTPException(404, "Not found")
@@ -2741,7 +2829,7 @@ def get_annotated_screenshot(filename: str):
 
 @app.get("/api/screenshots")
 def list_screenshots():
-    shots_dir = Path(settings.app_map_path).parent / "screenshots"
+    shots_dir = Path(tenant_paths.app_map_path()).parent / "screenshots"
     if not shots_dir.exists():
         return []
     return sorted(
@@ -2753,7 +2841,7 @@ def list_screenshots():
 @app.get("/api/screenshots/{filename}")
 def get_screenshot(filename: str):
     from fastapi.responses import FileResponse
-    shots_dir = Path(settings.app_map_path).parent / "screenshots"
+    shots_dir = Path(tenant_paths.app_map_path()).parent / "screenshots"
     path = shots_dir / filename
     if not path.exists() or not path.is_file():
         raise HTTPException(404, "Not found")
@@ -2763,13 +2851,13 @@ def get_screenshot(filename: str):
 @app.get("/api/app-map")
 def get_app_map():
     from app_map import store as app_map_store
-    if not Path(settings.app_map_path).exists():
+    if not Path(tenant_paths.app_map_path()).exists():
         return {"screens": {}, "exists": False}
-    m = app_map_store.load(settings.app_map_path)
+    m = app_map_store.load(tenant_paths.app_map_path())
     # Fall back to file modification time when explored_at is not recorded
     explored_at = m.get("explored_at") or None
     if not explored_at:
-        mtime = Path(settings.app_map_path).stat().st_mtime
+        mtime = Path(tenant_paths.app_map_path()).stat().st_mtime
         explored_at = datetime.utcfromtimestamp(mtime).isoformat() + "Z"
     return {
         "exists":       True,
@@ -2800,7 +2888,19 @@ def get_app_map():
 # ── Background workers ─────────────────────────────────────────────────────────
 
 def _broadcast(run_id: str, data: dict):
-    """Send event to all WebSocket clients watching this run (thread-safe)."""
+    """Publish a run event to the event bus. With the in-memory bus this delivers synchronously to
+    THIS replica's sockets (identical to the original in-process behaviour); with the Redis bus it
+    fans out to EVERY replica, each of which delivers to its own local sockets. Called from worker
+    threads (tenant already bound), so _ws_channel picks up the correct tenant."""
+    try:
+        get_event_bus().publish(_ws_channel(run_id), data)
+    except Exception:
+        # Never let a realtime hiccup break a run; fall back to direct local delivery.
+        _deliver_local(run_id, data)
+
+
+def _deliver_local(run_id: str, data: dict):
+    """Send an event to all WebSocket clients on THIS replica watching this run (thread-safe)."""
     msg = json.dumps(data)
     with _ws_lock:
         sockets = list(_ws_connections.get(run_id, []))
@@ -2818,12 +2918,24 @@ def _broadcast(run_id: str, data: dict):
 _run_tee_active = False
 
 
-def _execute_run(run_id: str, req: RunRequest):
-    """Background thread: execute one test suite and write results to DB."""
+def _execute_run(run_id: str, req: RunRequest, tenant_id: str = ""):
+    """Background thread: execute one test suite and write results to DB.
+
+    tenant_id is captured in the request context and re-bound here so this thread's blob writes
+    (results / screenshots / plans) land in the right tenant's namespace. No-op single-tenant."""
+    if tenant_id:
+        set_current_tenant(tenant_id)
     db = next(get_db())
     run = db.query(models.TestRun).filter_by(run_id=run_id).first()
     if not run:
         return
+
+    # Root trace span for the whole run (no-op unless TRACING_BACKEND=otel). Entered manually and
+    # closed in the finally below, so the large body isn't reindented. Child spans (llm.invoke, per
+    # label) nest under it, giving an end-to-end agent trace per run.
+    from ports.tracing import span as _trace_span
+    _run_span = _trace_span("agent.run.execute", run_id=run_id, tenant=current_tenant())
+    _run_span.__enter__()
 
     _prev_screens_dir = settings.screenshots_dir
     _prev_kiosk_url   = settings.kiosk_url
@@ -2945,8 +3057,8 @@ def _execute_run(run_id: str, req: RunRequest):
                       f"Explore this kiosk in App Explorer (or set its URL in Configuration).")
 
         _app_map = None
-        if Path(settings.app_map_path).exists():
-            _app_map = app_map_store.load(settings.app_map_path)
+        if Path(tenant_paths.app_map_path()).exists():
+            _app_map = app_map_store.load(tenant_paths.app_map_path())
             if "keyboard_map" in _app_map:
                 robot.set_keyboard_map(_app_map["keyboard_map"])
             # Single-kiosk run → scope the map to just that kiosk's screens so the planner never
@@ -3068,6 +3180,10 @@ def _execute_run(run_id: str, req: RunRequest):
         db.commit()
         _broadcast(run_id, {"event": "run_error", "run_id": run_id, "error": str(e)})
     finally:
+        try:
+            _run_span.__exit__(None, None, None)   # close the run trace span
+        except Exception:
+            pass
         # Restore the base screenshots dir + global kiosk URL so later exploration/other work
         # isn't misdirected by this run's per-kiosk overrides.
         settings.screenshots_dir = _prev_screens_dir
@@ -3255,8 +3371,12 @@ def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list):
             _repair_cancel.pop(repair_id, None)
 
 
-def _run_explorer(explore_id: str, kiosk_url: str, kiosk_id: str = ""):
-    """Background thread: run the app explorer and record success/failure."""
+def _run_explorer(explore_id: str, kiosk_url: str, kiosk_id: str = "", app_map_path: str = ""):
+    """Background thread: run the app explorer and record success/failure.
+
+    app_map_path is the tenant-scoped destination resolved in the request context; it is passed to
+    the subprocess as APP_MAP_PATH so exploration writes the correct tenant's map (single-tenant →
+    the MVP path). Blank → the subprocess uses its own configured default."""
     import os
     import subprocess
     try:
@@ -3274,6 +3394,8 @@ def _run_explorer(explore_id: str, kiosk_url: str, kiosk_id: str = ""):
             env["KIOSK_URL"] = kiosk_url          # explore the requested app's URL
         if kiosk_id:
             env["EXPLORE_APP_ID"] = kiosk_id      # tag + merge this app's screens (multi-app)
+        if app_map_path:
+            env["APP_MAP_PATH"] = app_map_path    # tenant-scoped destination (== MVP path when single-tenant)
         result = subprocess.run(
             [sys.executable, "run_explorer.py"],
             stderr=subprocess.PIPE,

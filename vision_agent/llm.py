@@ -94,10 +94,23 @@ def invoke_json(llm: BaseChatModel, messages: list, *, retries: int = 2, default
     This helper retries a few times and, if every attempt fails, returns `default` instead
     of raising, so one flaky response degrades a single step rather than killing the run.
     """
+    # Tracing (no-op unless TRACING_BACKEND is set). invoke_json is the central LLM path, so this one
+    # wire-point traces EVERY agent's Claude calls: Langfuse via callbacks, OpenTelemetry via a span
+    # named for the call's role (label = planner / explorer / validate / repair / …).
+    try:
+        from ports.tracing import llm_callbacks, span as _trace_span
+        _cb = llm_callbacks()
+    except Exception:
+        import contextlib
+        _cb = []
+        _trace_span = lambda *a, **k: contextlib.nullcontext()
+    _cfg = {"callbacks": _cb} if _cb else None
+
     last_err = None
     for attempt in range(1, retries + 2):   # e.g. retries=2 → 3 total attempts
         try:
-            content = llm.invoke(messages).content
+            with _trace_span("llm.invoke", label=label):
+                content = (llm.invoke(messages, config=_cfg) if _cfg else llm.invoke(messages)).content
             # ChatAnthropic returns a str for plain text, or a list of blocks when the
             # response is multi-part; concatenate any text blocks in the latter case.
             if isinstance(content, list):

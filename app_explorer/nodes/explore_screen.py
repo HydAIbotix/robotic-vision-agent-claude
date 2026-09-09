@@ -572,6 +572,22 @@ def _map_keyboard(elements: list, app_map: dict) -> dict:
 
 # ── Main node ─────────────────────────────────────────────────────────────────
 
+def _recall_similar_screens(screen_id: str, description: str) -> None:
+    """Query the semantic memory port for screens similar to the current one and log the top hits.
+    Gated: no-op unless MEMORY_BACKEND is enabled. Never raises — recall must not break exploration."""
+    try:
+        from ports import memory
+        if not memory.enabled():
+            return
+        hits = memory.search(f"{screen_id}: {description}", k=3)
+        recalled = [h["metadata"].get("screen_id", "?") for h in hits
+                    if h["metadata"].get("screen_id") != screen_id]
+        if recalled:
+            print(f"  [EXPLORE/memory] '{screen_id}' resembles previously-seen: {', '.join(recalled)}")
+    except Exception as exc:
+        print(f"  [EXPLORE/memory] recall skipped ({exc})")
+
+
 def explore_screen(state: ExplorerState) -> dict:
     # ── 1. Analyze screenshot — uses original ANALYZE_SCREEN prompt ───────────
     #    Cache bypassed so visually-similar screens get fresh identification.
@@ -590,6 +606,12 @@ def explore_screen(state: ExplorerState) -> dict:
         print(f"  [EXPLORE] screen_id '{screen_id}' → using identify_result '{fallback}'")
         screen_id = fallback
         screen = {**screen, "screen_id": fallback}
+
+    # ── Memory-informed exploration (gated) ───────────────────────────────────
+    #    Recall semantically-similar screens seen before (this or other apps) from the memory port.
+    #    No-op unless MEMORY_BACKEND is set; purely additive — surfaces prior knowledge, never alters
+    #    the identification above. Completes the memory loop (finalize_map indexes; this recalls).
+    _recall_similar_screens(screen_id, screen.get("description", ""))
 
     # ── 3. Add/update screen in AppMap ────────────────────────────────────────
     app_map  = {**state["app_map"], "screens": dict(state["app_map"].get("screens") or {})}

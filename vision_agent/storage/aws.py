@@ -1,18 +1,50 @@
 """
-AWS storage backends. Activated by STORAGE_BACKEND=s3 in .env — zero agent code changes.
+S3-compatible object storage. Activated by STORAGE_BACKEND in {s3, minio, gcs, azure} — zero
+agent code changes. This ONE class talks to any S3-compatible store; the target is chosen by
+`s3_endpoint_url` (see vision_agent/storage/__init__.py), so it is fully cloud-agnostic:
 
-Deployment path from the AWS architecture diagram:
-  Robot camera → capture_screen() → S3 (via robot SDK)
-  MSK robot.{id}.image topic → Lambda → SQS → SQSImageQueue.receive_next()
-  Vision results → S3 (via save_json) → RDS via downstream Lambda
+  AWS S3      → endpoint blank (default AWS endpoint), default cred chain / IAM role
+  MinIO       → endpoint http://minio:9000, path-style addressing, static keys (self-hosted, any cloud)
+  GCS         → endpoint https://storage.googleapis.com  (S3 interoperability mode)
+  Azure Blob  → endpoint of an S3-compatible gateway (e.g. via a proxy) — same code path
+
+Historical AWS event path (unused off AWS): MSK robot.{id}.image → Lambda → SQS →
+SQSImageQueue.receive_next(). On other clouds the event bus (Redis) replaces MSK/SQS.
 """
 import json
 
 
 class S3Storage:
-    def __init__(self, bucket: str, prefix: str = ""):
+    def __init__(
+        self,
+        bucket: str,
+        prefix: str = "",
+        *,
+        endpoint_url: str | None = None,
+        region: str | None = None,
+        access_key: str | None = None,
+        secret_key: str | None = None,
+        path_style: bool = True,
+    ):
         import boto3
-        self._s3 = boto3.client("s3")
+        from botocore.config import Config
+
+        # path-style addressing (bucket in the URL path, not the host) is required by MinIO and
+        # most self-hosted / non-AWS S3 gateways; harmless against real AWS S3.
+        cfg = Config(s3={"addressing_style": "path" if path_style else "auto"}) if endpoint_url else None
+        client_kwargs: dict = {}
+        if endpoint_url:
+            client_kwargs["endpoint_url"] = endpoint_url
+        if region:
+            client_kwargs["region_name"] = region
+        # Explicit static keys only when provided; otherwise boto3's default provider chain
+        # (env / instance role / workload identity) is used — the AWS-native behaviour.
+        if access_key and secret_key:
+            client_kwargs["aws_access_key_id"] = access_key
+            client_kwargs["aws_secret_access_key"] = secret_key
+        if cfg is not None:
+            client_kwargs["config"] = cfg
+        self._s3 = boto3.client("s3", **client_kwargs)
         self._bucket = bucket
         self._prefix = prefix.rstrip("/")
 

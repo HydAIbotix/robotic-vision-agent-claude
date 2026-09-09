@@ -1,0 +1,24 @@
+# Non-secret runtime config for the Kiosk-QA backend. Same env keys as docker-compose.yml —
+# the ONLY difference between Docker and K8s is where these values live (env block vs. ConfigMap).
+# Point the endpoints at MANAGED services (Azure Database for PostgreSQL / Cloud SQL / RDS;
+# Azure Blob-via-S3 / GCS / S3; Azure Cache / Memorystore / ElastiCache) or at in-cluster ones.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kioskqa-config
+  namespace: kioskqa
+data:
+  VISION_BACKEND: "anthropic"            # Claude via Anthropic API (portable to any cloud)
+  PERSISTENCE_BACKEND: "postgres"
+  DB_URL: "postgresql+psycopg://kioskqa:CHANGE_ME@postgres:5432/kioskqa"
+  STORAGE_BACKEND: "minio"               # or s3 / gcs / azure — same code path
+  S3_BUCKET: "kioskqa"
+  S3_ENDPOINT_URL: "http://minio:9000"   # blank for real AWS S3
+  S3_USE_PATH_STYLE: "true"
+  EVENT_BUS_BACKEND: "redis"
+  REDIS_URL: "redis://redis:6379/0"
+  TASK_QUEUE_BACKEND: "redis"            # API enqueues; the worker Deployment consumes
+  MULTI_TENANT_ENABLED: "false"          # true for pooled multi-customer SaaS
+  DEPLOYMENT_MODE: "k8s"
+  # Optional (see docs/CLOUD_AGNOSTIC_DECISION.md): ORCHESTRATOR_BACKEND=temporal,
+  # TRACING_BACKEND=otel|langfuse, MEMORY_BACKEND=chroma|pgvector.

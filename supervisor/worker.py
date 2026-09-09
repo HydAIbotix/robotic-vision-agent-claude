@@ -24,6 +24,12 @@ def run_worker(assignment: WorkerAssignment, on_event=None) -> WorkerResult:
     on_event(event_dict) — optional callback for live progress streaming.
     Called from the worker thread; the caller must handle thread safety.
     """
+    # Bind this worker thread's tenant from the TENANT_ID env (set by the CLI). Contextvars don't
+    # cross the thread boundary, so each worker re-binds. No-op unless MULTI_TENANT_ENABLED.
+    import os
+    from ports.tenancy import set_current_tenant
+    set_current_tenant(os.environ.get("TENANT_ID"))
+
     run_id = f"run-{assignment.robot_id}-{uuid.uuid4().hex[:8]}"
     result = WorkerResult(
         robot_id   = assignment.robot_id,
@@ -51,6 +57,7 @@ def run_worker(assignment: WorkerAssignment, on_event=None) -> WorkerResult:
         from app_map import store as app_map_store
         from test_runner.agent import create_test_runner
         from test_runner.state import TestRunnerState
+        from ports import paths as tenant_paths   # tenant-scoped app_map (== MVP when single-tenant)
 
         # Load test cases
         all_cases = read_test_cases(assignment.excel_path)
@@ -66,10 +73,11 @@ def run_worker(assignment: WorkerAssignment, on_event=None) -> WorkerResult:
             result.error = f"No test cases matched filter={assignment.filter_tc!r}"
             return result
 
-        # Load app_map
+        # Load app_map (tenant-scoped path; identical to the MVP path when single-tenant)
         _app_map = None
-        if Path(settings.app_map_path).exists():
-            _app_map = app_map_store.load(settings.app_map_path)
+        _map_path = tenant_paths.app_map_path()
+        if Path(_map_path).exists():
+            _app_map = app_map_store.load(_map_path)
             if "keyboard_map" in _app_map:
                 robot.set_keyboard_map(_app_map["keyboard_map"])
         _emit("app_map_loaded", screens=len((_app_map or {}).get("screens", {})))

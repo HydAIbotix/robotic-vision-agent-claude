@@ -21,11 +21,14 @@ class Settings(BaseSettings):
     bedrock_region: str = "us-east-1"
     bedrock_model_id: str = "anthropic.claude-opus-4-8"
 
-    # Storage: swap to "s3" for AWS — zero other code changes
-    storage_backend: Literal["local", "s3"] = "local"
+    # Storage backend. "local" for dev; "s3" now covers ANY S3-compatible object store —
+    # AWS S3, MinIO (self-hosted), Google Cloud Storage or Azure Blob via their S3 gateways —
+    # selected purely by s3_endpoint_url below. "minio"/"gcs"/"azure" are readable aliases for
+    # the same S3 code path (see vision_agent/storage/__init__.py). Zero agent code changes.
+    storage_backend: Literal["local", "s3", "minio", "gcs", "azure"] = "local"
     s3_bucket: str = ""
     s3_prefix: str = "vision-agent"
-    sqs_queue_url: str = ""  # SQS queue for robot image events
+    sqs_queue_url: str = ""  # SQS queue for robot image events (AWS-only; unused on other clouds)
 
     # Robot backend — swap without touching agent code
     # demo        : pre-captured screenshots, no real interaction (default)
@@ -414,6 +417,95 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8001
     db_url: str = "sqlite:///./management.db"  # swap to postgresql://... for production
+
+    # ══════════════════════════════════════════════════════════════════════════════════════
+    # CLOUD-AGNOSTIC DEPLOYMENT  (branch: cloud-agnostic-agent — see docs/CLOUD_AGNOSTIC_DECISION.md)
+    # ──────────────────────────────────────────────────────────────────────────────────────
+    # Every managed-AWS component the `aws-based` branch used has an open-source, run-anywhere
+    # equivalent, selected here BY CONFIG ALONE (ports-and-adapters / hexagonal). Claude is
+    # untouched — it stays a remote call via VISION_BACKEND (anthropic|bedrock). Defaults below
+    # reproduce the pure-local MVP byte-for-byte, so NOTHING changes until a backend is switched:
+    #   persistence : sqlite (default) | postgres   — relational metadata (db_url picks the engine)
+    #   object store: local  (default) | s3|minio|gcs|azure — blobs, all via the S3-compatible API
+    #   event bus   : memory (default) | redis      — cross-replica realtime fan-out (scale-out)
+    #   tenancy     : single (default) | multi       — tenant_id isolation (pooled SaaS vs dedicated)
+    #   runtime     : docker (default) | k8s         — same image; only the orchestrator differs
+    # This is the agnostic analogue of AWS DynamoDB / S3 / API-GW-WebSocket / Step-Functions /
+    # AgentCore, so the SAME codebase deploys on Azure, GCP, EC2 or on-prem with no lock-in.
+
+    # --- Persistence (relational metadata: runs, results, defects, config, test cases) ---
+    # db_url (above) already selects the SQLAlchemy engine. persistence_backend is a readable
+    # alias surfaced in /health so the active store is obvious; keep it in sync with db_url.
+    #   sqlite   → db_url = sqlite:///./management.db   (dev / single box, MVP default)
+    #   postgres → db_url = postgresql+psycopg://user:pass@host:5432/kioskqa   (any cloud / RDS-equiv)
+    persistence_backend: Literal["sqlite", "postgres"] = "sqlite"
+
+    # --- Object store (blobs) — extra knobs, all INERT when blank (real AWS default cred chain) ---
+    s3_endpoint_url: str = ""          # e.g. http://minio:9000  (blank = real AWS S3 endpoint)
+    s3_region: str = ""                # e.g. us-east-1 / any (MinIO ignores it)
+    s3_access_key_id: str = ""         # blank = fall back to the default provider cred chain
+    s3_secret_access_key: str = ""
+    s3_use_path_style: bool = True     # MinIO / most self-hosted S3 need path-style addressing
+
+    # --- Event bus (realtime WebSocket + cross-worker fan-out) ---
+    # memory = in-process (single server, = MVP behaviour). redis = pub/sub so N API/worker
+    # replicas behind a load balancer share live run/step/repair events (required for scale-out).
+    event_bus_backend: Literal["memory", "redis"] = "memory"
+    redis_url: str = ""                # e.g. redis://redis:6379/0
+
+    # --- Multi-tenancy ---
+    # single = one implicit tenant (default_tenant_id) — the MVP behaviour. multi = tenant_id is
+    # read per request (X-Tenant-Id header / JWT claim) and prefixes every object-store key and
+    # DB row for isolation. Works identically whether customers share our cloud (pooled) or each
+    # runs a dedicated deployment in their own cloud (tenant_id then separates their sub-teams).
+    multi_tenant_enabled: bool = False
+    default_tenant_id: str = "default"
+    # Tenant resolution from a signed JWT (optional). When off, the tenant comes from the
+    # X-Tenant-Id request header. When on, a `Authorization: Bearer <jwt>` token is decoded and the
+    # tenant is read from `tenant_jwt_claim`; the header is the fallback when no token is present.
+    # PyJWT is imported lazily, so this adds no dependency until enabled.
+    tenant_jwt_enabled: bool = False
+    tenant_jwt_secret: str = ""              # HS256 shared secret (or PEM public key for RS*)
+    tenant_jwt_algorithms: str = "HS256"     # comma-separated allowed algorithms
+    tenant_jwt_claim: str = "tenant_id"      # the claim carrying the tenant id
+    tenant_jwt_audience: str = ""            # optional `aud` to verify (blank = don't verify aud)
+
+    # --- Deployment / scaling (informational; consumed by /health + infra, not by hot paths) ---
+    deployment_mode: str = "docker"    # docker | k8s   — which manifests you applied
+    service_role: str = "all"          # all | api | worker — split roles when scaling processes out
+
+    # --- Task queue (API↔worker split for horizontal scale-out; AgentCore-Runtime analogue) ---
+    # inline = the API runs each suite in an in-process thread (MVP, single node). redis = the API
+    # enqueues a job and a separate SERVICE_ROLE=worker process consumes it (decouples the tiers).
+    task_queue_backend: Literal["inline", "redis"] = "inline"
+    task_queue_key: str = "kioskqa:runs"
+
+    # --- Orchestration (durable workflow engine; Step-Functions analogue) ---
+    # inprocess = dispatch via the task queue above (default). temporal = run the suite as a durable
+    # Temporal workflow/activity (survives worker restarts, automatic retries). Optional.
+    orchestrator_backend: Literal["inprocess", "temporal"] = "inprocess"
+    temporal_host: str = "localhost:7233"
+    temporal_namespace: str = "default"
+    temporal_task_queue: str = "kioskqa"
+
+    # --- Tracing / observability (CloudWatch-GenAI analogue; vendor-neutral) ---
+    # none = off (MVP). otel = OpenTelemetry spans → any OTLP collector. langfuse = LLM-native traces
+    # via the LangChain callback handler. Lazy imports; nothing added until selected.
+    tracing_backend: Literal["none", "otel", "langfuse"] = "none"
+    otel_exporter_endpoint: str = ""          # OTLP endpoint, e.g. http://otel-collector:4317
+    otel_service_name: str = "kioskqa"
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "https://cloud.langfuse.com"
+
+    # --- Semantic memory (Explorer screen memory / agent recall; AgentCore-Memory analogue) ---
+    # none = off (MVP; app_map is the durable memory). chroma = local vector store. pgvector = a
+    # Postgres + pgvector collection (shares the DB). Populated by the explorer when enabled.
+    memory_backend: Literal["none", "chroma", "pgvector"] = "none"
+    memory_collection: str = "kiosk_memory"
+    memory_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    memory_persist_dir: str = "./docs/chroma_memory"   # chroma backend only
+    pgvector_url: str = ""                              # blank → derive from db_url
 
 
 settings = Settings()

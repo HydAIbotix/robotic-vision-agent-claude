@@ -1,0 +1,23 @@
+# Keep the build context small and free of local/generated state.
+__pycache__/
+*.pyc
+.git/
+.venv/
+venv/
+node_modules/
+# Generated / per-environment data (recreated in the container / object store)
+management.db
+app_map.json
+app_map.json.bak
+screenshots/
+results/
+test_plans/
+explorer_logs/
+camera_captures/
+coordinate_exports/
+reference_screens/
+docs/chroma_code_db/
+*.png
+.env
+.env.*
+!.env.example

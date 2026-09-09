@@ -1,0 +1,122 @@
+# Cloud-agnostic local/prod stack (branch: cloud-agnostic-agent).
+#
+# Brings up the WHOLE agnostic topology on any Docker host — the exact managed-AWS equivalents,
+# self-hosted and portable:
+#   postgres  ↔ DynamoDB / RDS      (relational metadata)
+#   minio     ↔ S3                  (blob / object store, S3-compatible API)
+#   redis     ↔ API-GW WS + Streams (realtime event bus, cross-replica fan-out)
+#   app       ↔ AgentCore Runtime + API-GW + Lambda (the FastAPI backend + agents, in-process)
+#
+# Run:  docker compose up --build
+# The identical image + env also deploys to Kubernetes (see deploy/k8s/). Claude is unchanged —
+# set ANTHROPIC_API_KEY in a .env file next to this compose file (VISION_BACKEND=anthropic).
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: kioskqa
+      POSTGRES_PASSWORD: kioskqa
+      POSTGRES_DB: kioskqa
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kioskqa"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports: ["9000:9000", "9001:9001"]   # 9000 = S3 API, 9001 = web console
+    volumes: ["miniodata:/data"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: create the bucket the app expects, then exit.
+  createbuckets:
+    image: minio/mc:latest
+    depends_on:
+      minio: { condition: service_healthy }
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/kioskqa &&
+      echo 'bucket ready';
+      "
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      postgres: { condition: service_healthy }
+      minio:    { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    ports: ["8001:8001"]
+    environment:
+      # --- Claude (unchanged; API key from .env) ---
+      VISION_BACKEND: anthropic
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # --- Persistence → Postgres ---
+      PERSISTENCE_BACKEND: postgres
+      DB_URL: postgresql+psycopg://kioskqa:kioskqa@postgres:5432/kioskqa
+      # --- Object store → MinIO (S3-compatible) ---
+      STORAGE_BACKEND: minio
+      S3_BUCKET: kioskqa
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_USE_PATH_STYLE: "true"
+      # --- Event bus → Redis (cross-replica realtime) ---
+      EVENT_BUS_BACKEND: redis
+      REDIS_URL: redis://redis:6379/0
+      # --- Task queue → Redis (API enqueues; the `worker` service below consumes) ---
+      TASK_QUEUE_BACKEND: redis
+      # --- Tenancy / deployment ---
+      MULTI_TENANT_ENABLED: "false"      # flip to true for pooled multi-customer SaaS
+      DEPLOYMENT_MODE: docker
+      SERVICE_ROLE: api
+
+  # Worker tier — same image, SERVICE_ROLE=worker runs `python -m worker` (the run-job consumer).
+  # Scale with `docker compose up --scale worker=N`. Publishes live events to Redis, which the API
+  # delivers to WebSocket clients. Remove this service + set TASK_QUEUE_BACKEND=inline on `app` to
+  # run everything in one process instead.
+  worker:
+    build: .
+    depends_on:
+      postgres: { condition: service_healthy }
+      minio:    { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    environment:
+      SERVICE_ROLE: worker
+      VISION_BACKEND: anthropic
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      PERSISTENCE_BACKEND: postgres
+      DB_URL: postgresql+psycopg://kioskqa:kioskqa@postgres:5432/kioskqa
+      STORAGE_BACKEND: minio
+      S3_BUCKET: kioskqa
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_USE_PATH_STYLE: "true"
+      EVENT_BUS_BACKEND: redis
+      REDIS_URL: redis://redis:6379/0
+      TASK_QUEUE_BACKEND: redis
+
+volumes:
+  pgdata:
+  miniodata:

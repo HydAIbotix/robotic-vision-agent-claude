@@ -1,0 +1,12 @@
+# Ties the app manifests together:  kubectl apply -k deploy/k8s/
+# (secret.example.yaml is intentionally excluded — copy it to secret.yaml, fill real values,
+#  keep it out of git, and apply it separately.)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: kioskqa
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - api-deployment.yaml
+  - worker-deployment.yaml
+  - ingress.yaml
