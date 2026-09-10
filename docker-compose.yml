@@ -71,6 +71,8 @@ services:
       # --- Claude (unchanged; API key from .env) ---
       VISION_BACKEND: anthropic
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # --- Robot backend → Playwright (live Chromium for exploration + test runs) ---
+      ROBOT_BACKEND: playwright
       # --- Persistence → Postgres ---
       PERSISTENCE_BACKEND: postgres
       DB_URL: postgresql+psycopg://kioskqa:kioskqa@postgres:5432/kioskqa
@@ -105,6 +107,7 @@ services:
       SERVICE_ROLE: worker
       VISION_BACKEND: anthropic
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ROBOT_BACKEND: playwright   # worker executes queued test runs → needs live Chromium too
       PERSISTENCE_BACKEND: postgres
       DB_URL: postgresql+psycopg://kioskqa:kioskqa@postgres:5432/kioskqa
       STORAGE_BACKEND: minio
