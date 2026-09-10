@@ -20,6 +20,7 @@ dependencies = [
     "openpyxl>=3.1",
     "fastapi>=0.110",
     "uvicorn>=0.29",
+    "python-multipart>=0.0.9",  # FastAPI Form/File parsing (the /api/test-cases/upload route)
     "sqlalchemy>=2.0",
     "requests>=2.31",
 ]
