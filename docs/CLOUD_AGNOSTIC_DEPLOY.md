@@ -181,3 +181,102 @@ Single-tenant SQLite dev keeps its inline global unique — no action needed.
 
 - **Still staged** (config-gated): a queue-driven `SERVICE_ROLE=worker` consumer, Temporal, OTel —
   see the "Next" list in `CLOUD_AGNOSTIC_DECISION.md`.
+
+## 6. Provision & deploy on GCP (worked runbook)
+
+The exact sequence used to stand up the backend **and** the Kiosk POS on a fresh Google Compute
+Engine VM (2026-09-10). Same steps apply to Azure/EC2 — only the VM SKU name and firewall CLI differ.
+
+### 6.1 VM sizing (Azure / GCP equivalents)
+| Scenario | vCPU / RAM | Azure | GCP |
+|---|---|---|---|
+| **Demo/pilot — all-in-one** (app + Postgres + MinIO + Redis on one VM) | 4 / 16 | `Standard_D4s_v5` | `e2-standard-4` |
+| **Lean single-tenant** (datastores managed off-box) | 2 / 8 | `Standard_D2s_v5` | `e2-standard-2` |
+| **K8s scale-out** | 2/8 **per node**, 2+ nodes | `Standard_D2s_v5` pool | `e2-standard-2` pool |
+
+**Claude needs no GPU** (remote API). RAM is the binding constraint (Chromium ~1 GB + torch embed
+model ~2 GB + datastores). A GPU VM is only needed for the *optional* local-LLM Auto-Repair backup.
+Keep VM + Cloud SQL/Memorystore/bucket in the **same region** (`us-central1` is the default pick).
+
+### 6.2 Create the VM (GCP console wizard choices)
+`e2-standard-4` · region `us-central1`, zone `-a` · **Provisioning: Standard** · time limit **OFF** ·
+graceful shutdown **ON** · termination action **Stop** · Boot disk: **Ubuntu 22.04 LTS, x86/64**,
+**Balanced PD**, **50 GB** (80 if co-hosting Postgres) · Firewall: **Allow HTTP + HTTPS** · default
+service account · Ops Agent optional. (Arch = **x86/64** because `e2` is an x86 machine; an Arm image
+would only go on a `t2a`/`c4a`.)
+
+### 6.3 Install Docker + git (Ubuntu 22.04)
+```bash
+curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh get-docker.sh
+sudo apt-get install -y git
+sudo usermod -aG docker $USER && newgrp docker
+git config --global credential.helper store   # cache the GitHub PAT after first use
+```
+Both repos are private → clone with a **read-only fine-grained PAT** (paste when prompted for password).
+
+### 6.4 Deploy the POS (app under test) on :80 — the EXPANDED build
+```bash
+EXTERNAL_IP=$(curl -s ifconfig.me)
+git clone -b expanded-cloud-agnostic https://github.com/srik-g/robotics-kiosk-pos.git
+cd robotics-kiosk-pos
+[ -f card-service/cards.json ] || echo '{}' > card-service/cards.json   # bind-mount seed
+PUBLIC_BASE_URL=http://$EXTERNAL_IP docker compose up -d --build         # nginx :80 + card-service
+cd ~
+```
+`expanded-cloud-agnostic` = `expanded-version` features + this packaging. `PUBLIC_BASE_URL` is baked
+into the SPA at build time — change the IP ⇒ `docker compose build pos` again.
+
+### 6.5 Deploy the QA backend on :8001
+```bash
+git clone -b cloud-agnostic-agent https://github.com/HydAIbotix/robotic-vision-agent-claude.git
+cd robotic-vision-agent-claude
+printf 'ANTHROPIC_API_KEY=%s\n' '<your-real-key>' > .env    # gitignored; compose reads ${ANTHROPIC_API_KEY}
+docker compose up -d --build                                 # ~4 min first build (Chromium + torch)
+cd ~
+```
+Compose wires Postgres/MinIO/Redis/worker + sets `ROBOT_BACKEND=playwright` and
+`PLAYWRIGHT_HEADLESS=true`. The only hand-created file is `.env`.
+
+### 6.6 Verify
+```bash
+docker compose -f ~/robotic-vision-agent-claude/docker-compose.yml ps
+curl -s http://localhost:8001/api/health        # platform: anthropic/postgres/minio/redis
+curl -sI http://localhost | head -1             # POS → HTTP/1.1 200 OK
+# Chromium launches in-container (headless):
+docker compose exec app python -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(); print('Chromium OK:', b.version); b.close(); p.stop()"
+docker compose exec app python -c "from vision_agent.config import settings; print('headless =', settings.playwright_headless)"
+```
+
+### 6.7 (Optional) expose the API, locked to your IP — run in Cloud Shell
+```bash
+gcloud compute firewall-rules create allow-kioskqa-api \
+  --allow=tcp:8001 --target-tags=http-server --source-ranges=$(curl -s ifconfig.me)/32
+```
+Never open 8001 to `0.0.0.0/0`. Datastore ports (5432/6379/9000/9001) stay VM-internal by default — correct.
+
+### 6.8 Run an exploration against the POS
+```bash
+VM_IP=$(hostname -I | awk '{print $1}')                       # internal IP, reachable from the app container
+docker compose exec app curl -sI "http://$VM_IP" | head -1    # sanity: container → POS = 200
+curl -s -X POST http://localhost:8001/api/explore -H 'Content-Type: application/json' \
+  -d "{\"kiosk_id\":\"K-RPS\",\"kiosk_url\":\"http://$VM_IP/?screenLayout=standard&flowMode=full\"}"
+curl -s http://localhost:8001/api/explore/<explore_id>        # poll: running → done
+curl -s http://localhost:8001/api/app-map | head -c 800
+```
+`POST /api/explore` upserts the kiosk URL, pre-checks reachability, then spawns the explorer (paid
+Claude calls). The **expanded** POS may use different `screenLayout`/`flowMode` — adjust for the
+intended RPS/VPS view. `kiosk_id` is the join key for later test cases + runs.
+
+### 6.9 Deploy fixes baked into the branches (why a fresh clone Just Works now)
+1. `python-multipart` in `pyproject.toml` (`/api/test-cases/upload` crashed the API import otherwise).
+2. `ROBOT_BACKEND=playwright` on app + worker in compose.
+3. `PLAYWRIGHT_HEADLESS=true` in compose (+ the `playwright_headless` config flag) — headless VM has
+   no X server.
+4. POS `card-service/Dockerfile` seeds `cards.json` (it's gitignored, absent from a clone).
+
+### 6.10 Resume checklist (pick up here)
+- Backend: `cd ~/robotic-vision-agent-claude && git pull origin cloud-agnostic-agent && docker compose up -d --build`.
+- POS: `cd ~/robotics-kiosk-pos && git pull && docker compose up -d --build` (on `expanded-cloud-agnostic`).
+- Re-run §6.8 exploration; confirm it completes **headless** (the earlier failure was only the X-server bug).
+- Then test execution: `POST /api/test-cases/upload` (Excel) → `POST /api/runs`.
+- Operator UI (`kiosk-test-studio`) not deployed — use the API directly, or point a Studio at `http://<EXTERNAL_IP>:8001`.

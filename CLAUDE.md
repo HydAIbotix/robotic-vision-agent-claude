@@ -1133,6 +1133,57 @@ pre-existing env-only fails). New `ports/` modules + a `worker/` package + an `o
   AWS→agnostic mapping table) and a run sequence diagram (14-step start-to-finish use case), generated
   with PIL + python-docx. 120 tests still pass; single-node/single-tenant behaviour unchanged.
 
+### Recent progress (2026-09-10) — first live GCP VM deployment (cloud-agnostic) + 4 deploy fixes
+
+The `cloud-agnostic-agent` backend + the Kiosk POS were deployed and verified end-to-end on a **fresh
+Google Compute Engine VM** (the first real run-anywhere deploy). Full runbook in
+`docs/CLOUD_AGNOSTIC_DEPLOY.md` §6 "Provision & deploy on GCP (worked runbook)". **All fixes are
+committed + pushed**; the VM clones from GitHub.
+
+- **VM:** `e2-standard-4` (4 vCPU / 16 GB), `us-central1-a`, **Ubuntu 22.04 LTS x86/64**, `pd-balanced`
+  50 GB, Standard provisioning, no time limit, graceful-shutdown ON, termination action = **Stop**.
+  Docker + compose via `get.docker.com`. This is the recommended all-in-one size (app + Postgres +
+  MinIO + Redis on one box). For K8s use it as a **node-pool size** (2+ nodes) with managed datastores,
+  not one node — see the deploy doc's sizing table.
+- **Backend (`cloud-agnostic-agent`, HEAD `949f425`):** whole compose stack up
+  (postgres+minio+redis+app+worker); `GET /api/health` 200 with the platform block resolving
+  `anthropic / postgres / minio / redis(event bus + task queue) / inprocess / docker / api`. Playwright
+  Chromium verified in-container (`151.0.7922.34`). Runs from `~/robotic-vision-agent-claude`; the only
+  hand-created file is `.env` (holds `ANTHROPIC_API_KEY`, gitignored — NOT in the clone).
+- **Four deploy-blocker fixes (each committed + pushed, defaults unchanged so no MVP regression):**
+  1. **`python-multipart`** added to core `pyproject.toml` deps (`4e78efd`) — the clean image lacked it,
+     so FastAPI crashed at import validating the `/api/test-cases/upload` Form route. (The historical
+     "imported-but-undeclared" gap — now closed for the last offender.)
+  2. **`ROBOT_BACKEND=playwright`** set in compose for **app + worker** (`e32cb9f`) — was defaulting to
+     `demo`; exploration + queued test runs both need live Chromium.
+  3. **`PLAYWRIGHT_HEADLESS` config flag** (`vision_agent/config.py`, default **False** = desktop demo
+     window) + `chromium.launch(headless=settings.playwright_headless)` + compose sets it `true`
+     (`949f425`) — a headless VM has no X server, so the hardcoded `headless=False` died with "Missing
+     X server or $DISPLAY". Tap/screenshot math is display-independent → headless is byte-identical.
+  4. **POS `card-service/Dockerfile`** seeds `RUN echo '{}' > /app/cards.json` instead of
+     `COPY cards.json` (`f1973e2` on `pos-cloud-agnostic`) — `cards.json` is gitignored runtime data,
+     absent from a fresh clone, so the COPY failed the build. `server.js` tolerates a missing file.
+- **POS on the VM = the EXPANDED feature set.** New branch **`expanded-cloud-agnostic`** (on
+  `srik-g/robotics-kiosk-pos`) = `expanded-version` (more features) **merged with** the
+  `pos-cloud-agnostic` packaging (clean merge — packaging only adds files). `expanded-version` and
+  `pos-cloud-agnostic` are both left intact. The VM's POS clone (`~/robotics-kiosk-pos`) tracks
+  `expanded-cloud-agnostic`; built single-origin (nginx :80 serves SPA + proxies `/api/`→card-service),
+  `VITE_CARD_SERVICE_URL` baked from `PUBLIC_BASE_URL=http://<VM_EXTERNAL_IP>`.
+- **Interconnect:** the backend tests the POS by URL. Both on one VM → the kiosk URL is the VM's
+  **internal** IP on :80 (`hostname -I`), reachable from inside the app container; `POST /api/explore`
+  upserts it. GCP firewall opens only 80/443 by default (datastore ports 5432/6379/9000/9001 stay
+  VM-internal, correct); expose 8001 only via a rule **restricted to your IP** if a remote Studio needs it.
+- **⚠️ RESUME POINT (paused 2026-09-10, continuing in a few hours):** last action was pushing the
+  headless fix (`949f425`). **On the VM, next:** (1) backend `git pull && docker compose up -d --build`
+  (fast — source layer only), confirm `settings.playwright_headless == True`; (2) POS already switching
+  to `expanded-cloud-agnostic` (`git pull && docker compose up -d --build` may still be running);
+  (3) **re-run `POST /api/explore`** against `http://<VM_INTERNAL_IP>/?screenLayout=standard&flowMode=full`
+  — it had failed ONLY on the headless bug, now fixed. The expanded POS may use different
+  screens/`screenLayout`/`flowMode`, so adjust the kiosk_url to the intended RPS/VPS view if the map
+  looks wrong. **After a green exploration:** test execution — `POST /api/test-cases/upload` (Excel),
+  then `POST /api/runs`. Operator UI (`kiosk-test-studio`) is NOT deployed (no cloud-agnostic branch
+  yet) — interact via API/curl, or point a Studio at `http://<VM_EXTERNAL_IP>:8001`.
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login
