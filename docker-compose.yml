@@ -73,6 +73,7 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # --- Robot backend → Playwright (live Chromium for exploration + test runs) ---
       ROBOT_BACKEND: playwright
+      PLAYWRIGHT_HEADLESS: "true"        # no X server in the container → headless Chromium
       # --- Persistence → Postgres ---
       PERSISTENCE_BACKEND: postgres
       DB_URL: postgresql+psycopg://kioskqa:kioskqa@postgres:5432/kioskqa
@@ -108,6 +109,7 @@ services:
       VISION_BACKEND: anthropic
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ROBOT_BACKEND: playwright   # worker executes queued test runs → needs live Chromium too
+      PLAYWRIGHT_HEADLESS: "true"        # no X server in the container → headless Chromium
       PERSISTENCE_BACKEND: postgres
       DB_URL: postgresql+psycopg://kioskqa:kioskqa@postgres:5432/kioskqa
       STORAGE_BACKEND: minio

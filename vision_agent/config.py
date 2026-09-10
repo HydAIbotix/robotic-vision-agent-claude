@@ -182,6 +182,12 @@ class Settings(BaseSettings):
     # pinned to CSS resolution (scale="css"), so tap accuracy, template-match, OCR and Tier-3 vision are
     # byte-for-byte unaffected. 1.0 = legacy behaviour (no scaling). Set PLAYWRIGHT_UI_SCALE in .env.
     playwright_ui_scale: float = 1.0
+    # Headless Chromium for Playwright exploration + test runs. Default False keeps the visible
+    # demo window (HUD overlay, fullscreen) on a desktop with a display. Set PLAYWRIGHT_HEADLESS=true
+    # for headless servers / containers with no X server (e.g. a cloud VM) — otherwise Chromium fails
+    # to launch with "Missing X server or $DISPLAY". Tap/screenshot math is display-independent, so
+    # headless is byte-for-byte equivalent for exploration and execution.
+    playwright_headless: bool = False
     # robot_camera_* = a PRE-CALIBRATION SEED for the rectified /capture resolution, NOT the live
     #   value. Default 1280×720 = the Intel RealSense D405's native resolution (16:9). It is only used
     #   as the viewport→camera scale numerator BEFORE the first /capture; every /capture response then

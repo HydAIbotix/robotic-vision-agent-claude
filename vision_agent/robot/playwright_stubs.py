@@ -142,7 +142,7 @@ def _ensure_page():
     # CSS resolution (scale="css" in capture_screen), so tap/screenshot math is unchanged. 1.0 = legacy.
     _ui_scale = float(getattr(settings, "playwright_ui_scale", 1.0) or 1.0)
     _browser = _pw.chromium.launch(
-        headless=False,
+        headless=settings.playwright_headless,   # True on headless servers/containers (no X server)
         args=[
             "--disable-features=VirtualKeyboard",  # suppress Windows touch keyboard
             "--disable-touch-adjustment",
