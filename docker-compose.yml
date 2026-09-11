@@ -115,9 +115,22 @@ services:
       MULTI_TENANT_ENABLED: "false"      # flip to true for pooled multi-customer SaaS
       DEPLOYMENT_MODE: docker
       SERVICE_ROLE: api
+      # --- Auto-Repair (RAG + Claude self-healing) against the MOUNTED POS repo (see volumes) ---
+      REPAIR_CODEBASE_DIR: /repos/pos              # POS source the RAG indexes + the agent edits/builds
+      REPAIR_PR_BASE: expanded-cloud-agnostic      # branch a prepared fix diffs against (the deployed POS branch)
+      REPAIR_PERSIST_DIR: /app/data/chroma_code_db # Chroma RAG index — under host-mounted ./data (persists + visible)
+      REPAIR_AUTO_PR: "false"                      # prepare the fix LOCALLY only; pushing a PR needs git creds
+      # git identity so the agent's commit works inside the container (no repo/global config needed)
+      GIT_AUTHOR_NAME: "Auto-Repair"
+      GIT_AUTHOR_EMAIL: "auto-repair@kioskqa.local"
+      GIT_COMMITTER_NAME: "Auto-Repair"
+      GIT_COMMITTER_EMAIL: "auto-repair@kioskqa.local"
     volumes:
       - ./data:/app/data                    # app_map.json + screenshots/ + results/  → visible on the host
       - ./data/test_plans:/app/test_plans   # cached Claude plans (path not env-configurable)
+      # POS source for Auto-Repair: RAG index + patch-apply + tsc/vite build + git branch/commit.
+      # rw (the agent edits + commits). Default is the VM sibling layout; override with POS_REPO_DIR.
+      - ${POS_REPO_DIR:-../robotics-kiosk-pos}:/repos/pos
 
   # NOTE: on a single VM the API runs suites IN-PROCESS (TASK_QUEUE_BACKEND=inline above), so no
   # separate worker service is needed — this is the robust, local-identical setup. For horizontal

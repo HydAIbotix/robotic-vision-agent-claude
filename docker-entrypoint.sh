@@ -8,6 +8,12 @@
 # (headless, no VNC) path is completely unchanged.
 set -e
 
+# Auto-Repair edits/commits the MOUNTED POS repo (owned by the host user, while the container runs as
+# root) → git refuses with "detected dubious ownership" unless the path is marked safe. No-op if unset.
+if [ -n "${REPAIR_CODEBASE_DIR:-}" ]; then
+  git config --global --add safe.directory "$REPAIR_CODEBASE_DIR" 2>/dev/null || true
+fi
+
 if [ "${ENABLE_VNC:-false}" = "true" ]; then
   DISPLAY_NUM="${VNC_DISPLAY:-:99}"
   export DISPLAY="$DISPLAY_NUM"

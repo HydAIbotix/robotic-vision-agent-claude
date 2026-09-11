@@ -1217,6 +1217,24 @@ committed + pushed**; the VM clones from GitHub.
   (genuine LLM test); the fix reverts the guard. Test flow: checkout is already on this branch → rebuild
   the RAG index → run TC-VPS-009-style check after an RPS purchase → auto-repair diagnoses the guard.
 
+#### Auto-Repair on the VM — enabling the RAG + build + git path
+
+Auto-Repair indexes the POS code, edits it, type-checks + `vite build`s it, and prepares a PR — so the
+BACKEND container needs the POS **source + node + git** (it had none). Wired into the VM image/compose:
+- **POS repo mounted rw** at `/repos/pos` (`${POS_REPO_DIR:-../robotics-kiosk-pos}`) → `REPAIR_CODEBASE_DIR=/repos/pos`.
+- **node 20 + git in the backend image** (node copied from `node:20-slim`; git via apt) for the
+  `tsc -b`/`npm run build` verification and the repo-state guard/commit.
+- `REPAIR_PERSIST_DIR=/app/data/chroma_code_db` (index persists under host-mounted `./data`),
+  `REPAIR_PR_BASE=expanded-cloud-agnostic`, `REPAIR_AUTO_PR=false` (prepare LOCALLY only — pushing a PR
+  needs GitHub creds in the container), `GIT_AUTHOR_*`/`GIT_COMMITTER_*` identity, and the entrypoint marks
+  `/repos/pos` a git `safe.directory` (the mounted repo is owned by the host user).
+- **One-time on the VM** — populate node_modules in the mounted repo (the build step needs it), then
+  rebuild the index against the on-disk (buggy) code:
+  - `docker run --rm -v ~/robotics-kiosk-pos:/app -w /app node:20-alpine npm ci`
+  - Studio "Rebuild index" (or `POST /api/repair/index`).
+- ⚠️ Open-PR push is intentionally OFF; the core demo (retrieve → diagnose → apply → tsc/vite build →
+  prepare local branch+diff) needs no push. Enabling push needs a PAT mounted for the container's git.
+
 #### Data-store access (cloud-agnostic VM deployment)
 
 Two stores + a durable object mirror; browse them during a demo:

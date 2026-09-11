@@ -9,9 +9,20 @@ FROM python:3.11-slim AS base
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 libglib2.0-0 curl \
         xvfb x11vnc novnc websockify \
+        git \
     && rm -rf /var/lib/apt/lists/*
 # xvfb/x11vnc/novnc/websockify power the OPTIONAL live-browser viewer (ENABLE_VNC=true): headed
 # Chromium renders onto a virtual display that is streamed to a browser at :6080. Inert by default.
+# git is used by Auto-Repair (repo-state guard, branch/commit, PR-prep) against the mounted POS repo.
+
+# Node.js 20 + npm for the Auto-Repair verification step (tsc type-check + `npm run build`) run
+# against the mounted POS repo. Copied from the official node image (same Debian bookworm base as
+# python:3.11-slim), so we get node 20 without a NodeSource setup. Build fails fast if node is broken.
+COPY --from=node:20-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=node:20-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && node --version && npm --version
 
 WORKDIR /app
 
