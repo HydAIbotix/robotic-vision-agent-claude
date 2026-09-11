@@ -1198,6 +1198,24 @@ committed + pushed**; the VM clones from GitHub.
   hardcoded `"app_map.json"`; relocating `APP_MAP_PATH=/app/data/app_map.json` left the Studio App
   Map empty.) Rule reinforced: when relocating a path, verify BOTH the writer and the reader resolve
   to it. `[[no-regression-rule]]`
+- **Verify false-positive fixed (TC-RPS-001):** the error-banner guard `get_page_error_text`
+  (playwright_stubs) selects `[class*="danger" i]` and returned the **"Sign Out"** button on the
+  authenticated products screen, failing a CORRECT `products` verify ("misclassified a Sign Out
+  control as an error banner"). An error banner is a MESSAGE, not a control — the scan now SKIPS any
+  element inside `button/a/[role=button|link|menuitem|tab]/input/select/label`. Genuine error-message
+  divs ("No card found" / "not issued" / declined) still match → no regression to VPS card-error detection.
+- **Auto-Repair deps declared (`[repair]` extra) — fixes "No module named 'langchain_community'":**
+  `repair_agent/parse_code_and_store.py` imports `langchain_community` (HuggingFaceEmbeddings + Chroma)
+  + tree-sitter; installed in dev but never declared, so a clean image failed. Added a `[repair]` extra
+  (langchain-community, chromadb, sentence-transformers, tree-sitter[-typescript]); the Docker image now
+  builds `.[cloud,playwright,repair]` (sentence-transformers pulls torch → larger image). ⚠️ After
+  checking out a demo bug branch, REBUILD the RAG index before running a repair (existing rule).
+- **Demo bug for Auto-Repair on the cloud-agnostic POS:** re-planted the cross-kiosk transaction bug on
+  **`expanded-cloud-agnostic`** (`srik-g/robotics-kiosk-pos`, `createApprovedStatusFromCardNumber` outer
+  guard → `if (balanceAfter !== undefined && !issuedSmartCard)`) so an RPS purchase on an ISSUED smart
+  card skips `recordCardTransaction` — identical to `demo/rps-vps-txn-bug`. No `_demo_fallback_patch`
+  (genuine LLM test); the fix reverts the guard. Test flow: checkout is already on this branch → rebuild
+  the RAG index → run TC-VPS-009-style check after an RPS purchase → auto-repair diagnoses the guard.
 
 #### Data-store access (cloud-agnostic VM deployment)
 

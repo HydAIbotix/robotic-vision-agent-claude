@@ -686,6 +686,10 @@ def get_page_error_text() -> str:
                         '[aria-invalid="true"],.error,.error-message,[class*="error" i],[class*="danger" i]';
             const seen = new Set(); const out = [];
             for (const el of document.querySelectorAll(sel)) {
+                // Skip interactive CONTROLS: an error banner is a MESSAGE surface, not a button/link.
+                // (e.g. a "Sign Out" / delete button styled with a `danger` class must NOT be read as
+                // an error banner — this false-positive failed a correct 'products' screen verify.)
+                if (el.closest('button,a,[role="button"],[role="link"],[role="menuitem"],[role="tab"],input,select,label')) continue;
                 const r = el.getBoundingClientRect();
                 if (r.width === 0 || r.height === 0) continue;           // not visible
                 const st = window.getComputedStyle(el);

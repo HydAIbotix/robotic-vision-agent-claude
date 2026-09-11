@@ -19,7 +19,7 @@ WORKDIR /app
 # [playwright] adds the browser driver used by exploration + playwright test runs.
 COPY pyproject.toml README.md ./
 COPY vision_agent/ ./vision_agent/
-RUN pip install --no-cache-dir -e ".[cloud,playwright]" \
+RUN pip install --no-cache-dir -e ".[cloud,playwright,repair]" \
     && python -m playwright install --with-deps chromium
 
 # Now the rest of the source (changes here don't bust the dep layer).

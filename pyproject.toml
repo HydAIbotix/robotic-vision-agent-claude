@@ -59,6 +59,17 @@ memory = [
 playwright = [
     "playwright>=1.40",
 ]
+# Auto-Repair agent's RAG retrieval (Chroma + HuggingFace over the codebase/docs). These back the
+# imports in repair_agent/parse_code_and_store.py (langchain_community HuggingFaceEmbeddings + Chroma,
+# tree-sitter chunking). Historically installed in dev but never declared, so a clean image failed
+# auto-repair with "No module named 'langchain_community'". sentence-transformers pulls torch (large).
+repair = [
+    "langchain-community>=0.3",   # HuggingFaceEmbeddings + Chroma wrappers used by the RAG index
+    "chromadb>=0.5",              # the vector store backing Chroma(persist_directory=...)
+    "sentence-transformers>=2.2", # all-MiniLM-L6-v2 embeddings (pulls torch)
+    "tree-sitter>=0.22",          # code-aware chunking (falls back to text chunking if unavailable)
+    "tree-sitter-typescript>=0.22",
+]
 dev = [
     "pytest>=8.0",
     "rich>=13.0",
