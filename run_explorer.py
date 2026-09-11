@@ -59,7 +59,14 @@ sys.stderr = _Tee(_real_stderr, _log_file)
 
 load_dotenv()
 
-OUTPUT_PATH = "app_map.json"
+# Destination for the app_map. Honor the APP_MAP_PATH env the API passes to this subprocess
+# (api.main._run_explorer sets it to the tenant-scoped path — e.g. /app/data/app_map.json), so the
+# explorer WRITES to exactly the path the API READS (GET /api/app-map). Falls back to the MVP
+# default, and an explicit --output CLI arg still overrides. (Previously this ignored APP_MAP_PATH
+# and hardcoded "app_map.json"; it only worked while settings.app_map_path also defaulted to that —
+# relocating the path left the explorer writing where the API wasn't reading.)
+import os as _os_out
+OUTPUT_PATH = (_os_out.environ.get("APP_MAP_PATH") or "").strip() or "app_map.json"
 for arg in sys.argv[1:]:
     if arg.startswith("--output"):
         OUTPUT_PATH = arg.split("=", 1)[-1] if "=" in arg else sys.argv[sys.argv.index(arg) + 1]
