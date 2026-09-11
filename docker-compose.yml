@@ -97,11 +97,15 @@ services:
       APP_MAP_PATH: /app/data/app_map.json
       SCREENSHOTS_DIR: /app/data/screenshots
       RESULTS_DIR: /app/data/results
-      # --- Event bus → Redis (cross-replica realtime) ---
-      EVENT_BUS_BACKEND: redis
+      # --- Event bus → in-process (single VM). Live WebSocket updates are delivered in-process,
+      # exactly like the local MVP. Switch to `redis` ONLY for multi-replica scale-out (cross-replica
+      # fan-out); on one VM `memory` is simpler and has no extra moving part. ---
+      EVENT_BUS_BACKEND: memory
       REDIS_URL: redis://redis:6379/0
-      # --- Task queue → Redis (API enqueues; the `worker` service below consumes) ---
-      TASK_QUEUE_BACKEND: redis
+      # --- Task queue → inline: the API runs each suite in a daemon thread (byte-identical to local).
+      # The redis API/worker split is a horizontal-scale feature; on one VM it only adds a failure
+      # mode (a run stuck at "pending" = the separate worker wasn't consuming the queue). ---
+      TASK_QUEUE_BACKEND: inline
       # --- Tenancy / deployment ---
       MULTI_TENANT_ENABLED: "false"      # flip to true for pooled multi-customer SaaS
       DEPLOYMENT_MODE: docker
@@ -110,40 +114,11 @@ services:
       - ./data:/app/data                    # app_map.json + screenshots/ + results/  → visible on the host
       - ./data/test_plans:/app/test_plans   # cached Claude plans (path not env-configurable)
 
-  # Worker tier — same image, SERVICE_ROLE=worker runs `python -m worker` (the run-job consumer).
-  # Scale with `docker compose up --scale worker=N`. Publishes live events to Redis, which the API
-  # delivers to WebSocket clients. Remove this service + set TASK_QUEUE_BACKEND=inline on `app` to
-  # run everything in one process instead.
-  worker:
-    build: .
-    depends_on:
-      postgres: { condition: service_healthy }
-      minio:    { condition: service_healthy }
-      redis:    { condition: service_healthy }
-    environment:
-      SERVICE_ROLE: worker
-      VISION_BACKEND: anthropic
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ROBOT_BACKEND: playwright   # worker executes queued test runs → needs live Chromium too
-      PLAYWRIGHT_HEADLESS: "true"        # no X server in the container → headless Chromium
-      PERSISTENCE_BACKEND: postgres
-      DB_URL: postgresql+psycopg://kioskqa:kioskqa@postgres:5432/kioskqa
-      STORAGE_BACKEND: local   # see the app service's note — MinIO breaks the screenshot round-trip
-      S3_BUCKET: kioskqa
-      S3_ENDPOINT_URL: http://minio:9000
-      S3_ACCESS_KEY_ID: minioadmin
-      S3_SECRET_ACCESS_KEY: minioadmin
-      S3_USE_PATH_STYLE: "true"
-      ARCHIVE_TO_OBJECT_STORE: "true"    # mirror app_map + screenshots + plans + results → MinIO (durable S3 store)
-      APP_MAP_PATH: /app/data/app_map.json      # share the host-mounted data dir with the app
-      SCREENSHOTS_DIR: /app/data/screenshots
-      RESULTS_DIR: /app/data/results
-      EVENT_BUS_BACKEND: redis
-      REDIS_URL: redis://redis:6379/0
-      TASK_QUEUE_BACKEND: redis
-    volumes:
-      - ./data:/app/data
-      - ./data/test_plans:/app/test_plans
+  # NOTE: on a single VM the API runs suites IN-PROCESS (TASK_QUEUE_BACKEND=inline above), so no
+  # separate worker service is needed — this is the robust, local-identical setup. For horizontal
+  # scale-out (multiple API replicas + a dedicated worker tier) on Kubernetes, set the app's
+  # EVENT_BUS_BACKEND=redis and TASK_QUEUE_BACKEND=redis and add a `worker` service (same image,
+  # SERVICE_ROLE=worker → `python -m worker`, same env). See deploy/k8s/ for that topology.
 
   # Adminer — a tiny web UI to BROWSE the Postgres database in a browser: every activity's rows
   # (kiosk_configs, test_cases, test_runs, test_results, defects, app_maps, device_configs,

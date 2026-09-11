@@ -1184,6 +1184,40 @@ committed + pushed**; the VM clones from GitHub.
   then `POST /api/runs`. Operator UI (`kiosk-test-studio`) is NOT deployed (no cloud-agnostic branch
   yet) — interact via API/curl, or point a Studio at `http://<VM_EXTERNAL_IP>:8001`.
 
+### Recent progress (2026-09-11) — single-VM run execution fix + data-store access
+
+- **Run execution on the VM now runs IN-PROCESS (`TASK_QUEUE_BACKEND=inline`) + in-process event
+  bus (`EVENT_BUS_BACKEND=memory`)** — byte-identical to the local MVP. The Redis API/worker split
+  (`task_queue=redis` + a `SERVICE_ROLE=worker` service) was the cause of a run stuck at **"pending"**
+  with an empty live feed and no results: on a single VM, if the separate worker isn't consuming the
+  queue the job never executes. The `worker` service was removed from `docker-compose.yml`; the
+  Redis queue/pub-sub path stays available for **multi-replica K8s scale-out** (`deploy/k8s/`), which
+  is the only place it's needed. No regression: inline+memory is exactly what every local run used.
+- **App_map path regression fixed** (`run_explorer.py`): the explorer now honors the `APP_MAP_PATH`
+  env the API passes it, so it writes the map to the same path `GET /api/app-map` reads. (It had
+  hardcoded `"app_map.json"`; relocating `APP_MAP_PATH=/app/data/app_map.json` left the Studio App
+  Map empty.) Rule reinforced: when relocating a path, verify BOTH the writer and the reader resolve
+  to it. `[[no-regression-rule]]`
+
+#### Data-store access (cloud-agnostic VM deployment)
+
+Two stores + a durable object mirror; browse them during a demo:
+
+- **PostgreSQL** (relational metadata — kiosks, test cases, runs, results, defects):
+  - In-container host `postgres:5432`; on the VM `localhost:5432`. **DB `kioskqa` · user `kioskqa` ·
+    password `kioskqa`** (set in `docker-compose.yml`; change for anything beyond a demo).
+  - Browser: **Adminer** at `http://<EXTERNAL_IP>:8081` → System **PostgreSQL**, Server `postgres`,
+    Username/Password/Database all `kioskqa`. CLI: `docker compose exec postgres psql -U kioskqa -d kioskqa`.
+- **MinIO** (the S3-equivalent object store — mirrored app_map, screenshots, plans, results):
+  - Console **`http://<EXTERNAL_IP>:9001`** · **user `minioadmin` · password `minioadmin`** · bucket
+    **`kioskqa`**. S3 API on `:9000` (`S3_ENDPOINT_URL=http://minio:9000`, path-style).
+  - Populated only when `ARCHIVE_TO_OBJECT_STORE=true` (default in the VM compose); keys mirror the
+    working layout (`app_map.json`, `screenshots/…`, `test_plans/…`, `results/<run>/…`).
+- **Local working files** (what the agents read/write; MinIO mirrors these): host
+  `~/robotic-vision-agent-claude/data/` (bind-mounted to `/app/data`).
+- Open `tcp:8081`/`tcp:9001` in the GCP firewall **restricted to your IP** — never `0.0.0.0/0`.
+  These are demo credentials; rotate them (compose env + a real secret store) for any shared/hosted use.
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login
