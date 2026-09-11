@@ -26,14 +26,18 @@ RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 
 WORKDIR /app
 
-# Install Python deps first for layer caching. The [cloud] extra adds psycopg + redis + boto3;
-# [playwright] adds the browser driver used by exploration + playwright test runs.
+# Install Python deps in a layer keyed ONLY on pyproject.toml, so editing app source
+# (vision_agent/*, api/*, run_explorer.py, …) does NOT re-run this expensive step (torch,
+# sentence-transformers, chromadb, Playwright's Chromium). The editable install needs the package
+# dir to exist, so we create a STUB vision_agent/__init__.py here; the REAL source arrives via
+# `COPY . .` below and the `-e` install (a .pth pointing at /app/vision_agent) then uses it. Result:
+# a source-only change rebuilds in seconds (just `COPY . .`), not minutes.
 COPY pyproject.toml README.md ./
-COPY vision_agent/ ./vision_agent/
+RUN mkdir -p vision_agent && touch vision_agent/__init__.py
 RUN pip install --no-cache-dir -e ".[cloud,playwright,repair]" \
     && python -m playwright install --with-deps chromium
 
-# Now the rest of the source (changes here don't bust the dep layer).
+# Now the real source. Editing anything here busts ONLY this layer (fast) — the dep layer stays cached.
 COPY . .
 
 # Non-hot-path defaults; override via the container's env / a mounted .env / a k8s ConfigMap.
