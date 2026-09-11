@@ -1273,6 +1273,24 @@ the `Dockerfile`; port `6080` published by the `app` service. Open `tcp:6080` in
 for the lightweight headless mode (no viewer). Tap/screenshot math is display-independent, so headed
 vs headless is behaviourally identical — no regression.
 
+### Recent progress (2026-09-12) — auto-repair PR verified end-to-end + two fixes
+
+- **Auto-repair full loop confirmed on the VM:** failed run → diagnose → apply → tsc/vite build →
+  push `repair/*` → **PR created via the GitHub API** (`_create_pr_via_api`, `REPAIR_AUTO_PR=true`,
+  `GITHUB_TOKEN` in `.env`) → the fix on the repair branch makes the test pass. See the Auto-Repair-on-VM
+  subsection above.
+- **Faster rebuilds (Dockerfile):** the dependency layer is now keyed only on `pyproject.toml` (deps
+  installed against a STUB `vision_agent/__init__.py`; real source arrives via `COPY . .`). Editing app
+  source no longer re-runs pip/Playwright/node — a source-only rebuild is CACHED at the pip layer.
+  (Also: config *values* are env-settable, so `docker compose up -d` without `--build` picks them up.)
+- **Studio: repair view auto-opens inline when the popup is blocked**
+  (`../kiosk-test-studio` `studio-cloud-agnostic`, `LiveMonitor.tsx`). `window.open` fired from the run
+  WebSocket handler is not a user gesture → popup blockers silently block it (returns `null`), which is
+  why the auto-launch "stopped working". Now, when blocked, the repair opens INLINE as an in-tab overlay
+  (`<AutoRepair standaloneRepairId>`) — so it launches automatically with no popup permission/click. If
+  popups are allowed, behaviour is unchanged (separate window). No regression: the banner + "Open repair
+  window" button remain (the button also falls back to inline). Rebuild the studio container to apply.
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login
