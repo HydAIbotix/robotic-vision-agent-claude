@@ -279,4 +279,29 @@ intended RPS/VPS view. `kiosk_id` is the join key for later test cases + runs.
 - POS: `cd ~/robotics-kiosk-pos && git pull && docker compose up -d --build` (on `expanded-cloud-agnostic`).
 - Re-run §6.8 exploration; confirm it completes **headless** (the earlier failure was only the X-server bug).
 - Then test execution: `POST /api/test-cases/upload` (Excel) → `POST /api/runs`.
-- Operator UI (`kiosk-test-studio`) not deployed — use the API directly, or point a Studio at `http://<EXTERNAL_IP>:8001`.
+- Operator UI (`kiosk-test-studio`): deploy the `studio-cloud-agnostic` branch (Docker + nginx) — open `http://<EXTERNAL_IP>:8080`.
+
+## 7. Where every activity's data is stored (for live demos)
+
+Two stores: **Postgres** (relational metadata) and the **local filesystem** (files), the filesystem
+bind-mounted to the host `./data` so it's visible + persistent. Nothing uses MinIO in this config.
+
+| Activity | What | Where | How to view |
+|---|---|---|---|
+| Explorer | knowledge graph | `app_map.json` | `GET /api/app-map` · host `~/robotic-vision-agent-claude/data/app_map.json` |
+| Explorer | screenshots | `screenshots/exploration_*/` | host `.../data/screenshots/` · Studio **App Map** page |
+| Planner | cached Claude plans | `test_plans/<id>_<hash>.json` | host `.../data/test_plans/` |
+| Execution | per-run results + logs + shots | `results/<run_id>/` | host `.../data/results/` · `GET /api/runs/{id}` |
+| All metadata | kiosks, test cases, runs, results, defects, devices, robot events | **Postgres** tables | **Adminer** at `http://<EXTERNAL_IP>:8081` · `docker compose exec postgres psql -U kioskqa -d kioskqa` |
+
+- **Files (host):** `ls -R ~/robotic-vision-agent-claude/data` — everything the agents write lands here
+  (bind-mounted from the containers), so it survives `docker compose down` and is directly viewable /
+  downloadable. (Bind-mounts are created root-owned by the Docker daemon; `sudo` to delete.)
+- **Database (browser):** open **Adminer** → System `PostgreSQL`, Server `postgres`, User/Pass/DB all
+  `kioskqa`. Browse or query any table live. Open `tcp:8081` in the firewall (restrict to your IP).
+- **Database (CLI):** `docker compose exec postgres psql -U kioskqa -d kioskqa -c '\dt'` then
+  `SELECT * FROM test_runs;` etc.
+- **app_map (browser):** `GET /api/app-map` returns the full JSON — through the Studio proxy at
+  `http://<EXTERNAL_IP>:8080/api/app-map`, or on the VM `curl localhost:8001/api/app-map`.
+- ⚠️ Relocating artifacts under `/app/data` changed the app_map path, so **re-run exploration** after
+  applying this (or copy the old map out first: `docker compose cp app:/app/app_map.json ./data/`).

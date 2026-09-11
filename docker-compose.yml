@@ -83,14 +83,19 @@ services:
       # never uploaded → NoSuchKey (exploration dies in explore_screen). local = MVP-identical and is
       # what makes exploration/tests work on the VM. The S3_* + minio service are kept (inert) for an
       # easy switch-back once the screenshot round-trip is made storage-consistent (see CLAUDE.md).
-      # NOTE: local storage is IN the container → app_map/screenshots/results are lost on `compose
-      # down`/recreate. Mount a volume at /app/<dirs> if you need them to persist.
       STORAGE_BACKEND: local
       S3_BUCKET: kioskqa
       S3_ENDPOINT_URL: http://minio:9000
       S3_ACCESS_KEY_ID: minioadmin
       S3_SECRET_ACCESS_KEY: minioadmin
       S3_USE_PATH_STYLE: "true"
+      # --- File artifacts → /app/data, bind-mounted to the host ./data (see `volumes`) so app_map,
+      # screenshots and results are VISIBLE on the VM host and PERSIST across container recreation.
+      # app_map + its screenshots stay co-located (screens_dir derives from app_map_path). The cached
+      # test-plans dir is not env-configurable, so it is mounted separately below.
+      APP_MAP_PATH: /app/data/app_map.json
+      SCREENSHOTS_DIR: /app/data/screenshots
+      RESULTS_DIR: /app/data/results
       # --- Event bus → Redis (cross-replica realtime) ---
       EVENT_BUS_BACKEND: redis
       REDIS_URL: redis://redis:6379/0
@@ -100,6 +105,9 @@ services:
       MULTI_TENANT_ENABLED: "false"      # flip to true for pooled multi-customer SaaS
       DEPLOYMENT_MODE: docker
       SERVICE_ROLE: api
+    volumes:
+      - ./data:/app/data                    # app_map.json + screenshots/ + results/  → visible on the host
+      - ./data/test_plans:/app/test_plans   # cached Claude plans (path not env-configurable)
 
   # Worker tier — same image, SERVICE_ROLE=worker runs `python -m worker` (the run-job consumer).
   # Scale with `docker compose up --scale worker=N`. Publishes live events to Redis, which the API
@@ -125,9 +133,28 @@ services:
       S3_ACCESS_KEY_ID: minioadmin
       S3_SECRET_ACCESS_KEY: minioadmin
       S3_USE_PATH_STYLE: "true"
+      APP_MAP_PATH: /app/data/app_map.json      # share the host-mounted data dir with the app
+      SCREENSHOTS_DIR: /app/data/screenshots
+      RESULTS_DIR: /app/data/results
       EVENT_BUS_BACKEND: redis
       REDIS_URL: redis://redis:6379/0
       TASK_QUEUE_BACKEND: redis
+    volumes:
+      - ./data:/app/data
+      - ./data/test_plans:/app/test_plans
+
+  # Adminer — a tiny web UI to BROWSE the Postgres database in a browser: every activity's rows
+  # (kiosk_configs, test_cases, test_runs, test_results, defects, app_maps, device_configs,
+  # robot_events). Open  http://<VM-EXTERNAL-IP>:8081  → System: PostgreSQL · Server: postgres ·
+  # Username/Password/Database: kioskqa. Open tcp:8081 in the firewall (restrict to your IP).
+  adminer:
+    image: adminer:latest
+    ports: ["8081:8080"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    restart: unless-stopped
 
 volumes:
   pgdata:
