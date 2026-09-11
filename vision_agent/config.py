@@ -452,6 +452,12 @@ class Settings(BaseSettings):
     s3_access_key_id: str = ""         # blank = fall back to the default provider cred chain
     s3_secret_access_key: str = ""
     s3_use_path_style: bool = True     # MinIO / most self-hosted S3 need path-style addressing
+    # Mirror produced artifacts (app_map, exploration screenshots, cached plans, run results) to the
+    # S3-compatible object store as the DURABLE record — the cloud-agnostic equivalent of writing to
+    # S3. Playwright/OpenCV need LOCAL files, so local disk stays the working store and this archives
+    # to MinIO/S3 at each activity boundary (see ports/archive.py). Uploads use the s3_* settings
+    # above. Default off (pure-local MVP). Set ARCHIVE_TO_OBJECT_STORE=true to populate MinIO.
+    archive_to_object_store: bool = False
 
     # --- Event bus (realtime WebSocket + cross-worker fan-out) ---
     # memory = in-process (single server, = MVP behaviour). redis = pub/sub so N API/worker

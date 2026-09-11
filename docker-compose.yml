@@ -89,6 +89,7 @@ services:
       S3_ACCESS_KEY_ID: minioadmin
       S3_SECRET_ACCESS_KEY: minioadmin
       S3_USE_PATH_STYLE: "true"
+      ARCHIVE_TO_OBJECT_STORE: "true"    # mirror app_map + screenshots + plans + results → MinIO (durable S3 store)
       # --- File artifacts → /app/data, bind-mounted to the host ./data (see `volumes`) so app_map,
       # screenshots and results are VISIBLE on the VM host and PERSIST across container recreation.
       # app_map + its screenshots stay co-located (screens_dir derives from app_map_path). The cached
@@ -133,6 +134,7 @@ services:
       S3_ACCESS_KEY_ID: minioadmin
       S3_SECRET_ACCESS_KEY: minioadmin
       S3_USE_PATH_STYLE: "true"
+      ARCHIVE_TO_OBJECT_STORE: "true"    # mirror app_map + screenshots + plans + results → MinIO (durable S3 store)
       APP_MAP_PATH: /app/data/app_map.json      # share the host-mounted data dir with the app
       SCREENSHOTS_DIR: /app/data/screenshots
       RESULTS_DIR: /app/data/results

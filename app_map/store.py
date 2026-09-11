@@ -42,6 +42,14 @@ def save(app_map: AppMap, path: str) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps(out, indent=2))
     print(f"\n  [APP MAP] Saved to {path}  ({len(out['screens'])} screens)")
+    # Mirror the explorer's output (app_map + its co-located screenshots) to the durable object
+    # store (MinIO/S3) when ARCHIVE_TO_OBJECT_STORE is on. No-op otherwise; failure-isolated.
+    try:
+        from ports.archive import archive
+        archive(str(dest))
+        archive(str(dest.parent / "screenshots"))
+    except Exception:
+        pass
 
 
 def load(path: str) -> AppMap:

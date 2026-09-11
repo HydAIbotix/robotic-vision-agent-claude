@@ -3211,6 +3211,13 @@ def _execute_run(run_id: str, req: RunRequest, tenant_id: str = ""):
             except Exception:
                 _events = []
             _write_run_artifacts(run_id, run, test_results, _events)
+            # Mirror this run's execution output (results.json + logs + per-run screenshots) to the
+            # durable object store (MinIO/S3) when ARCHIVE_TO_OBJECT_STORE is on. No-op otherwise.
+            try:
+                from ports.archive import archive
+                archive(str(_run_results_dir(run_id)))
+            except Exception:
+                pass
         except Exception as _ae:
             print(f"  [RUN] artifact write skipped: {_ae}")
 

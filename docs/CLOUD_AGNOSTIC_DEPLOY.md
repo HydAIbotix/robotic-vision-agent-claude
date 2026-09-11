@@ -283,8 +283,20 @@ intended RPS/VPS view. `kiosk_id` is the join key for later test cases + runs.
 
 ## 7. Where every activity's data is stored (for live demos)
 
-Two stores: **Postgres** (relational metadata) and the **local filesystem** (files), the filesystem
-bind-mounted to the host `./data` so it's visible + persistent. Nothing uses MinIO in this config.
+**Three stores**, each the cloud-agnostic equivalent of an AWS managed service:
+- **Postgres** (↔ DynamoDB/RDS) — relational metadata: kiosks, test cases, runs, results, defects.
+- **Local filesystem** (working store) — files the agents write; Playwright/OpenCV need local files.
+  Bind-mounted to the host `./data`, so it's directly viewable + persists.
+- **MinIO** (↔ **S3**) — the **durable object store**. Every artifact the local store produces is
+  mirrored to MinIO at each activity boundary (`ARCHIVE_TO_OBJECT_STORE=true`, `ports/archive.py`):
+  explorer output (`app_map.json` + `screenshots/`), planner output (`test_plans/`), execution
+  output (`results/<run_id>/`). This is how AgentCore uses ephemeral local disk + S3 on AWS.
+
+To view MinIO (the S3 store) in a browser: open **`http://<EXTERNAL_IP>:9001`** (console), log in
+`minioadmin` / `minioadmin`, open bucket **`kioskqa`** — the keys mirror the host layout
+(`app_map.json`, `screenshots/…`, `test_plans/…`, `results/…`). Open `tcp:9001` in the firewall
+(restrict to your IP). Archiving is failure-isolated and config-gated — off (`false`) reproduces the
+pure-local MVP; it never touches the per-step vision path.
 
 | Activity | What | Where | How to view |
 |---|---|---|---|

@@ -67,6 +67,12 @@ def save(plan: dict, test_id: str, steps_raw: str, app_map_version: str, expecte
     _cache_path(test_id, key).write_text(
         json.dumps(plan, indent=2), encoding="utf-8"
     )
+    # Mirror the planner's output (cached plan) to the durable object store when enabled.
+    try:
+        from ports.archive import archive
+        archive(str(_cache_path(test_id, key)))
+    except Exception:
+        pass
 
 
 def is_valid(plan: dict, app_map: Optional[dict]) -> bool:
