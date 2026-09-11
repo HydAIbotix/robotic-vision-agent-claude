@@ -44,7 +44,7 @@ from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from vision_agent.config import settings
@@ -1065,6 +1065,17 @@ class KioskConfigRequest(BaseModel):
     position_x: float = 0.0
     position_y: float = 0.0
     position_th:float = 0.0
+
+    @field_validator(
+        "name", "url", "robot_id", "screen_w_m", "screen_h_m", "tag_id",
+        "position_x", "position_y", "position_th", mode="before",
+    )
+    @classmethod
+    def _null_to_default(cls, v, info):
+        # A kiosk row created by /api/explore leaves robot_id/tag_id NULL (no column default). The
+        # Studio loads that kiosk and PUTs those fields back as JSON null → a non-optional str/int/
+        # float would 422. Coerce null -> the field's own default instead of rejecting the save.
+        return cls.model_fields[info.field_name].default if v is None else v
 
 
 @app.put("/api/config/kiosk")

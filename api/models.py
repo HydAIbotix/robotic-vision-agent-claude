@@ -34,10 +34,10 @@ class KioskConfig(TenantMixin, Base):
     kiosk_id     = Column(String(50), nullable=False)   # unique PER TENANT (see __table_args__)
     name         = Column(String(100))
     url          = Column(String(500))
-    robot_id     = Column(String(50))
+    robot_id     = Column(String(50), default="R-01")   # default so /explore-created rows aren't NULL
     screen_w_m   = Column(Float, default=0.4)
     screen_h_m   = Column(Float, default=0.3)
-    tag_id       = Column(Integer)
+    tag_id       = Column(Integer, default=1)            # default so /explore-created rows aren't NULL
     position_x   = Column(Float, default=0.0)
     position_y   = Column(Float, default=0.0)
     position_th  = Column(Float, default=0.0)
