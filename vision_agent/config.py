@@ -173,7 +173,7 @@ class Settings(BaseSettings):
     # closing it, so a live demo can show the last screen. Applies ONLY to the playwright backend's
     # end-of-run teardown (robot.stop()); it does NOT affect execution timing, step logic, or the
     # demo/real backends. 0 = close immediately (legacy behaviour). Set PLAYWRIGHT_DEMO_HOLD_S in .env.
-    playwright_demo_hold_s: float = 20.0
+    playwright_demo_hold_s: float = 5.0
 
     # Demo display scale — device-scale-factor for the visible Playwright window, so the app renders
     # LARGE on a high-res demo monitor (e.g. 2.0 fills a 3840×2160 4K display from the 1920×1080
