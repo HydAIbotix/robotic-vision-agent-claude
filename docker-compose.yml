@@ -77,8 +77,15 @@ services:
       # --- Persistence → Postgres ---
       PERSISTENCE_BACKEND: postgres
       DB_URL: postgresql+psycopg://kioskqa:kioskqa@postgres:5432/kioskqa
-      # --- Object store → MinIO (S3-compatible) ---
-      STORAGE_BACKEND: minio
+      # --- Object store → LOCAL filesystem (in-container), NOT MinIO/S3. Why: the vision/explorer
+      # path captures screenshots to the LOCAL fs (Playwright) then reads them back via
+      # get_storage().load(); on an S3 backend that load looks in the bucket for a key that was
+      # never uploaded → NoSuchKey (exploration dies in explore_screen). local = MVP-identical and is
+      # what makes exploration/tests work on the VM. The S3_* + minio service are kept (inert) for an
+      # easy switch-back once the screenshot round-trip is made storage-consistent (see CLAUDE.md).
+      # NOTE: local storage is IN the container → app_map/screenshots/results are lost on `compose
+      # down`/recreate. Mount a volume at /app/<dirs> if you need them to persist.
+      STORAGE_BACKEND: local
       S3_BUCKET: kioskqa
       S3_ENDPOINT_URL: http://minio:9000
       S3_ACCESS_KEY_ID: minioadmin
@@ -112,7 +119,7 @@ services:
       PLAYWRIGHT_HEADLESS: "true"        # no X server in the container → headless Chromium
       PERSISTENCE_BACKEND: postgres
       DB_URL: postgresql+psycopg://kioskqa:kioskqa@postgres:5432/kioskqa
-      STORAGE_BACKEND: minio
+      STORAGE_BACKEND: local   # see the app service's note — MinIO breaks the screenshot round-trip
       S3_BUCKET: kioskqa
       S3_ENDPOINT_URL: http://minio:9000
       S3_ACCESS_KEY_ID: minioadmin
