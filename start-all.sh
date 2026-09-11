@@ -19,6 +19,7 @@ set -euo pipefail
 
 BACKEND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POS_DIR="${POS_DIR:-$HOME/robotics-kiosk-pos}"
+STUDIO_DIR="${STUDIO_DIR:-$HOME/kiosk-test-studio}"   # optional operator UI (branch studio-cloud-agnostic)
 
 # External IP (GCP metadata first, then a public echo as fallback).
 EXTERNAL_IP="$(curl -s -H 'Metadata-Flavor: Google' \
@@ -34,15 +35,16 @@ if [ ! -d "$POS_DIR" ]; then
 fi
 
 if [ "${PULL:-0}" = "1" ]; then
-  echo "==> git pull both repos"
+  echo "==> git pull repos"
   ( cd "$POS_DIR"     && git pull --ff-only )
   ( cd "$BACKEND_DIR" && git pull --ff-only )
+  [ -d "$STUDIO_DIR" ] && ( cd "$STUDIO_DIR" && git pull --ff-only )
 fi
 
-echo "==> [1/2] Kiosk POS   ($POS_DIR)"
+echo "==> [1/3] Kiosk POS    ($POS_DIR)"
 ( cd "$POS_DIR" && PUBLIC_BASE_URL="http://${EXTERNAL_IP}" docker compose up -d --build )
 
-echo "==> [2/2] QA backend  ($BACKEND_DIR)"
+echo "==> [2/3] QA backend   ($BACKEND_DIR)"
 ( cd "$BACKEND_DIR" && docker compose up -d --build )
 
 echo "==> waiting for the API to answer…"
@@ -51,9 +53,17 @@ for _ in $(seq 1 40); do
   sleep 3
 done
 
+if [ -d "$STUDIO_DIR" ]; then
+  echo "==> [3/3] Test Studio  ($STUDIO_DIR)"
+  ( cd "$STUDIO_DIR" && docker compose up -d --build )
+else
+  echo "==> [3/3] Test Studio  SKIPPED — clone it to $STUDIO_DIR (branch studio-cloud-agnostic) to enable the UI."
+fi
+
 echo
 echo "======================================================================"
 echo "  POS (app under test):  http://${EXTERNAL_IP}/?screenLayout=standard&flowMode=full"
+echo "  Test Studio (UI)    :  http://${EXTERNAL_IP}:8080        (open tcp:8080 in the firewall)"
 echo "  QA API health       :  http://localhost:8001/api/health"
 echo "                          (external, if 8001 is firewalled to your IP: http://${EXTERNAL_IP}:8001)"
 echo
