@@ -8,7 +8,10 @@ FROM python:3.11-slim AS base
 # install-deps`. Kept minimal to stay small.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 libglib2.0-0 curl \
+        xvfb x11vnc novnc websockify \
     && rm -rf /var/lib/apt/lists/*
+# xvfb/x11vnc/novnc/websockify power the OPTIONAL live-browser viewer (ENABLE_VNC=true): headed
+# Chromium renders onto a virtual display that is streamed to a browser at :6080. Inert by default.
 
 WORKDIR /app
 
@@ -31,6 +34,7 @@ ENV STORAGE_BACKEND=local \
     API_PORT=8001
 
 EXPOSE 8001
+EXPOSE 6080
 
 # Dispatch by role: SERVICE_ROLE=worker runs the queue/Temporal consumer (`python -m worker`);
 # anything else runs the API (uvicorn WITHOUT --reload, intentional — see CLAUDE.md). One image,

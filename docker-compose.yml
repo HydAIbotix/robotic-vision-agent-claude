@@ -66,14 +66,19 @@ services:
       postgres: { condition: service_healthy }
       minio:    { condition: service_healthy }
       redis:    { condition: service_healthy }
-    ports: ["8001:8001"]
+    ports: ["8001:8001", "6080:6080"]   # 8001 = API; 6080 = live-browser viewer (noVNC, ENABLE_VNC)
     environment:
       # --- Claude (unchanged; API key from .env) ---
       VISION_BACKEND: anthropic
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # --- Robot backend → Playwright (live Chromium for exploration + test runs) ---
       ROBOT_BACKEND: playwright
-      PLAYWRIGHT_HEADLESS: "true"        # no X server in the container → headless Chromium
+      # Live-browser viewer: ENABLE_VNC=true starts a virtual display + noVNC so you can WATCH the
+      # browser at http://<EXTERNAL_IP>:6080/vnc.html during exploration + execution. It forces
+      # headed Chromium. For the lightweight headless mode (no viewer), set ENABLE_VNC=false and
+      # PLAYWRIGHT_HEADLESS=true.
+      ENABLE_VNC: "true"
+      PLAYWRIGHT_HEADLESS: "false"       # headed → renders onto the Xvfb display the viewer streams
       # --- Persistence → Postgres ---
       PERSISTENCE_BACKEND: postgres
       DB_URL: postgresql+psycopg://kioskqa:kioskqa@postgres:5432/kioskqa

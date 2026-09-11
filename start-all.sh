@@ -64,6 +64,7 @@ echo
 echo "======================================================================"
 echo "  POS (app under test):  http://${EXTERNAL_IP}/?screenLayout=standard&flowMode=full"
 echo "  Test Studio (UI)    :  http://${EXTERNAL_IP}:8080        (open tcp:8080 in the firewall)"
+echo "  Live browser (noVNC):  http://${EXTERNAL_IP}:6080/vnc.html  (watch exploration/execution; open tcp:6080)"
 echo "  QA API health       :  http://localhost:8001/api/health"
 echo "                          (external, if 8001 is firewalled to your IP: http://${EXTERNAL_IP}:8001)"
 echo

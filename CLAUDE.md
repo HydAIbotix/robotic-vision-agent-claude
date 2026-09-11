@@ -1218,6 +1218,18 @@ Two stores + a durable object mirror; browse them during a demo:
 - Open `tcp:8081`/`tcp:9001` in the GCP firewall **restricted to your IP** — never `0.0.0.0/0`.
   These are demo credentials; rotate them (compose env + a real secret store) for any shared/hosted use.
 
+#### Live-browser viewer (noVNC) — watch Chromium during exploration/execution
+
+A headless VM has no display, so Chromium can't show a window. `ENABLE_VNC=true` (default in the VM
+compose) starts a virtual display (**Xvfb**) that headed Chromium renders onto, exposes it via
+**x11vnc**, and serves a browser VNC client (**noVNC**) at **`http://<EXTERNAL_IP>:6080/vnc.html`** —
+so you can watch App Explorer and test execution live. Implemented in `docker-entrypoint.sh` (started
+before uvicorn; forces `PLAYWRIGHT_HEADLESS=false`) + the `xvfb/x11vnc/novnc/websockify` packages in
+the `Dockerfile`; port `6080` published by the `app` service. Open `tcp:6080` in the firewall
+(restrict to your IP; the VNC has no password). Set `ENABLE_VNC=false` + `PLAYWRIGHT_HEADLESS=true`
+for the lightweight headless mode (no viewer). Tap/screenshot math is display-independent, so headed
+vs headless is behaviourally identical — no regression.
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login
