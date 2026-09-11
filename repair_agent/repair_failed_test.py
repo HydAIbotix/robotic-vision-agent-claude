@@ -596,6 +596,40 @@ def _compare_url(base: str, head: str) -> str:
     return f"{repo}/compare/{base}...{head}?expand=1" if repo else ""
 
 
+def _create_pr_via_api(remote_url: str, head: str, base: str, title: str, body: str) -> str:
+    """Create a real GitHub PR via the REST API (used when `gh` is absent — the container has no gh).
+    Returns the PR html_url, or "" on any failure so the caller falls back to the compare URL. Needs
+    settings.github_token (repo scope). If a PR for this head already exists, returns that PR's URL."""
+    token = settings.github_token
+    if not token or not remote_url:
+        return ""
+    import re
+    import requests
+    m = re.search(r"github\.com[:/]+(?:[^/@]+@)?([^/]+)/(.+?)(?:\.git)?/?$", remote_url)
+    if not m:
+        return ""
+    owner, repo = m.group(1), m.group(2)
+    hdr = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+    try:
+        r = requests.post(
+            f"https://api.github.com/repos/{owner}/{repo}/pulls",
+            headers=hdr, json={"title": title, "head": head, "base": base, "body": body}, timeout=20,
+        )
+        if r.status_code == 201:
+            return r.json().get("html_url", "")
+        if r.status_code == 422:  # PR already exists for this head → return the existing one
+            q = requests.get(
+                f"https://api.github.com/repos/{owner}/{repo}/pulls",
+                headers=hdr, params={"head": f"{owner}:{head}", "base": base, "state": "open"}, timeout=20,
+            )
+            if q.ok and q.json():
+                return q.json()[0].get("html_url", "")
+        print(f"  [REPAIR] PR API {r.status_code}: {(r.text or '')[:200]}")
+    except Exception as exc:  # never break the repair over PR creation
+        print(f"  [REPAIR] PR API error: {exc}")
+    return ""
+
+
 def open_pull_request(branch: str, base: str, title: str, body: str) -> dict:
     """Raise the PR. `gh` isn't required: push the base (so it exists on the remote) and the head,
     then return GitHub's prefilled compare/PR page URL (the gh-less way to open a PR). If `gh` IS
@@ -626,11 +660,19 @@ def open_pull_request(branch: str, base: str, title: str, body: str) -> dict:
                 gh_url = line.strip()
                 break
 
-    url = gh_url or _compare_url(base, branch)
+    # No gh in the container → create the PR via the GitHub REST API when a token is configured.
+    api_url = ""
+    if not gh_url and pushed and settings.github_token:
+        remote_url = _git(["remote", "get-url", remote]).get("output", "").strip()
+        api_url = _create_pr_via_api(remote_url, branch, base, title, body)
+        if api_url:
+            logs.append(f"created PR via GitHub API: {api_url}")
+
+    url = gh_url or api_url or _compare_url(base, branch)
     return {
         "opened": bool(pushed and url),   # branches pushed + a PR URL is ready
         "pushed": pushed,
-        "created": bool(gh_url),          # true only if gh actually created the PR
+        "created": bool(gh_url or api_url),  # a real PR was created (gh or the REST API)
         "url": url,
         "output": "\n".join(x for x in logs if x),
     }

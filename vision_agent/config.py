@@ -392,6 +392,11 @@ class Settings(BaseSettings):
     auto_repair_on_failure: bool = True
     repair_auto_pr: bool = True
     repair_pr_remote: str = "origin"
+    # GitHub token (repo scope) used to (a) authenticate `git push` of the fix branch and (b) CREATE
+    # the PR via the GitHub REST API when `gh` isn't installed (the container has no gh). Blank →
+    # open_pull_request falls back to returning the prefilled compare URL (no push/auto-create).
+    # Set GITHUB_TOKEN in .env (gitignored) — never commit it.
+    github_token: str = ""
     # Branch a prepared PR targets (merge-INTO). For the demo this is the isolated branch that
     # carries the intentional bug, so the fix produces a real, reviewable diff without ever touching
     # the working `arm-reachable-area` branch. Point REPAIR_PR_BASE at your real base branch for

@@ -13,6 +13,11 @@ set -e
 if [ -n "${REPAIR_CODEBASE_DIR:-}" ]; then
   git config --global --add safe.directory "$REPAIR_CODEBASE_DIR" 2>/dev/null || true
 fi
+# Auth for `git push` of the Auto-Repair fix branch (open_pull_request). The token is applied at
+# transport time via url.insteadOf (NOT stored in the repo), so HTTPS pushes to github.com carry it.
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+  git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/" 2>/dev/null || true
+fi
 
 if [ "${ENABLE_VNC:-false}" = "true" ]; then
   DISPLAY_NUM="${VNC_DISPLAY:-:99}"

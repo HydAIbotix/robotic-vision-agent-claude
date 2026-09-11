@@ -1225,15 +1225,22 @@ BACKEND container needs the POS **source + node + git** (it had none). Wired int
 - **node 20 + git in the backend image** (node copied from `node:20-slim`; git via apt) for the
   `tsc -b`/`npm run build` verification and the repo-state guard/commit.
 - `REPAIR_PERSIST_DIR=/app/data/chroma_code_db` (index persists under host-mounted `./data`),
-  `REPAIR_PR_BASE=expanded-cloud-agnostic`, `REPAIR_AUTO_PR=false` (prepare LOCALLY only — pushing a PR
-  needs GitHub creds in the container), `GIT_AUTHOR_*`/`GIT_COMMITTER_*` identity, and the entrypoint marks
-  `/repos/pos` a git `safe.directory` (the mounted repo is owned by the host user).
+  `REPAIR_PR_BASE=expanded-cloud-agnostic`, `GIT_AUTHOR_*`/`GIT_COMMITTER_*` identity, and the entrypoint
+  marks `/repos/pos` a git `safe.directory` (the mounted repo is owned by the host user).
+- **Auto-raise the PR (`REPAIR_AUTO_PR=true`, default now):** after a green build, `open_pull_request`
+  commits the fix on a `repair/<test>-fix-<id>` branch, **pushes** it to origin, and **creates a real
+  PR via the GitHub REST API** (`gh` isn't installed, so `_create_pr_via_api` in `repair_failed_test.py`
+  posts to `/repos/{owner}/{repo}/pulls`; a 422 "already exists" returns the existing PR). Needs a
+  **`GITHUB_TOKEN`** (repo scope) in `.env` — the entrypoint applies it to `git push` via
+  `url.insteadOf` (transport-time, not stored), and `settings.github_token` drives the API call.
+  Falls back to the prefilled compare URL if the token is blank. `POST /api/repair/{id}/open-pr`
+  (manual) and `/delete-pr` still work. Set `REPAIR_AUTO_PR=false` to keep repairs local.
 - **One-time on the VM** — populate node_modules in the mounted repo (the build step needs it), then
   rebuild the index against the on-disk (buggy) code:
   - `docker run --rm -v ~/robotics-kiosk-pos:/app -w /app node:20-alpine npm ci`
   - Studio "Rebuild index" (or `POST /api/repair/index`).
-- ⚠️ Open-PR push is intentionally OFF; the core demo (retrieve → diagnose → apply → tsc/vite build →
-  prepare local branch+diff) needs no push. Enabling push needs a PAT mounted for the container's git.
+- ⚠️ Add `GITHUB_TOKEN=<repo-scoped PAT>` to `.env` on the VM for the push+PR. The token must allow
+  pushing to `srik-g/robotics-kiosk-pos`. `.env` is gitignored — never commit the token.
 
 #### Data-store access (cloud-agnostic VM deployment)
 
