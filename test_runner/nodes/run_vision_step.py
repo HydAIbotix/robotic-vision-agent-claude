@@ -1474,6 +1474,7 @@ def _run_tier3_continue(
     from vision_agent.agent import create_agent
     from vision_agent.state import VisionAgentState
 
+    run_id            = state.get("run_id", "")   # for live-feed progress emits during recovery
     structured_plan   = state.get("structured_plan") or {}
     plan_steps_all    = structured_plan.get("steps") or []
     n_remaining       = max(0, len(plan_steps_all) - start_step_idx)
