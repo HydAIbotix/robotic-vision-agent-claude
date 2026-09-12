@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     # only, never test execution), the exploration URL gets ?demoCard=1 so the RPS mock-card field is
     # pre-filled with this number, and the walkthrough types it as a backup. Keep this in sync with
     # DEMO_SMART_CARD_NUMBER in the kiosk app's src/lib/storage.ts.
-    demo_card_number: str = "4111111111110001"
+    demo_card_number: str = "0005322931"
     explore_demo_card: bool = False
 
     # Agent behaviour

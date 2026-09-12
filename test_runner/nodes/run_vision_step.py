@@ -187,6 +187,27 @@ def _element_testid(app_map: dict, screen_id: str, element_id: str) -> str:
     return ""
 
 
+def _element_charted(app_map: dict, screen_id: str, element_id: str) -> bool:
+    """True when `element_id` is a REAL element the explorer charted on `screen_id`.
+
+    A Tier-2 (text-only) plan can invent an element that isn't actually on the screen — e.g. the RPS
+    payment screen charts "Use Mock Card"/"Start Card Reader Session" buttons but NOT the mock-card
+    number input (revealed only after clicking "Use Mock Card"), so the planner guesses an
+    `mock_card_number_input` with fabricated coords. Tapping/typing at those guessed coords focuses
+    nothing → the value goes nowhere (Ctrl+A selects the whole page) yet the step "succeeds". Callers
+    use this to route such steps to Tier-3 vision instead. Conservative: returns True (don't disrupt)
+    when we can't tell — no app_map, no ids, or a screen with no charted element list — so it fires
+    ONLY when the screen IS charted but this specific element is absent (the true planner-guess case).
+    """
+    if not (app_map and screen_id and element_id):
+        return True
+    sc = (app_map.get("screens") or {}).get(screen_id) or {}
+    els = sc.get("elements")
+    if not els:
+        return True
+    return any(el.get("id") == element_id for el in els)
+
+
 def _looks_like_value(val: str) -> bool:
     """True when a captured string is already a clean, reusable token (a card number, code,
     id, amount) rather than empty or a label-noisy blob. Multi-line / long / label-containing
@@ -971,13 +992,16 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             # (0,0) means the planner found no stored coordinates — the screen was
             # not in the app_map when the plan was generated.  Mark as failure so
             # Tier 3 takes over with Claude vision instead of tapping a dead pixel.
-            if px == 0 and py == 0:
-                print(f"    {i:>2}. tap   {eid!r} — no coordinates (screen not yet in app_map) → Tier-3 fallback")
+            uncharted = bool(eid and sid and not _element_charted(app_map, sid, eid))
+            if (px == 0 and py == 0) or uncharted:
+                why = ("no coordinates (screen not yet in app_map)" if (px == 0 and py == 0)
+                       else "element not charted on this screen (planner guess → fabricated coords)")
+                print(f"    {i:>2}. tap   {eid!r} — {why} → Tier-3 fallback")
                 sr = {
-                    "step": f"tap: {eid} @ (0,0)",
+                    "step": f"tap: {eid} @ ({px},{py})",
                     "success": False,
-                    "method": "no_coordinates",
-                    "note": f"No stored coordinates for '{eid}' — screen not explored; Tier-3 will retry with vision",
+                    "method": "uncharted_element" if uncharted else "no_coordinates",
+                    "note": f"'{eid}' not reliably locatable on '{sid}' — Tier-3 vision will locate it",
                 }
                 step_results.append(sr)
                 if run_id:
@@ -1063,6 +1087,18 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 print(f"    {i:>2}. ✗ type — unresolved capture placeholder {value!r} (nothing captured it) → fail")
                 sr = {"step": f"type: {value[:30]}", "success": False, "method": "unresolved_capture",
                       "observation": f"Type value still contains an uncaptured placeholder: {value!r}"}
+                step_results.append(sr)
+                if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
+                return step_results, "failed", captured
+            # If the target field is NOT charted on this screen, the plan's coords are a Tier-2 guess
+            # (e.g. the RPS mock-card input revealed only after "Use Mock Card" — never charted). Focusing
+            # those fabricated coords lands on nothing → type_text's Ctrl+A selects the whole page and the
+            # value is dropped, yet the step would "succeed". Hand off to Tier-3 vision to locate the real
+            # field and enter the value, instead of a silent mis-type. (Charted fields are unaffected.)
+            if eid and sid and not _element_charted(app_map, sid, eid):
+                print(f"    {i:>2}. type  {eid!r} — element not charted on '{sid}' (planner guess) → Tier-3 fallback")
+                sr = {"step": f"type: {eid} (uncharted)", "success": False, "method": "uncharted_element",
+                      "note": f"'{eid}' not charted on '{sid}' — Tier-3 vision will locate the field and enter the value"}
                 step_results.append(sr)
                 if run_id: broadcaster.emit(run_id, {"event": "step_result", "run_id": run_id, "test_id": test_id, "step_index": i, **sr})
                 return step_results, "failed", captured

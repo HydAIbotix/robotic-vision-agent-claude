@@ -3211,13 +3211,6 @@ def _execute_run(run_id: str, req: RunRequest, tenant_id: str = ""):
             except Exception:
                 _events = []
             _write_run_artifacts(run_id, run, test_results, _events)
-            # Mirror this run's execution output (results.json + logs + per-run screenshots) to the
-            # durable object store (MinIO/S3) when ARCHIVE_TO_OBJECT_STORE is on. No-op otherwise.
-            try:
-                from ports.archive import archive
-                archive(str(_run_results_dir(run_id)))
-            except Exception:
-                pass
         except Exception as _ae:
             print(f"  [RUN] artifact write skipped: {_ae}")
 
@@ -3230,6 +3223,16 @@ def _execute_run(run_id: str, req: RunRequest, tenant_id: str = ""):
                 _log_fh.close()
             except Exception:
                 pass
+
+        # Mirror this run's execution output (results.json + run.log + run_console.log + per-run
+        # screenshots) to the durable object store (MinIO/S3). MUST run AFTER run_console.log is
+        # flushed + closed above — archiving it while still open uploaded an EMPTY console log.
+        # No-op unless ARCHIVE_TO_OBJECT_STORE.
+        try:
+            from ports.archive import archive
+            archive(str(_run_results_dir(run_id)))
+        except Exception:
+            pass
 
 
 def _run_defect_agent(run_id: str, kiosk_id: str, failed_results: list):

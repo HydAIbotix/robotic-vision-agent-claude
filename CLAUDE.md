@@ -1291,6 +1291,36 @@ vs headless is behaviourally identical — no regression.
   popups are allowed, behaviour is unchanged (separate window). No regression: the banner + "Open repair
   window" button remain (the button also falls back to inline). Rebuild the studio container to apply.
 
+### Recent progress (2026-09-12, run-9 GCE) — TC-RPS-003 card-number-not-entered + 3 fixes
+
+TC-RPS-003 (RPS mock-card payment) failed with "card number not entered — all fields selected", and
+auto-repair then produced a FALSE-POSITIVE commit. Root cause chain + fixes:
+- **Root cause:** the app_map `payment` screen charts the "Use Mock Card"/"Start Card Reader Session"
+  BUTTONS but NOT the mock-card-number input (revealed only AFTER clicking "Use Mock Card" — the
+  explorer never completed that reveal). The Tier-2 planner therefore **guessed** a
+  `mock_card_number_input` element with fabricated coords (766,772). At execution the coord focus
+  landed on nothing → `type_text`'s Ctrl+A selected the whole PAGE (the "all fields selected"
+  symptom) → the number was dropped, yet the step "succeeded" (no Tier-3). The later payment verify
+  then failed.
+- **Auto-repair commit `20f7740` was a FALSE POSITIVE** — it reordered `refreshCard()` before the
+  empty-number guard in `confirmMockCard`, but `refreshCard()` pulls a card's *balance*, not the input
+  value, so `if (!digits)` is unchanged; a cosmetic no-op. The app is correct; the failure was
+  harness-side (number never typed). Delete that PR.
+- **Fix 1 — exploration mock card = `0005322931`** (`demo_card_number`, was the stale `4111…`). The
+  expanded POS issues `0005322931` as the mock card (`App.tsx:1340-1341 issueCard('0005322931','mock')`),
+  so the explorer's typed/`?demoCard=1` number now matches → the "Use Mock Card" reveal completes and
+  the mock-card input + confirm get charted (with testids) → Tier-1/2 types correctly, no guessing.
+  **Re-explore RPS after deploying** so the payment reveal is charted.
+- **Fix 2 — uncharted plan elements now route to Tier-3** (`run_vision_step._element_charted`): a
+  `type`/`tap` step whose `element_id` is NOT in the app_map for its charted screen (a planner guess)
+  is treated like no-coordinates → hands off to Tier-3 vision instead of focusing fabricated coords and
+  silently mis-typing. Conservative: fires ONLY when the screen IS charted but the element is absent
+  (charted elements unaffected → no regression). This is the always-works dynamic-data fallback.
+- **Fix 3 — `run_console.log` was empty in MinIO** (`api/main.py` run `finally`): `archive()` ran
+  BEFORE the tee'd console log was flushed/closed, uploading an empty file. Moved the archive to AFTER
+  the log is closed, so the object-store copy has the full console log. (The host `./data` copy was
+  always complete; only the archived copy was empty.)
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login
