@@ -1360,6 +1360,23 @@ sources; both fixed for ALL test cases (permanent, config-driven, no regression)
   No-op unless `ARCHIVE_TO_OBJECT_STORE`. (Single-tenant key layout; multi-tenant tenant-prefixing is a
   follow-up.)
 
+#### Deterministic login prefix — the login-skip fix (the prompt rule alone was NOT enough)
+
+Even with `temperature` gone and the "authenticate first" prompt rule, a regenerated TC-RPS-003 plan
+STILL opened with `verify: products` and failed step 1 (`expected 'products', got 'login'`). The LLM
+can't be trusted to prepend login reliably. **Fix (`test_runner/nodes/parse_steps.py`
+`_ensure_login_prefix`, applied to BOTH the Tier-2 fresh plan (before caching) and the Tier-1 cache
+HIT):** if the app is **login-gated** (a screen charting a password input + a sign-in button — found
+via `_find_login_screen`, entry-screen first) and the plan does NOT already authenticate, deterministically
+PREPEND `verify login → type email → type password → tap Sign In`, built from that screen's charted
+elements (ids/coords), with `{valid_…}`/`{invalid_…}` per `credential_scenario`. No LLM → identical
+every run. Idempotent + guarded: no-op when the app isn't login-gated (VPS card station → left alone),
+the scenario isn't valid/invalid, the plan already references a login screen (login/signin aliased) or
+types a password, or the login elements can't be resolved. Verified against the live app_map: skip-plan
+→ login prepended; already-login plan → unchanged; VPS map → unchanged. (Temperature 400 confirmed
+fixed separately: `llm_temperature=None`, a direct Claude call returns text, langchain_anthropic 1.7.2
+omits the param.)
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login
