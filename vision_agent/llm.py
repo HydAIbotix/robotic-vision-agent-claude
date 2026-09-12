@@ -142,6 +142,7 @@ def get_llm() -> BaseChatModel:
         return ChatBedrockConverse(
             model=settings.bedrock_model_id,
             region_name=settings.bedrock_region,
+            temperature=settings.llm_temperature,
         )
 
     from langchain_anthropic import ChatAnthropic
@@ -149,6 +150,7 @@ def get_llm() -> BaseChatModel:
         model=settings.anthropic_model,
         api_key=settings.anthropic_api_key,
         max_tokens=8192,
+        temperature=settings.llm_temperature,
     )
 
 
@@ -190,6 +192,7 @@ def get_explorer_llm() -> BaseChatModel:
         return ChatBedrockConverse(
             model="anthropic.claude-opus-4-8",
             region_name=settings.bedrock_region,
+            temperature=settings.llm_temperature,
         )
 
     from langchain_anthropic import ChatAnthropic
@@ -197,6 +200,7 @@ def get_explorer_llm() -> BaseChatModel:
         model=settings.anthropic_explorer_model,
         api_key=settings.anthropic_api_key,
         max_tokens=8192,
+        temperature=settings.llm_temperature,
     )
 
 
@@ -211,6 +215,7 @@ def get_fast_llm() -> BaseChatModel:
         return ChatBedrockConverse(
             model="anthropic.claude-opus-4-8",
             region_name=settings.bedrock_region,
+            temperature=settings.llm_temperature,
         )
 
     from langchain_anthropic import ChatAnthropic
@@ -218,4 +223,5 @@ def get_fast_llm() -> BaseChatModel:
         model=settings.anthropic_fast_model,
         api_key=settings.anthropic_api_key,
         max_tokens=2048,
+        temperature=settings.llm_temperature,
     )

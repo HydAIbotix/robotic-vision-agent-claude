@@ -1321,6 +1321,33 @@ auto-repair then produced a FALSE-POSITIVE commit. Root cause chain + fixes:
   the log is closed, so the object-store copy has the full console log. (The host `./data` copy was
   always complete; only the archived copy was empty.)
 
+### Recent progress (2026-09-12, run-2 GCE) — DETERMINISTIC plans (same test → same plan every time)
+
+After re-exploring, TC-RPS-003 got a DIFFERENT plan than before — the new one skipped login entirely
+(first step `verify products` → failed on step 1). Root cause was TWO compounding non-determinism
+sources; both fixed for ALL test cases (permanent, config-driven, no regression):
+- **`get_llm`/`get_explorer_llm`/`get_fast_llm` set NO temperature** → Claude defaulted to 1.0, so the
+  Tier-2 planner (and verify/Tier-3/repair-diagnose) produced different output for identical inputs — a
+  re-plan could drop the login steps. **Fix:** new `llm_temperature` setting (**default 0.0**) applied to
+  all three (Anthropic + Bedrock). Deterministic generation is the right default for a reproducible QA
+  tool; raise it only to want variety. This is the primary lever for "same test → same plan".
+- **`app_map.version_hash` hashed `explored_at` (a timestamp)** → EVERY re-exploration bumped the plan
+  cache key → every cached plan was regenerated (by the then-non-deterministic planner). **Fix:** the
+  hash is now **content-based** (screen ids + each screen's sorted element ids, no timestamp, coords
+  excluded so vision jitter doesn't churn it). A re-explore that charts the SAME structure now yields the
+  SAME version → the cached plan is reused verbatim; it re-plans ONLY when a screen/element is actually
+  added or removed. Verified: identical-structure maps with different `explored_at`/element-order → same
+  hash; adding an element → different hash. (One-time effect: existing cached plans re-key once and
+  regenerate deterministically.)
+- **Hard auth rule in `PLAN_FROM_MAP`** (`test_runner/prompts.py`): the app starts LOGGED OUT, so unless
+  a raw step/app_map proves a session, the plan MUST begin with the login sequence before any post-login
+  step — never open with a post-login `verify`. Belt-and-braces for correctness now that generation is
+  deterministic.
+- **Note on the run's auto-repair:** it filed a defect + attempted a fix, but this was a PLANNER failure
+  (login skipped), not an app bug — the user correctly does not expect auto-repair to "fix" it. The plan
+  determinism fixes above are the real fix; the earlier `20f7740` (TC-RPS-003) is likewise a false
+  positive to delete.
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login

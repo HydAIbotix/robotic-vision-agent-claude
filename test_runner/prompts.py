@@ -94,6 +94,13 @@ ONLY — your plan must be correct with or without them.
     transitions, and the observed prerequisites (per HOW TO THINK above). Never skip a required setup
     step just because the test case did not spell it out. Preconditions being present only saves you
     from inferring intent; it never replaces this analysis.
+  • AUTHENTICATION IS NEVER OPTIONAL. The app starts LOGGED OUT at its login/entry screen. Unless a
+    raw step or the app_map proves an already-authenticated session, the plan MUST BEGIN with the login
+    sequence — verify the login screen, type the email, type the password, tap Sign In — BEFORE any
+    post-login step (products / cart / payment / account / …). NEVER open a plan with a post-login
+    `verify` (e.g. "verify products screen") as the first step: that assumes a session that does not
+    exist and the run will fail on step 1. (credential_scenario "valid" → the valid credentials;
+    "invalid" → the invalid credentials; a pure pre-login/negative test may stop at the login screen.)
   • When preconditions ARE given, treat them as reference: translate each into concrete setup steps
     (e.g. "logged in" → the login sequence; "cart has an item" → the add-item recipe, honoring
     observed prerequisites) and place them at the START — unless a raw step already establishes it.

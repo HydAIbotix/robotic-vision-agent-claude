@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-opus-4-8"
     # Kept as a distinct setting so exploration can be tuned independently; also Opus.
     anthropic_explorer_model: str = "claude-opus-4-8"
+    # Sampling temperature for EVERY Claude call (planner, exploration, verify, Tier-3, repair-diagnose).
+    # 0.0 = deterministic: the SAME test case + app_map generates the SAME plan every time (previously
+    # unset → Claude's 1.0 default → a re-plan could produce a different, sometimes wrong, plan — e.g.
+    # skipping the login steps). Determinism is the right default for a reproducible QA tool. Raise it
+    # only if you deliberately want output variety.
+    llm_temperature: float = 0.0
 
     # AWS Bedrock (active only when vision_backend="bedrock")
     bedrock_region: str = "us-east-1"
