@@ -136,13 +136,23 @@ def invoke_json(llm: BaseChatModel, messages: list, *, retries: int = 2, default
     return default
 
 
+def _temp_kwargs() -> dict:
+    """`temperature` kwargs for the chat model, OMITTED when settings.llm_temperature is None.
+
+    Claude Opus 4.8 deprecated `temperature` and returns 400 if it is sent, so the default (None) must
+    not pass it. A numeric llm_temperature is forwarded only for older models that still accept it.
+    """
+    t = settings.llm_temperature
+    return {"temperature": t} if t is not None else {}
+
+
 def get_llm() -> BaseChatModel:
     if settings.vision_backend == "bedrock":
         from langchain_aws import ChatBedrockConverse
         return ChatBedrockConverse(
             model=settings.bedrock_model_id,
             region_name=settings.bedrock_region,
-            temperature=settings.llm_temperature,
+            **_temp_kwargs(),
         )
 
     from langchain_anthropic import ChatAnthropic
@@ -150,7 +160,7 @@ def get_llm() -> BaseChatModel:
         model=settings.anthropic_model,
         api_key=settings.anthropic_api_key,
         max_tokens=8192,
-        temperature=settings.llm_temperature,
+        **_temp_kwargs(),
     )
 
 
@@ -192,7 +202,7 @@ def get_explorer_llm() -> BaseChatModel:
         return ChatBedrockConverse(
             model="anthropic.claude-opus-4-8",
             region_name=settings.bedrock_region,
-            temperature=settings.llm_temperature,
+            **_temp_kwargs(),
         )
 
     from langchain_anthropic import ChatAnthropic
@@ -200,7 +210,7 @@ def get_explorer_llm() -> BaseChatModel:
         model=settings.anthropic_explorer_model,
         api_key=settings.anthropic_api_key,
         max_tokens=8192,
-        temperature=settings.llm_temperature,
+        **_temp_kwargs(),
     )
 
 
@@ -215,7 +225,7 @@ def get_fast_llm() -> BaseChatModel:
         return ChatBedrockConverse(
             model="anthropic.claude-opus-4-8",
             region_name=settings.bedrock_region,
-            temperature=settings.llm_temperature,
+            **_temp_kwargs(),
         )
 
     from langchain_anthropic import ChatAnthropic
@@ -223,5 +233,5 @@ def get_fast_llm() -> BaseChatModel:
         model=settings.anthropic_fast_model,
         api_key=settings.anthropic_api_key,
         max_tokens=2048,
-        temperature=settings.llm_temperature,
+        **_temp_kwargs(),
     )

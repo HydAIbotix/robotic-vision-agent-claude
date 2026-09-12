@@ -2646,9 +2646,19 @@ def reset_all(db: Session = Depends(get_db)):
         for f in plans_dir.glob("*.json"):
             f.unlink(missing_ok=True)
 
+    # Cloud parity: also delete the ARCHIVED copies in the object store (MinIO/S3) so a Reset clears
+    # them everywhere, exactly like local. Scoped to what Reset removes — plans, run results, run
+    # screenshots — so exploration artifacts (app_map.json, screenshots/exploration_*) are preserved.
+    # No-op unless ARCHIVE_TO_OBJECT_STORE is on.
+    try:
+        from ports.archive import delete_prefix
+        delete_prefix("test_plans/", "results/", "screenshots/run-")
+    except Exception:
+        pass
+
     return {"status": "ok",
             "message": ("Cleared test runs, execution screenshots, results, generated plans, and "
-                        "uploaded test cases. App exploration and configuration preserved.")}
+                        "uploaded test cases (DB + object store). App exploration and configuration preserved.")}
 
 
 @app.get("/api/runs/{run_id}/screenshots")

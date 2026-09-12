@@ -1347,6 +1347,18 @@ sources; both fixed for ALL test cases (permanent, config-driven, no regression)
   (login skipped), not an app bug — the user correctly does not expect auto-repair to "fix" it. The plan
   determinism fixes above are the real fix; the earlier `20f7740` (TC-RPS-003) is likewise a false
   positive to delete.
+- ⚠️ **`temperature` is DEPRECATED on Claude Opus 4.8** — sending it 400s ("`temperature` is deprecated
+  for this model"). The determinism commit above briefly set `temperature=0` and broke plan generation.
+  Fixed: `llm_temperature` now defaults to **None** and `vision_agent/llm._temp_kwargs()` OMITS the
+  param unless a numeric value is set, so it is never sent to Opus 4.8. Plan consistency does NOT depend
+  on temperature — it comes from the content-based `version_hash` (cached plan reused verbatim across
+  re-explores) + the auth-first prompt rule. (Set a numeric `LLM_TEMPERATURE` only for an older model.)
+- **Reset now clears the object store too (cloud parity).** `/api/reset` deletes DB rows (works on
+  Postgres) + local files as before, and now also deletes the ARCHIVED copies in MinIO/S3 via
+  `ports.archive.delete_prefix("test_plans/", "results/", "screenshots/run-")` — scoped to exactly what
+  Reset removes, so exploration artifacts (`app_map.json`, `screenshots/exploration_*`) are preserved.
+  No-op unless `ARCHIVE_TO_OBJECT_STORE`. (Single-tenant key layout; multi-tenant tenant-prefixing is a
+  follow-up.)
 
 ### Never
 

@@ -86,3 +86,42 @@ def archive(local_path: str | os.PathLike, *, key: str | None = None) -> int:
     except Exception as e:  # never break an activity because archiving failed
         print(f"  [ARCHIVE] skipped {local_path}: {e}")
         return 0
+
+
+def delete_prefix(*prefixes: str) -> int:
+    """Delete every object under the given key prefix(es) from the object store.
+
+    Used by /api/reset so a cloud Reset also clears the ARCHIVED copies of whatever it removes
+    locally (plans, run results, run screenshots). Pass ONLY the reset-scoped prefixes so exploration
+    artifacts (app_map.json, screenshots/exploration_*) are preserved. No-op unless archiving is
+    enabled; never raises. Single-tenant key layout (the default); multi-tenant would prefix the
+    keys with tenants/<id>/ — a follow-up if pooled multi-tenant archiving is enabled.
+    """
+    if not enabled():
+        return 0
+    try:
+        st = _client()
+        s3, bucket, pfx = st._s3, st._bucket, st._prefix
+        deleted = 0
+        for prefix in prefixes:
+            key_prefix = f"{pfx}/{prefix}" if pfx else prefix
+            token = None
+            while True:
+                kw = {"Bucket": bucket, "Prefix": key_prefix}
+                if token:
+                    kw["ContinuationToken"] = token
+                resp = s3.list_objects_v2(**kw)
+                objs = [{"Key": o["Key"]} for o in resp.get("Contents", [])]
+                if objs:
+                    s3.delete_objects(Bucket=bucket, Delete={"Objects": objs})
+                    deleted += len(objs)
+                if resp.get("IsTruncated"):
+                    token = resp.get("NextContinuationToken")
+                else:
+                    break
+        if deleted:
+            print(f"  [ARCHIVE] deleted {deleted} object(s) from the object store ({', '.join(prefixes)})")
+        return deleted
+    except Exception as e:
+        print(f"  [ARCHIVE] delete skipped: {e}")
+        return 0
