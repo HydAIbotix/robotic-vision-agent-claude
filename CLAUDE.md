@@ -1360,22 +1360,32 @@ sources; both fixed for ALL test cases (permanent, config-driven, no regression)
   No-op unless `ARCHIVE_TO_OBJECT_STORE`. (Single-tenant key layout; multi-tenant tenant-prefixing is a
   follow-up.)
 
-#### Deterministic login prefix — the login-skip fix (the prompt rule alone was NOT enough)
+#### Plan-gap recovery is GENERIC (Claude planning + Tier-3) — no app-specific step injection
 
-Even with `temperature` gone and the "authenticate first" prompt rule, a regenerated TC-RPS-003 plan
-STILL opened with `verify: products` and failed step 1 (`expected 'products', got 'login'`). The LLM
-can't be trusted to prepend login reliably. **Fix (`test_runner/nodes/parse_steps.py`
-`_ensure_login_prefix`, applied to BOTH the Tier-2 fresh plan (before caching) and the Tier-1 cache
-HIT):** if the app is **login-gated** (a screen charting a password input + a sign-in button — found
-via `_find_login_screen`, entry-screen first) and the plan does NOT already authenticate, deterministically
-PREPEND `verify login → type email → type password → tap Sign In`, built from that screen's charted
-elements (ids/coords), with `{valid_…}`/`{invalid_…}` per `credential_scenario`. No LLM → identical
-every run. Idempotent + guarded: no-op when the app isn't login-gated (VPS card station → left alone),
-the scenario isn't valid/invalid, the plan already references a login screen (login/signin aliased) or
-types a password, or the login elements can't be resolved. Verified against the live app_map: skip-plan
-→ login prepended; already-login plan → unchanged; VPS map → unchanged. (Temperature 400 confirmed
-fixed separately: `llm_temperature=None`, a direct Claude call returns text, langchain_anthropic 1.7.2
-omits the param.)
+The planner (Claude, Tier-2) sometimes OMITS a navigation step on regeneration — first observed as a
+skipped login (`verify products` first → fail), then as a skipped cart-open (`add to cart` → `verify
+cart` with no `tap cart` between → `expected 'cart', got 'products'`). These are the SAME class:
+a missing navigation action. **An earlier fix (`_ensure_login_prefix`, deterministic login-step
+injection) was REVERTED** — hardcoding the login sequence (or any per-screen step) is tightly coupled
+to one app/flow and does not generalise. The design principle: plans come from Claude, and **Tier-3
+vision recovers whatever the plan misses** — so it works for any app with no rework. Two generic fixes:
+- **Prompt: NAVIGATION COMPLETENESS rule** (`test_runner/prompts.py` `PLAN_FROM_MAP`): a screen never
+  appears on its own — every step that runs on a screen different from the previous one MUST be
+  preceded by the explicit tap that opens it (from the app_map transitions); never `verify <screen>`
+  unless an earlier step navigated there. States login and cart-open only as *instances* of the general
+  rule, not special cases.
+- **Execution: a wrong-SCREEN verify failure now HANDS OFF TO TIER-3** instead of failing terminally
+  (`run_vision_step.py`, `settings.verify_wrong_screen_recovers`, default True). A verify that fails
+  because we're on a DIFFERENT screen than expected (no `expected_text`) is almost always a missing
+  navigation step → Tier-3 navigates to the objective from the current screen and continues. Text/value
+  mismatches on the RIGHT screen (`expected_text` set, e.g. TC-VPS-009 'PURCHASE') stay TERMINAL — a
+  genuine assertion Tier-3 can't fix by navigating (so run-20's anti-wandering intent holds for real
+  assertions). Verified classification: cart-skip & login-skip → recover; VPS-009 text mismatch →
+  terminal. This makes login-skip, cart-skip, and any future plan gap self-heal via vision, generically.
+- Temperature 400 confirmed fixed (`llm_temperature=None`; a direct Claude call returns text;
+  langchain_anthropic 1.7.2 omits the param). Plan CONSISTENCY still comes from the content-based
+  `version_hash` (cached plan reused) — regeneration is rare, and when it happens the prompt + Tier-3
+  recovery keep it correct.
 
 ### Never
 

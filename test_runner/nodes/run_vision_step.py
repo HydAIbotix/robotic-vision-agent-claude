@@ -1732,7 +1732,25 @@ def run_vision_step(state: TestRunnerState) -> dict:
                 str(last_sr.get("step", "")).startswith("verify:")
                 and not last_sr.get("verification_gap")
             )
-            if is_verify_fail and settings.verify_failure_stops_run:
+            # A pure SCREEN-mismatch verify (on a DIFFERENT screen than expected, no text/value
+            # assertion) is almost always a MISSING NAVIGATION step in the generated plan — NOT a
+            # genuine assertion failure. Hand it to Tier-3 to navigate to the objective from the current
+            # screen (generic recovery for any plan gap, any app — no app-specific step-injection).
+            # Text/value mismatches on the RIGHT screen (expected_text set) stay terminal.
+            _screen_only_miss = bool(
+                last_sr.get("expected_screen")
+                and last_sr.get("actual_screen")
+                and last_sr.get("actual_screen") != last_sr.get("expected_screen")
+                and not last_sr.get("expected_text")
+            )
+            _verify_terminal = is_verify_fail and not (
+                _screen_only_miss and settings.verify_wrong_screen_recovers
+            )
+            if is_verify_fail and not _verify_terminal:
+                print(f"  [RUN] → verify landed on the WRONG screen "
+                      f"(expected {last_sr.get('expected_screen')!r}, got {last_sr.get('actual_screen')!r}); "
+                      f"likely a missing navigation step → handing to Tier-3 to recover (not terminal).")
+            if _verify_terminal and settings.verify_failure_stops_run:
                 why = last_sr.get("observation") or last_sr.get("note") or "verification failed"
                 print(f"\n  [RUN] TIER-1/2 EXECUTION: FAILED at step {len(step_results)} (verify assertion) — {why}")
                 print("  [RUN] → verify assertion FAILED; NOT retrying via Tier-3 "

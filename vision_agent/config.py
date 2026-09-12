@@ -353,6 +353,14 @@ class Settings(BaseSettings):
     # COMPLETES the step, it is not an outcome retry. Applies to ALL backends (playwright/real/demo).
     # Set False to restore the old always-Tier-3 behaviour. See CLAUDE.md.
     verify_failure_stops_run: bool = True
+    # EXCEPTION to the above: when a verify fails purely because we are on the WRONG SCREEN (a screen
+    # mismatch, not a text/value assertion), that is almost always a MISSING NAVIGATION step in the
+    # generated plan — recoverable by Tier-3 vision navigating to the objective from the current screen.
+    # When True (default), such screen-only misses DO hand off to Tier-3 (generic recovery for any plan
+    # gap / any app), while text/value mismatches on the RIGHT screen stay terminal (genuine assertions
+    # Tier-3 can't fix by navigating). This is what makes Claude-planning + Tier-3 robust without any
+    # app-specific step-injection. Set False to make every verify failure terminal.
+    verify_wrong_screen_recovers: bool = True
     # Save an annotated BEFORE screenshot (the last camera frame with a crosshair at the exact camera
     # pixel the arm will touch) and the AFTER frame (the /screen/click response image) for every real
     # tap, into the run's per-run screenshots folder with identifiable names (before_<cmd>_at_<u>-<v>.png

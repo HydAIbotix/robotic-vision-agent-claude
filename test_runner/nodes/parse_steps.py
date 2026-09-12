@@ -118,104 +118,6 @@ def _tier3_plan(tc: dict, app_map: dict | None, credentials: dict) -> tuple[list
     return data.get("planned_steps") or [], data.get("credential_scenario", "valid")
 
 
-_EMAIL_KW  = ("email", "user")
-_PWD_KW    = ("password", "passwd")
-_SIGNIN_KW = ("sign in", "signin", "sign-in", "log in", "login", "log-in", "submit")
-_LOGIN_ALIASES = {"login", "signin", "logon", "signinscreen", "loginscreen"}
-
-
-def _norm_sid(s: str) -> str:
-    return (s or "").lower().replace("_", "").replace("-", "").replace(" ", "")
-
-
-def _is_login_ref(ref: str, login_sid: str) -> bool:
-    a, b = _norm_sid(ref), _norm_sid(login_sid)
-    return bool(a) and (a == b or (a in _LOGIN_ALIASES and b in _LOGIN_ALIASES))
-
-
-def _match_el(elements, want_types, keywords):
-    for el in elements or []:
-        if el.get("type") not in want_types:
-            continue
-        hay = f"{el.get('id','')} {el.get('label') or ''} {el.get('testid') or ''}".lower()
-        if any(k in hay for k in keywords):
-            return el
-    return None
-
-
-def _find_login_screen(app_map):
-    """Return (screen_id, elements) for the app's login screen, or (None, None) when the app is NOT
-    login-gated (e.g. the VPS card station). A login screen is the entry screen (or any screen) that
-    charts BOTH a password input and a sign-in button."""
-    screens = (app_map or {}).get("screens") or {}
-    order, entry = [], (app_map or {}).get("entry_screen")
-    if entry and entry in screens:
-        order.append(entry)
-    order += [s for s in screens if s not in order]
-    for sid in order:
-        els = (screens.get(sid) or {}).get("elements") or []
-        if _match_el(els, ("input",), _PWD_KW) and _match_el(els, ("button",), _SIGNIN_KW):
-            return sid, els
-    return None, None
-
-
-def _ensure_login_prefix(plan, app_map):
-    """DETERMINISTIC login guarantee (no LLM). Every test starts logged OUT (reset_to_entry), so a
-    plan that opens on a post-login screen fails step 1 ("expected products, got login"). When the app
-    is login-gated (a screen with a password input + sign-in button) and the plan does NOT already
-    authenticate, prepend the login sequence built from that screen's CHARTED elements — so the plan
-    is correct and identical every run, regardless of the LLM's whims. Idempotent + safe: no-op when
-    the app isn't login-gated, the scenario isn't valid/invalid, the plan already logs in (a
-    login-screen reference or a password `type` anywhere), or the login elements can't be resolved."""
-    try:
-        if not isinstance(plan, dict):
-            return plan
-        scenario = plan.get("credential_scenario", "valid")
-        if scenario not in ("valid", "invalid"):
-            return plan
-        steps = plan.get("steps") or []
-        login_sid, els = _find_login_screen(app_map)
-        if not login_sid:
-            return plan
-        for s in steps:   # already authenticating? don't double up.
-            if _is_login_ref(s.get("screen_id") or s.get("expected_screen") or "", login_sid):
-                return plan
-            if s.get("action") == "type" and "password" in (s.get("element_id", "") or "").lower():
-                return plan
-        email_el = _match_el(els, ("input",), _EMAIL_KW)
-        pwd_el   = _match_el(els, ("input",), _PWD_KW)
-        btn_el   = _match_el(els, ("button",), _SIGNIN_KW)
-        if not (email_el and pwd_el and btn_el):
-            return plan
-        device = next((s.get("device") for s in steps if s.get("device")), None)
-        email_val = "{valid_email}"    if scenario == "valid" else "{invalid_email}"
-        pwd_val   = "{valid_password}" if scenario == "valid" else "{invalid_password}"
-
-        def _mk(action, el, value=None, desc=""):
-            cx, cy = ((el.get("center") or [0, 0]) + [0, 0])[:2]
-            step = {"action": action, "channel": "robot", "screen_id": login_sid,
-                    "element_id": el["id"], "px": int(cx), "py": int(cy), "description": desc}
-            if device:
-                step["device"] = device
-            if value is not None:
-                step["value"] = value
-            return step
-
-        login_steps = [
-            {"action": "verify", "channel": "validation",
-             "description": "The login screen is visible at the start of the test",
-             "expected_screen": login_sid},
-            _mk("type", email_el, email_val, "Enter the account email address"),
-            _mk("type", pwd_el,   pwd_val,   "Enter the account password"),
-            _mk("tap",  btn_el,   None,      "Tap Sign In to submit credentials"),
-        ]
-        print(f"  [PLAN] login-prefix: prepended deterministic login on '{login_sid}' (plan started post-login)")
-        return {**plan, "steps": login_steps + steps}
-    except Exception as exc:
-        print(f"  [PLAN] login-prefix skipped: {exc}")
-        return plan
-
-
 def parse_steps(state: TestRunnerState) -> dict:
     tc          = state["current_tc"]
     app_map     = state.get("app_map")
@@ -249,9 +151,6 @@ def parse_steps(state: TestRunnerState) -> dict:
         # reused value (e.g. paid with a charted mock-card button instead of entering the issued
         # card) is corrected at run time without forcing a regenerate. Idempotent on good plans.
         cached = _apply_captured_reuse_norm(cached, app_map, "cache")
-        # Deterministic net: a cached plan that opens post-login (LLM skipped auth) gets the login
-        # sequence prepended at load — fixes it without a regenerate. No-op if it already logs in.
-        cached = _ensure_login_prefix(cached, app_map)
         _print_plan(cached)
         return {
             "structured_plan":   cached,
@@ -283,9 +182,6 @@ def parse_steps(state: TestRunnerState) -> dict:
             # Deterministic net: a reuse-of-captured-value completion tap that never enters the value
             # (and whose screen has no charted input for it) → vision_required so live vision enters it.
             plan = _apply_captured_reuse_norm(plan, app_map, "tier2")
-            # Deterministic net: guarantee the plan authenticates first (the LLM sometimes skips login).
-            # Applied BEFORE caching so the corrected plan is what gets stored + reused.
-            plan = _ensure_login_prefix(plan, app_map)
 
             n = len(plan.get("steps") or [])
             print(f"  [PLAN] TIER-2: SUCCESS — produced {n}-step plan (cached for reuse)")
