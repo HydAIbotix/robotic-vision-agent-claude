@@ -1413,6 +1413,44 @@ A TC-RPS-003 run PASSED via Tier-3 recovery (the wrong-screen handoff works), su
   build, diagnose, …). The AutoRepair page already renders `failed` (✕ red), so the pipeline now shows
   exactly where it stopped alongside the "repair incomplete" banner.
 
+### Recent progress (2026-09-12, run-3 GCE) — Tier-3 BRIDGES the gap then RESUMES the plan; stop-at-objective; no weak fuzzy misclick
+
+A TC-RPS-003 run (plan had NO login step; login was uncharted) PASSED via Tier-3, but with two design
+flaws the user flagged: (1) after Tier-3 completed the payment it clicked **"Card Inventory"** in the
+left menu (a bad fuzzy match `pay_with_mock_card_button`→`Card Inventory`, keyword overlap=1 on "card"),
+restarted, failed, and triggered an **unnecessary auto-repair**; and (2) after login was resolved, Tier-3
+kept driving **every** subsequent step by vision instead of resuming the fast structured plan. The user's
+principle: *"Tier-3 should be invoked only if it is going off the test plan at each step"* — bridge only the
+off-plan gap, then resume Tier-1/2. Three GENERIC fixes (no app-specific ids/steps), 120 tests pass (same 8
+pre-existing env-only fails):
+
+- **Bridge-and-resume for a wrong-screen verify** (`test_runner/nodes/run_vision_step.py::_execute_structured_plan`).
+  A `verify` that lands on a DIFFERENT screen than expected **with no text/value assertion** (`_screen_only`,
+  gated by `verify_wrong_screen_recovers`) is almost always a MISSING NAVIGATION/entry patch in the plan (e.g.
+  the run reset to login but step 1 expects `products`). Instead of failing the whole plan → a full Tier-3
+  takeover, it now runs the SAME bounded `_run_inline_vision` segment used for `vision_required` (vision only
+  until the screen advances/stalls), **RE-VERIFIES**, and on success records the step as `method:"tier3_bridge"`
+  (+ `recovered_by_tier3`) and **`continue`s the structured loop** — so the 0-LLM plan drives every step it can
+  and stops at its OWN final verify. If the bridge/re-verify doesn't reach the expected screen it falls through
+  to the existing outer Tier-3 resume (safety net) — so worst case is identical to before (no regression), best
+  case the fast plan resumes. This is the direct fix for "Tier-3 ran vision for every step after login".
+- **Tier-3 stops at the objective — no wandering after completion** (`_run_tier3_continue`). The step-through
+  loop now **breaks the moment the VisionAgent reports `outcome=="success"`** (its finalize verdict is the
+  authoritative "done" signal), and goal-screen matching uses `_screens_equivalent` (separator/substring
+  tolerant) instead of `==`. This is why payment could complete yet the loop ran again and clicked "Card
+  Inventory": the DOM landed on `payment_successful` while the plan's last verify named `order_result`, so a
+  name-only `==` never matched and it looped. The success verdict + equivalent match stop it cleanly.
+- **Fuzzy element matcher rejects weak cross-purpose matches** (`vision_agent/nodes/execute.py::_find_element`,
+  step-5 keyword-overlap fallback). A **multi-word** target now requires **≥2** shared significant words; only a
+  single-word target may match on 1. So `pay_with_mock_card_button` no longer matches `Card Inventory` on the
+  lone shared word "card" — a too-weak match is treated as **not found**, so the caller (Tier-3 vision /
+  uncharted-element handling) locates the real element instead of tapping an unrelated nav link. Generic — no
+  app-specific ids; it just refuses to bet on one weak keyword.
+- **Consequence for the unnecessary auto-repair:** with the bridge-and-resume + stop-at-objective + no-misclick,
+  TC-RPS-003 now completes and the run PASSES, so `auto_repair_on_failure` never fires — the spurious repair was
+  a downstream symptom of the wander-and-fail, not a separate bug. **RESTART the backend** (uvicorn has no
+  `--reload`) to load these `run_vision_step.py` / `execute.py` changes.
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login

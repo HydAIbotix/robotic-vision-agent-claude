@@ -74,10 +74,23 @@ def _find_element(analysis: dict, target: str) -> dict | None:
             overlap  = len(tgt_words & el_words)
             if overlap > best_score:
                 best_score, best_el = overlap, el
-        if best_el:
+        # Guard against weak, cross-purpose matches. A multi-word target that overlaps an
+        # element on only ONE common word is almost always the WRONG element — e.g.
+        # "pay_with_mock_card_button" vs "Card Inventory" share only "card", so a pay action
+        # would misclick a nav link. Require at least 2 shared significant words when the
+        # target itself has 2+; a single-word target (e.g. "pay") may legitimately match on 1.
+        # This is generic (no app-specific ids) — it just refuses to bet on one weak keyword.
+        min_overlap = 1 if len(tgt_words) < 2 else 2
+        if best_el and best_score >= min_overlap:
             matched_label = best_el.get("label", "")
             print(f"    [MATCH] '{target}' → '{matched_label}' (keyword overlap={best_score})")
             return best_el
+        if best_el:
+            # A match existed but was too weak to trust → treat as not found, so the caller
+            # (Tier-3 vision / uncharted-element handling) locates it properly instead of
+            # tapping an unrelated element.
+            print(f"    [NO-MATCH] '{target}' — best keyword overlap only {best_score} "
+                  f"(< {min_overlap} required for a {len(tgt_words)}-word target); rejected as too weak")
 
     return None
 

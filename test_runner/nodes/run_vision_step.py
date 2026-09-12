@@ -954,6 +954,55 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             if not success:
                 print(f"             {observation}")
 
+            # ── BRIDGE-AND-RESUME: recover a wrong-screen verify INLINE, then CONTINUE the plan ──
+            # A verify that landed on a DIFFERENT screen than expected (with no text/value assertion)
+            # is almost always a MISSING NAVIGATION/entry patch in the plan — e.g. the run reset to the
+            # login screen but the plan's first step expects 'products' (login was never charted). The
+            # generic, app-agnostic recovery is to bridge JUST that gap with a BOUNDED vision segment,
+            # then RE-VERIFY and RESUME the fast (0-LLM) structured plan — so Tier-3 vision handles only
+            # the off-plan patch and the structured plan drives every step it can, and stops at its own
+            # final verify. This is what the user asked for: "Tier-3 should be invoked only if it is
+            # going off the test plan at each step" — bridge the gap, don't take over the whole flow.
+            # (Replaces failing the entire plan → a full Tier-3 takeover that then ran, and could wander
+            # through, the entire remainder.) A text/value mismatch on the RIGHT screen is a genuine
+            # assertion → NOT bridged (falls through to the terminal/handoff path unchanged).
+            _screen_only = bool(expected and actual and actual != expected and not expected_text)
+            if not success and _screen_only and settings.verify_wrong_screen_recovers:
+                print(f"    {i:>2}. verify  on the WRONG screen (expected {expected!r}, got {actual!r}) — "
+                      f"bridging the off-plan gap with bounded vision, then resuming the structured plan")
+                if run_id:
+                    broadcaster.emit(run_id, {"event": "log", "run_id": run_id, "test_id": test_id,
+                        "message": f"[Tier-3 bridge] plan step {i} expected '{expected}' but the screen is "
+                                   f"'{actual}' — vision is bridging the gap, then the fast plan resumes…"})
+                bridge_desc = (f"{desc} (reach the '{expected}' screen to continue the test)"
+                               if desc else f"navigate to the '{expected}' screen")
+                seg_steps, seg_ok = _run_inline_vision(
+                    bridge_desc, captured, credentials, scenario, app_map, run_id, test_id, i)
+                # The bridge's own vision steps are threaded into the audit trail as recovery steps.
+                for _s in seg_steps:
+                    _s.setdefault("recovered_by_tier3", True)
+                step_results.extend(seg_steps)
+                if seg_ok:
+                    # Re-verify from the bridged screen (fresh capture on camera backends).
+                    if settings.robot_backend != "playwright":
+                        last_screenshot = _cap("verify_rebridge", i) or last_screenshot
+                    vr2 = run_validate_pipeline(
+                        expected_screen=expected, expected_text=expected_text,
+                        step_description=desc, image_path=last_screenshot,
+                        app_map=app_map or {}, backend=settings.robot_backend,
+                        save_path=verify_save, value_element_id=value_element_id)
+                    if vr2.get("success"):
+                        success     = True
+                        actual      = vr2.get("actual_screen", actual)
+                        method      = "tier3_bridge"
+                        observation = (f"Plan expected '{expected}' but the run was on a different screen; "
+                                       f"Tier-3 vision bridged the gap and the structured plan resumed.")
+                        note        = "off-plan gap bridged by Tier-3 vision — structured plan resumed"
+                        print(f"    {i:>2}. verify  gap bridged → now on {expected!r} → PASS; "
+                              f"resuming the structured plan")
+                # If the bridge or the re-verify did not reach the expected screen, fall through to the
+                # normal failure path below (→ the outer Tier-3 resume, the existing safety net).
+
             _vshot = last_screenshot if settings.robot_backend == "playwright" else ""
             sr = {
                 "step": f"verify: {desc}",
@@ -970,9 +1019,13 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             if vr.get("human_review"):
                 sr["human_review"] = True
                 sr["note"] = vr.get("note", "")
-            # Surface the intent-rescue note (stale expected_screen validated by described outcome).
-            if method == "intent_vision" and note:
+            # Surface the intent-rescue / gap-bridge note (validated by described outcome / vision bridge).
+            if method in ("intent_vision", "tier3_bridge") and note:
                 sr["note"] = note
+            if method == "tier3_bridge":
+                # The plan step ultimately PASSED, but only after Tier-3 bridged an off-plan gap —
+                # flag it so the UI can badge the run as Tier-3-recovered.
+                sr["recovered_by_tier3"] = True
             step_results.append(sr)
             if run_id: broadcaster.emit(run_id, {
                 "event": "step_result", "run_id": run_id, "test_id": test_id,
@@ -1590,13 +1643,15 @@ def _run_tier3_continue(
     # Pass planned_steps=[] each time so plan_steps generates fresh, correctly-formatted
     # steps from the REAL screen (pre-populating from the structured plan would inject
     # hallucinated element names).
+    from vision_agent.nodes.validate_pipeline import _screens_equivalent
+
     agent = create_agent()
     all_t3_steps: list[dict] = []
     t3_result: dict = {}
     MAX_ITERS = 5
     for _it in range(MAX_ITERS):
         before_dom = _dom()
-        if goal_screen and before_dom == goal_screen:
+        if goal_screen and _screens_equivalent(before_dom, goal_screen):
             print(f"  [TIER-3] Objective screen '{goal_screen}' reached — flow complete")
             break
 
@@ -1627,8 +1682,19 @@ def _run_tier3_continue(
         t3_result = agent.invoke(initial)
         all_t3_steps.extend(t3_result.get("step_results") or [])
 
+        # AUTHORITATIVE STOP: the vision agent judged the OBJECTIVE achieved (its finalize node set
+        # outcome='success'). Stop immediately — do NOT run another step-through iteration. This is
+        # what prevents the observed "payment completed, then it clicked 'Card Inventory' and started
+        # over" wandering: once the goal is met, the DOM screen name may not literally equal the plan's
+        # last expected_screen (e.g. the app lands on 'payment_successful' while the plan's final verify
+        # named 'order_result'), so a name-only check would loop again and wander. The agent's own
+        # success verdict is the reliable "done" signal, complemented by screen-equivalence below.
+        if t3_result.get("outcome") == "success":
+            print(f"  [TIER-3] step-through {_it + 1}: objective achieved (vision outcome=success) — stopping")
+            break
+
         after_dom = _dom()
-        if goal_screen and after_dom == goal_screen:
+        if goal_screen and _screens_equivalent(after_dom, goal_screen):
             print(f"  [TIER-3] step-through {_it + 1}: reached objective '{goal_screen}'")
             break
         if after_dom == before_dom:
