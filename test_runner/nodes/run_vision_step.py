@@ -51,6 +51,36 @@ def _resolve_credentials(value: str, credential_scenario: str, credentials: dict
     )
 
 
+def _plan_input_values(plan_steps: list, captured: dict, scenario: str, credentials: dict) -> dict:
+    """The literal input VALUES the structured plan enters, keyed by the target field id.
+
+    This is the bridge that lets Tier-3 vision (and the inline-vision bridge) SHARE DATA with the
+    0-LLM structured plan: when a screen genuinely needs an input that the plan already specifies
+    (e.g. the card number the plan's `type: 0005322931` step would have entered), Tier-3 reuses that
+    EXACT value instead of inventing a placeholder like '1234' and re-planning against it forever.
+
+    Generic — no app-specific ids: every `type` step contributes `{element_id: value}` (falling back
+    to the screen id, then a positional key, when the step has no element_id). Credential and
+    `{{captured.*}}` placeholders are resolved; blanks and still-unresolved placeholders are dropped.
+    The configured password is skipped (it is already threaded via cred_hint) so it never appears as a
+    plain 'field value'; the email is non-secret and kept as useful signal."""
+    _sc  = (credentials or {}).get(scenario) or (credentials or {}).get("valid") or {}
+    _pw  = str(_sc.get("password", "")).strip()
+    vals: dict[str, str] = {}
+    for st in plan_steps or []:
+        if st.get("action") != "type":
+            continue
+        v = _resolve_credentials(str(st.get("value", "")), scenario, credentials)
+        for _n, _cv in (captured or {}).items():
+            v = v.replace(f"{{{{captured.{_n}}}}}", str(_cv))
+        v = v.strip()
+        if not v or "{{captured." in v or (_pw and v == _pw):
+            continue
+        key = st.get("element_id") or st.get("screen_id") or f"input_{len(vals) + 1}"
+        vals[key] = v
+    return vals
+
+
 def _load_device_map() -> dict[str, dict]:
     """Load devices from DB keyed by alias (e.g. 'TVM').  Each entry carries the robot
     position plus the linked Kiosk-ID and that kiosk's URL (so a playwright run can switch
@@ -499,7 +529,8 @@ def _inline_vision_fast(desc: str, captured: dict, run_id: str, test_id: str,
 
 
 def _run_inline_vision(desc: str, captured: dict, credentials: dict, scenario: str,
-                       app_map: dict, run_id: str, test_id: str, step_index: int) -> tuple[list[dict], bool]:
+                       app_map: dict, run_id: str, test_id: str, step_index: int,
+                       plan_values: dict | None = None) -> tuple[list[dict], bool]:
     """Run a BOUNDED Claude-vision segment for a single vision_required step, then hand control
     back to the structured executor.
 
@@ -521,12 +552,18 @@ def _run_inline_vision(desc: str, captured: dict, credentials: dict, scenario: s
                      f"never invent:\n  email: {_sc.get('email','')}\n  password: {_sc.get('password','')}")
     else:
         cred_hint = "\n\nDo NOT attempt to log in."
+    # Known values = the values the STRUCTURED PLAN specifies (e.g. a card number) merged with any
+    # runtime-captured values (captured wins — it's live, more authoritative). This is how the bridge
+    # SHARES DATA with the 0-LLM plan: a field the plan already fills is entered with the plan's exact
+    # value instead of an invented placeholder ('1234').
+    known = {**(plan_values or {}), **(captured or {})}
     cap_hint = ""
-    if captured:
-        _cv = "\n".join(f"  {k} = {v}" for k, v in captured.items() if str(v).strip())
+    if known:
+        _cv = "\n".join(f"  {k} = {v}" for k, v in known.items() if str(v).strip())
         if _cv:
-            cap_hint = ("\n\nUse these EXACT values captured earlier in this test when a field needs "
-                        "one (e.g. re-entering an issued card number); never invent one:\n" + _cv)
+            cap_hint = ("\n\nUse these EXACT values from the test plan / captured earlier in this test "
+                        "when a field needs one (e.g. entering the card number); NEVER invent or guess "
+                        "a placeholder value (do not type '1234'):\n" + _cv)
     task = (
         f"Sub-task on the CURRENT screen: {desc}\n\n"
         f"Identify buttons and fields from what you ACTUALLY SEE in the screenshot. Accomplish ONLY "
@@ -546,7 +583,7 @@ def _run_inline_vision(desc: str, captured: dict, credentials: dict, scenario: s
     # For the common "enter the captured value and complete the order" sub-task this is ~1 LLM call
     # instead of the full agent's ~6, fixing the observed multi-second stall on E2E step 19. Falls
     # back to the full agent only when it can't finish (playwright: screen didn't advance).
-    fast_steps, fast_advanced = _inline_vision_fast(desc, captured, run_id, test_id, step_index)
+    fast_steps, fast_advanced = _inline_vision_fast(desc, known, run_id, test_id, step_index)
     seg_steps.extend(fast_steps)
     if fast_advanced:
         return seg_steps, True
@@ -977,7 +1014,8 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 bridge_desc = (f"{desc} (reach the '{expected}' screen to continue the test)"
                                if desc else f"navigate to the '{expected}' screen")
                 seg_steps, seg_ok = _run_inline_vision(
-                    bridge_desc, captured, credentials, scenario, app_map, run_id, test_id, i)
+                    bridge_desc, captured, credentials, scenario, app_map, run_id, test_id, i,
+                    plan_values=_plan_input_values(plan.get("steps") or [], captured, scenario, credentials))
                 # The bridge's own vision steps are threaded into the audit trail as recovery steps.
                 for _s in seg_steps:
                     _s.setdefault("recovered_by_tier3", True)
@@ -1378,6 +1416,7 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             print(f"    {i:>2}. [VISION REQUIRED — inline] {desc}")
             seg_steps, seg_ok = _run_inline_vision(
                 desc, captured, credentials, scenario, app_map, run_id, test_id, i,
+                plan_values=_plan_input_values(plan.get("steps") or [], captured, scenario, credentials),
             )
             step_results.extend(seg_steps)
             # Only bail to the outer Tier-3 resume when the segment stalled AND there are still
@@ -1607,6 +1646,21 @@ def _run_tier3_continue(
                 "these (e.g. re-entering an issued card number), use the EXACT value below; never "
                 "invent or guess one:\n" + _cv
             )
+    # ── INPUT VALUES from the structured plan — SHARE DATA with the 0-LLM plan ─────────────────
+    # The value that made a field fail may live in a plan `type` step BEFORE the handoff point (e.g.
+    # `type: 0005322931` into the mock-card field two steps back), so it is NOT in `captured` and NOT
+    # in the remaining-steps list. Without it Tier-3 sees the card input and INVENTS '1234' → "card
+    # not issued" → re-plans forever (the exact failure in run_console (3)). Hand Claude the plan's
+    # own input values, keyed by field, so it reuses the RIGHT value instead of guessing. Generic —
+    # any app's `type` steps contribute; the configured password is excluded (already in cred_hint).
+    _plan_vals = _plan_input_values(plan_steps_all, captured, _scenario, _creds)
+    if _plan_vals:
+        _pv = "\n".join(f"  {k} = {v}" for k, v in _plan_vals.items())
+        task_description += (
+            "\n\nINPUT VALUES the test plan specifies — when a screen/field needs a value the plan "
+            "already provides (e.g. a card number, amount, or code), use the EXACT value below for "
+            "that field; NEVER invent, guess, or type a placeholder value such as '1234':\n" + _pv
+        )
     # Remaining planned steps give Claude the specific intent for the uncharted tail of the flow.
     _remaining = plan_steps_all[start_step_idx:]
     _rem_lines = [

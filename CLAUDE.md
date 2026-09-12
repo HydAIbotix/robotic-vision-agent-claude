@@ -1451,6 +1451,41 @@ pre-existing env-only fails):
   a downstream symptom of the wander-and-fail, not a separate bug. **RESTART the backend** (uvicorn has no
   `--reload`) to load these `run_vision_step.py` / `execute.py` changes.
 
+### Recent progress (2026-09-12, run-7 GCE) — Tier-3 SHARES the plan's input values (no more invented '1234')
+
+`run_console (3).log`: the bridge-and-resume worked (login/cart gaps bridged, steps 1–8 ran on the fast plan
+and typed the RIGHT card `0005322931`), but the final `order_result` verify failed on the payment screen and
+the handoff to Tier-3 then typed an **invented `1234`** at the mock-card field → "card 1234 is not issued" →
+Tier-3 re-planned against 1234 forever (RETRY 1/2/3) and the run FAILED. Root cause: **Tier-3 had no way to
+learn the card number.** The value lived in a plan `type` step (`type: 0005322931`) that was *behind* the
+handoff index, so it was in neither `captured` (runtime-captured values only) nor the remaining-steps hint —
+Tier-3 saw a card input with no value and guessed. The user's ask: *the 0-LLM plan and Tier-3 must share data
+(input values, screen state) so a field the plan already fills is entered with the plan's exact value, not a
+re-invented placeholder.* Fixed generically (120 tests pass, same 8 pre-existing env-only fails):
+
+- **New `_plan_input_values(plan_steps, captured, scenario, credentials)`** (`run_vision_step.py`) collects
+  every literal `type` value from the WHOLE structured plan, **keyed by the step's `element_id`** (falls back
+  to screen id / positional key), resolving credential + `{{captured.*}}` placeholders. Blanks and unresolved
+  placeholders are dropped; the **configured password is excluded** (already threaded via `cred_hint`, so it
+  never appears as a plain field value — the email is kept as non-secret signal). Generic — no app-specific ids.
+- **Threaded into BOTH recovery paths so plan⇄Tier-3 share data:**
+  - `_run_tier3_continue` adds an **"INPUT VALUES the test plan specifies"** block to the vision task
+    (alongside the existing captured-values + remaining-steps hints): *use the EXACT value for that field;
+    NEVER invent or type a placeholder such as '1234'.* So the full Tier-3 planner emits `type: 0005322931`.
+  - `_run_inline_vision` gained a `plan_values` param; it merges `{**plan_values, **captured}` (captured wins —
+    it's live) into the `known` dict used for BOTH the fast path (`_inline_vision_fast`'s provided values) and
+    the full-agent `cap_hint`. Both `_execute_structured_plan` call sites (the `vision_required` sentinel and
+    the wrong-screen **bridge**) pass `plan_values=_plan_input_values(plan steps, captured, …)`, computed at
+    call time so a value captured mid-run is included.
+- **Effect:** whenever a recovered/bridged screen needs an input the plan already specifies, vision reuses the
+  plan's exact value (the issued card `0005322931`) instead of inventing `1234` — the plan and Tier-3 now
+  operate in sync, sharing input values (and, already, screen state via the no-reset handoff + `captured`).
+- ⚠️ **Note on the Tier-1/2 step-9 miss (separate, app-map charting):** step 7 focused `mock_card_number_input`
+  by COORD (47px snap), not testid — that element has no `testid` in the current app_map, so a re-exploration
+  that charts the mock-card reveal WITH testids would make the fast path more robust (see the run-9 note on
+  re-exploring RPS so the "Use Mock Card" reveal is charted). The input-sharing fix above is what makes the
+  Tier-3 recovery itself correct regardless. **RESTART the backend** to load the `run_vision_step.py` changes.
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login
