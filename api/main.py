@@ -450,6 +450,20 @@ def _repair_stage(repair_id: str, update: dict):
         job["updated_at"] = datetime.utcnow().isoformat()
 
 
+def _repair_fail_running_stages(repair_id: str, error: str = ""):
+    """When a repair errors, any stage still 'running' would otherwise render as 'Working' forever in
+    the UI (e.g. Apply Fix when apply_patch raised 'find-text not found'). Flip every in-flight stage
+    to 'failed' so the pipeline view shows exactly where it stopped. Generic — covers all stages."""
+    with _repair_lock:
+        job = _repair_jobs.get(repair_id) or {}
+        stages = job.get("stages") or {}
+        for name, st in list(stages.items()):
+            if (st or {}).get("status") == "running":
+                stages[name] = {**st, "status": "failed",
+                                **({"observation": error} if error and not (st or {}).get("observation") else {})}
+        job["updated_at"] = datetime.utcnow().isoformat()
+
+
 def _run_repair_job(repair_id: str, req: RepairRequest):
     from repair_agent.repair_failed_test import run_repair
     auto_pr = settings.repair_auto_pr if req.auto_pr is None else req.auto_pr
@@ -474,6 +488,7 @@ def _run_repair_job(repair_id: str, req: RepairRequest):
             job["updated_at"] = datetime.utcnow().isoformat()
     except Exception as e:
         print(f"  [REPAIR] job {repair_id} failed: {e}")
+        _repair_fail_running_stages(repair_id, str(e))
         _repair_set(repair_id, status="failed", error=str(e))
     finally:
         with _repair_lock:
@@ -3394,6 +3409,7 @@ def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list):
                             "cancelled": bool(result.get("cancelled")), "pr_url": pr_url})
     except Exception as e:
         print(f"  [REPAIR] Auto-repair error: {e}")
+        _repair_fail_running_stages(repair_id, str(e))
         _repair_set(repair_id, status="failed", error=str(e))
         _broadcast(run_id, {"event": "repair_done", "run_id": run_id, "repair_id": repair_id,
                             "test_id": test_id, "success": False, "error": str(e)})

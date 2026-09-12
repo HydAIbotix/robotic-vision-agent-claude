@@ -1602,6 +1602,12 @@ def _run_tier3_continue(
         cap = str(Path(settings.screenshots_dir) / f"tier3_resume_{tc['test_id']}_{_it}_{int(time.time())}.png")
         screen_img = robot.capture_screen(cap)["image_path"]
         print(f"  [TIER-3] step-through {_it + 1}/{MAX_ITERS} — on '{before_dom or '?'}', planning from current screen")
+        # Keep the live feed alive during Tier-3 recovery (vision planning/replanning is otherwise
+        # silent for several seconds, so the UI looked stuck on the failed step).
+        if run_id:
+            broadcaster.emit(run_id, {"event": "log", "run_id": run_id, "test_id": tc["test_id"],
+                "message": f"[Tier-3] recovering (step-through {_it + 1}/{MAX_ITERS}) on "
+                           f"'{before_dom or '?'}' — re-planning via vision…"})
 
         initial: VisionAgentState = {
             "task_description": task_description,
@@ -1784,6 +1790,10 @@ def run_vision_step(state: TestRunnerState) -> dict:
                 f"(method={last_sr.get('method', '?')}) — reason: {_why!r}"
             )
             print(f"  [RUN] → handing off to TIER-3 (vision agent), resuming from the CURRENT screen (no reset)")
+            if run_id:
+                broadcaster.emit(run_id, {"event": "log", "run_id": run_id, "test_id": tc["test_id"],
+                    "message": "[Tier-3] Plan step failed — vision agent taking over from the current "
+                               "screen to recover (this may take a few seconds while it re-plans)…"})
             t3_result = _run_tier3_continue(state, tc, completed, failed_idx, captured=captured)
 
             t3_steps   = t3_result.get("step_results") or []
@@ -1792,11 +1802,18 @@ def run_vision_step(state: TestRunnerState) -> dict:
             print(f"\n  [RUN] TIER-3 (vision) RESULT: {tc['test_id']}  {t3_outcome.upper()}  ({t3_passed}/{len(t3_steps)} steps passed)")
             if t3_result.get("screen_history"):
                 print(f"           Journey: {' -> '.join(t3_result['screen_history'])}")
+            # A Tier-3 handoff occurred: any step that failed BEFORE the handoff but is part of a run
+            # that ultimately PASSED was recovered by vision. Flag it so the UI can render those steps
+            # as "recovered" (amber) rather than a hard fail, and badge the test as Tier-3-recovered.
+            for _r in t3_steps:
+                if _r.get("success") is False:
+                    _r["recovered_by_tier3"] = True
             test_result: TestResult = {
                 "test_id":        tc["test_id"],
                 "summary":        tc["summary"],
                 "outcome":        t3_outcome,
                 "step_results":   t3_steps,
+                "tier3_recovered": True,
                 "vision_summary": (
                     f"Tier-1/2 → Tier-3/{t3_mode} [{backend}] ({t3_outcome}): "
                     f"{t3_result.get('summary', '')}"

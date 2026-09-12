@@ -105,6 +105,15 @@ STRICT RULES:
      emit "verify: cannot log in — no credentials provided in task" and stop.
    - You normally should NOT be on a login screen mid-test. If you unexpectedly are, the earlier
      session may still be valid; prefer continuing the task over re-authenticating.
+7. STAY ON THE DIRECT PATH — do not wander into unrelated screens. Choose the element that MOST
+   DIRECTLY advances the current task on THIS screen — the primary forward/content action (e.g.
+   "Proceed to Payment", "Pay", "Continue", "Add to Cart", "Checkout"). Do NOT tap left-navigation /
+   sidebar / top-nav / menu items (typically a column of links/buttons down one edge, or a nav bar):
+   they switch to an UNRELATED section and derail the flow, forcing extra recovery steps. Only use a
+   nav/menu item when the task explicitly needs that section AND no direct control exists on this
+   screen. When several elements could plausibly match, prefer the one in the MAIN content area over
+   one in a side/nav menu. Take the shortest correct path; a single wrong navigation costs several
+   recovery steps.
 
 Example (note: "type:" values are illustrative — substitute real values from the Task):
 ["tap: search_input", "type: wireless headphones", "tap: search_button", "verify: results are shown"]

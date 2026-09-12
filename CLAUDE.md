@@ -1387,6 +1387,32 @@ vision recovers whatever the plan misses** — so it works for any app with no r
   `version_hash` (cached plan reused) — regeneration is rare, and when it happens the prompt + Tier-3
   recovery keep it correct.
 
+### Recent progress (2026-09-12, run-2 GCE) — Tier-3 UX + repair-stage status (4 fixes)
+
+A TC-RPS-003 run PASSED via Tier-3 recovery (the wrong-screen handoff works), surfacing four polish items:
+- **Tier-3 wandering reduced (generic prompt).** On the cart screen Tier-3 invented a `card_button` and
+  clicked a LEFT-MENU item at (81,822) before the correct `proceed_to_card_payment_button`, then
+  corrected. Added a "STAY ON THE DIRECT PATH" rule to `vision_agent/prompts.py::PLAN_STEPS`: prefer the
+  primary forward/content action, do NOT tap sidebar/nav/menu items unless the task needs that section,
+  prefer main-content over side-menu when ambiguous. Generic (any app), best-effort (vision is not
+  perfect) — no behaviour coupling.
+- **Live feed no longer freezes during Tier-3** (issue: it stopped at the failed step for several silent
+  seconds). Cause: `LiveMonitor.tsx` had NO branch for `'log'` events, so Tier-3's progress logs were
+  dropped. Added a `'log'` branch (renders the message), and the backend now emits feed `log` events at
+  the Tier-3 handoff and on each Tier-3 step-through/re-plan (`run_vision_step.py`).
+- **Recovered steps are shown as RECOVERED, not failed.** When Tier-3 recovers, `step_results` still
+  contains the Tier-1/2 step that failed → the drill-down showed it red under a PASSED run. Backend flags
+  it (`recovered_by_tier3` per step + `tier3_recovered` on the result); the UI (`Results.tsx` +
+  `LiveMonitor.tsx`) renders a failed step **in a PASSED run** as amber "⟲ recovered by Tier-3" (icon,
+  label, "Initial attempt: … — recovered by Tier-3") plus a card badge "⟲ Tier-3 recovered N". Generic:
+  the signal is simply *failed step + passed run* (the flag is a bonus), so it needs no per-app logic.
+- **Auto-Repair sub-tasks no longer stick on "Working" when a repair errors.** `apply_node` emitted
+  `apply,"running"` then `apply_patch` RAISED (e.g. "Patch find-text was not found"), so the stage never
+  advanced. Now `apply_node` emits `apply,"failed"` on the exception, AND `api/main._repair_fail_running_stages`
+  flips EVERY still-"running" stage to "failed" whenever a repair job errors (generic — covers apply,
+  build, diagnose, …). The AutoRepair page already renders `failed` (✕ red), so the pipeline now shows
+  exactly where it stopped alongside the "repair incomplete" banner.
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login

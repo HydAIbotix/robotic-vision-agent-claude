@@ -33,7 +33,14 @@ def apply_node(state: RepairAgentState) -> dict:
     canceller.bail_if_cancelled(rid)
     emit(rid, "apply", "running")
     patch = RepairPatch(**state["patch"])
-    target = apply_patch(patch)
+    try:
+        target = apply_patch(patch)
+    except Exception as exc:
+        # apply_patch raises when the fix can't be applied (e.g. "Patch find-text was not found in the
+        # target file", or an ambiguous multi-file match). Mark the stage FAILED so the UI doesn't show
+        # "Apply Fix" stuck on Working; then re-raise so run_repair records the repair as incomplete.
+        emit(rid, "apply", "failed", observation=str(exc))
+        raise
     rel = os.path.relpath(str(target), str(CODEBASE_DIR)).replace("\\", "/")
     emit(rid, "apply", "done", file=rel)
     stages = {**state.get("stages", {}), "apply": {"status": "done", "file": rel}}
