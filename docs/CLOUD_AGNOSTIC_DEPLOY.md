@@ -195,7 +195,8 @@ Engine VM (2026-09-10). Same steps apply to Azure/EC2 — only the VM SKU name a
 | **K8s scale-out** | 2/8 **per node**, 2+ nodes | `Standard_D2s_v5` pool | `e2-standard-2` pool |
 
 **Claude needs no GPU** (remote API). RAM is the binding constraint (Chromium ~1 GB + torch embed
-model ~2 GB + datastores). A GPU VM is only needed for the *optional* local-LLM Auto-Repair backup.
+model ~2 GB + datastores). A GPU VM is only needed for the *optional* local-LLM Auto-Repair backup
+(see **§8**; the lightweight `llama3.2:3b` demo runs CPU-only on the same 4/16 box).
 Keep VM + Cloud SQL/Memorystore/bucket in the **same region** (`us-central1` is the default pick).
 
 ### 6.2 Create the VM (GCP console wizard choices)
@@ -317,3 +318,99 @@ pure-local MVP; it never touches the per-step vision path.
   `http://<EXTERNAL_IP>:8080/api/app-map`, or on the VM `curl localhost:8001/api/app-map`.
 - ⚠️ Relocating artifacts under `/app/data` changed the app_map path, so **re-run exploration** after
   applying this (or copy the old map out first: `docker compose cp app:/app/app_map.json ./data/`).
+
+## 8. Optional — Local Auto-Repair stack (GraphRAG + Neo4j + Llama)
+
+**When to use it.** For a customer who wants Auto-Repair to run **entirely inside their environment**
+— no source code or design documents sent to any third-party model service. The **default is
+unchanged and stays the primary**: HuggingFace embeddings + Chroma + Claude. This is the
+**secondary/backup** combination: a **graph-RAG over Neo4j** (retrieval) + a **local Llama via
+Ollama** (diagnosis). It is a **config switch only** — flip the env vars, and unsetting them restores
+the exact default. Everything below runs **CPU-only on the same 4/16 demo VM** with the lightweight
+`llama3.2:3b`; Llama-4-class models (Scout/Maverick) need a GPU (review later — see
+`GCP_Cost_Estimate.docx` §8).
+
+**How it works.** `search()` / `build_codebase_index()` dispatch on `REPAIR_RETRIEVAL_BACKEND`. The
+graphrag path (`repair_agent/graphrag_store.py`) reuses the **same local embeddings**, stored as a
+Neo4j **vector index** plus a **code graph** (`Chunk-[:PART_OF]->File`); file-neighbourhood expansion
+is a graph traversal. The diagnose model comes from the existing `REPAIR_LLM_BACKEND=local` (Ollama).
+
+### 8.1 Image extras (one-time)
+The image builds `.[cloud,playwright,repair]`; the local stack needs two more (lazy — nothing changes
+for the default). Edit the backend **`Dockerfile`** install line:
+```dockerfile
+# was: RUN pip install --no-cache-dir -e ".[cloud,playwright,repair]" ...
+RUN pip install --no-cache-dir -e ".[cloud,playwright,repair,graphrag]" langchain-ollama \
+    && python -m playwright install --with-deps chromium
+```
+
+### 8.2 Add Neo4j + Ollama services to `docker-compose.yml`
+```yaml
+  neo4j:
+    image: neo4j:5
+    environment:
+      NEO4J_AUTH: neo4j/neo4jpassword          # change the password for anything beyond a demo
+    ports: ["7474:7474", "7687:7687"]          # 7474 = browser, 7687 = bolt
+    volumes: ["neo4jdata:/data"]
+
+  ollama:
+    image: ollama/ollama:latest
+    ports: ["11434:11434"]
+    volumes: ["ollamadata:/root/.ollama"]
+```
+Add the two named volumes under the existing `volumes:` block:
+```yaml
+volumes:
+  pgdata:
+  miniodata:
+  neo4jdata:                                    # add
+  ollamadata:                                   # add
+```
+
+### 8.3 Point the `app` service at the local stack
+Add to the **`app`** service `environment:` block (compose service names, **not** `localhost` — from
+inside the container `localhost` is the container itself):
+```yaml
+      REPAIR_RETRIEVAL_BACKEND: graphrag        # chroma (default) | graphrag(neo4j)
+      REPAIR_LLM_BACKEND: local                 # claude (default) | local(ollama)
+      REPAIR_LOCAL_MODEL: llama3.2:3b           # lightweight, CPU-friendly Llama for the demo
+      REPAIR_LOCAL_BASE_URL: http://ollama:11434
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: neo4jpassword
+```
+
+### 8.4 Bring it up, pull the model, rebuild the index
+```bash
+cd ~/robotic-vision-agent-claude
+docker compose up -d --build                    # rebuild image (extras) + start neo4j/ollama
+docker compose exec ollama ollama pull llama3.2:3b   # ~2 GB, one-time
+# rebuild the RAG index — now written to Neo4j instead of Chroma (on the on-disk / buggy code):
+curl -s -X POST http://localhost:8001/api/repair/index
+```
+
+### 8.5 Verify + run
+```bash
+curl -s http://localhost:8001/api/health | python3 -c \
+  "import sys,json;p=json.load(sys.stdin)['platform'];print(p['repair_retrieval'],p['repair_llm'])"
+# → graphrag local
+```
+Trigger a failing test (the planted demo bug on `expanded-cloud-agnostic`, per **§6.8/§6.9**) →
+Auto-Repair now retrieves from Neo4j and diagnoses with the local Llama, entirely on-box. Browse the
+graph at **`http://<EXTERNAL_IP>:7474`** (login `neo4j` / `neo4jpassword`; open `tcp:7474` in the
+firewall, restricted to your IP).
+
+### 8.6 Revert to the default
+Remove the `REPAIR_RETRIEVAL_BACKEND` + `REPAIR_LLM_BACKEND` env (or set them back to
+`chroma` / `claude`), then `docker compose up -d` and rebuild the index. Back to HuggingFace + Chroma
++ Claude, byte-identical to before.
+
+- ⚠️ **RAM:** `llama3.2:3b` needs ~3–4 GB while answering; on the 4/16 all-in-one box that is fine but
+  tight alongside Chromium + datastores — set `ENABLE_VNC=false` + `PLAYWRIGHT_HEADLESS=true` during a
+  local-repair demo to free memory, or use a 4/32 VM. Neo4j idles at a few hundred MB.
+- ⚠️ **Model quality:** a 3B model is for **demo** feasibility on CPU. It diagnoses the simple planted
+  bugs; complex multi-file design defects are weaker locally (expected for a lightweight backup) — a
+  Llama-4-class model on a GPU VM closes that gap. Claude remains the higher-quality primary.
+- ⚠️ **RESTART** the backend after any `.env`/compose change (uvicorn has no `--reload`). The graphrag
+  deps are **lazy** — if you skip §8.1 the API still starts; only a graphrag repair would raise a clear
+  "install the [graphrag] extra" error.
