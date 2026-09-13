@@ -180,7 +180,9 @@ def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
     the failure query is dominated by symptom/navigation vocabulary (e.g. a login failure reads as
     "wrong screen: products vs login"); a slightly wider code window keeps that chunk in the set
     without crowding out the design-doc / general context (final cap `_MAX_CONTEXT_BLOCKS`)."""
-    if not PERSIST_DIR.exists():
+    # The Chroma backend persists to PERSIST_DIR; the graphrag backend stores in Neo4j (no local dir).
+    # Only enforce the on-disk-index precondition for Chroma so the graphrag path isn't blocked by it.
+    if settings.repair_retrieval_backend != "graphrag" and not PERSIST_DIR.exists():
         raise RuntimeError(
             f"RAG index not found at {PERSIST_DIR}. Build it first: "
             f"python -m repair_agent.parse_code_and_store"

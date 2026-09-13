@@ -269,14 +269,18 @@ def extract_xlsx_text(file_path):
     return documents
 
 
-def build_codebase_index():
-    """Walks through artifacts, parses files, and populates ChromaDB."""
+def collect_documents():
+    """Walk the codebase + product artifacts and return the parsed searchable chunks.
+
+    Extracted from build_codebase_index so BOTH retrieval backends (Chroma and the GraphRAG/Neo4j
+    option) index EXACTLY the same chunks with the same chunking/skip rules — the only thing that
+    differs between backends is where the vectors are stored, never what is indexed."""
     all_documents = []
 
     print(f"Scanning codebase directory: {CODEBASE_DIR}...")
     if not CODEBASE_DIR.exists():
         print(f"Codebase directory does not exist: {CODEBASE_DIR}")
-        return
+        return all_documents
 
     for dirpath, dirnames, filenames in os.walk(CODEBASE_DIR):
         # Drop skip-listed folders and ALL dot-directories (.rag, .git, .vite, …).
@@ -297,6 +301,19 @@ def build_codebase_index():
 
     all_documents.extend(extract_docx_text(DESIGN_DOC_PATH))
     all_documents.extend(extract_xlsx_text(TEST_CASES_PATH))
+    return all_documents
+
+
+def build_codebase_index():
+    """Walks through artifacts, parses files, and populates the active retrieval store.
+
+    Backend is config-gated (settings.repair_retrieval_backend): "chroma" (default, unchanged) or
+    "graphrag" (Neo4j). The graphrag path is a lazy import so the default carries no new dependency."""
+    if settings.repair_retrieval_backend == "graphrag":
+        from repair_agent import graphrag_store   # lazy: only when the graphrag backend is selected
+        return graphrag_store.build_index()
+
+    all_documents = collect_documents()
 
     if not all_documents:
         print("No valid chunks found to index.")
@@ -377,8 +394,16 @@ def _vector_db():
 
 
 def search(query_text, k=4, where=None):
-    """Semantic search over the Chroma index, with an optional metadata filter (e.g.
-    {"type": {"$in": ["code_block", "code_file"]}} to bias toward source code)."""
+    """Semantic search over the active retrieval store, with an optional metadata filter (e.g.
+    {"type": {"$in": ["code_block", "code_file"]}} to bias toward source code).
+
+    Config-gated backend (settings.repair_retrieval_backend): "chroma" (default) or "graphrag"
+    (Neo4j). Both return LangChain Documents with identical metadata keys (source/type/start_line/
+    end_line/section), so retrieve_context is backend-agnostic. The graphrag path is a lazy import."""
+    if settings.repair_retrieval_backend == "graphrag":
+        from repair_agent import graphrag_store   # lazy: only when the graphrag backend is selected
+        return graphrag_store.search(query_text, k=k, where=where)
+
     vector_db = _vector_db()
     if where:
         return vector_db.similarity_search(query_text, k=k, filter=where)

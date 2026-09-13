@@ -70,6 +70,15 @@ repair = [
     "tree-sitter>=0.22",          # code-aware chunking (falls back to text chunking if unavailable)
     "tree-sitter-typescript>=0.22",
 ]
+# Optional LOCAL auto-repair retrieval: graph-RAG over Neo4j (data-sovereignty backup option).
+# Selected with REPAIR_RETRIEVAL_BACKEND=graphrag; imported lazily in repair_agent/graphrag_store.py,
+# so installing this changes nothing until the graphrag backend is actually chosen. Reuses the
+# HuggingFace embeddings from the [repair] extra (kept local — no code leaves the box). Pair with
+# REPAIR_LLM_BACKEND=local (Ollama, e.g. llama3.2:3b) for a fully in-environment repair.
+graphrag = [
+    "langchain-neo4j>=0.1",       # Neo4jVector (vector index) + Neo4jGraph over the code graph
+    "neo4j>=5.14",                # Neo4j Python driver
+]
 dev = [
     "pytest>=8.0",
     "rich>=13.0",

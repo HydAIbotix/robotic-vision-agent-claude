@@ -432,6 +432,27 @@ class Settings(BaseSettings):
     repair_local_base_url: str = "http://localhost:11434"
     repair_local_num_ctx: int = 8192            # context window for the local model (tokens)
     repair_local_timeout_s: int = 120           # per-call timeout for the local model
+
+    # ── Auto-Repair RETRIEVAL backend (Chroma default; GraphRAG + Neo4j local option) ──────────
+    # Picks HOW the offending code/spec is retrieved for a repair. Default reproduces the current
+    # behaviour exactly; the alternative keeps ALL retrieval inside the customer's environment.
+    #   "chroma"   (default) — HuggingFace sentence-transformer embeddings + Chroma (unchanged POC).
+    #   "graphrag"           — a graph-RAG over Neo4j: the same LOCAL embeddings, stored as a vector
+    #                          index PLUS a code graph (Chunk-[:PART_OF]->File) in Neo4j, with
+    #                          file-neighbourhood expansion done as a graph query. Nothing leaves the
+    #                          box. `langchain_neo4j` / `neo4j` are imported LAZILY (in graphrag_store),
+    #                          so selecting "chroma" carries no new dependency and nothing changes.
+    # The LOCAL auto-repair stack (for a customer who wants repair done entirely in-house, no code or
+    # documents sent out) = repair_retrieval_backend="graphrag" + repair_llm_backend="local" (Ollama
+    # with a lightweight Llama, e.g. REPAIR_LOCAL_MODEL=llama3.2:3b for a CPU demo). Both are the
+    # SECONDARY/backup option; Chroma + Claude stays the primary, default combination.
+    repair_retrieval_backend: str = "chroma"    # chroma | graphrag
+    # Neo4j connection (only used when repair_retrieval_backend == "graphrag"). Defaults suit a local
+    # single-node Neo4j (e.g. `docker run -p7687:7687 -p7474:7474 neo4j`). Change the password.
+    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = "neo4jpassword"
+    neo4j_database: str = "neo4j"
     # Hard wall-clock cap on EACH provider's DIAGNOSE call so a stuck/slow model (e.g. a cold local
     # Ollama load, or a hung request) can never freeze the repair — on timeout the chain moves to the
     # next provider, then the demo fallback. Keep < repair_local_timeout_s is fine; this is the outer

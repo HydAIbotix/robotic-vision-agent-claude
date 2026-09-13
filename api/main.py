@@ -136,6 +136,8 @@ def health():
             "multi_tenant":      settings.multi_tenant_enabled,
             "deployment_mode":   settings.deployment_mode,      # docker | k8s
             "service_role":      settings.service_role,         # all | api | worker
+            "repair_retrieval":  settings.repair_retrieval_backend,  # chroma | graphrag(neo4j)
+            "repair_llm":        settings.repair_llm_backend,        # claude | local(ollama)
         },
     }
 

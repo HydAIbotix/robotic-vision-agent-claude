@@ -1486,6 +1486,49 @@ re-invented placeholder.* Fixed generically (120 tests pass, same 8 pre-existing
   re-exploring RPS so the "Use Mock Card" reveal is charted). The input-sharing fix above is what makes the
   Tier-3 recovery itself correct regardless. **RESTART the backend** to load the `run_vision_step.py` changes.
 
+### Recent progress (2026-09-13) — Auto-Repair LOCAL stack: GraphRAG + Neo4j + Llama (data-sovereignty backup)
+
+A config-only switch to run Auto-Repair **entirely inside the customer's environment** — no code or
+documents sent to a third-party service — as a SECONDARY/backup option. The primary, default
+combination is unchanged: **HuggingFace sentence-transformers + Chroma + Claude**. The alternative is
+**graph-RAG over Neo4j + a local Llama via Ollama**. Flipping between them is env-vars only; there is
+no code change and unsetting the vars restores the exact default behaviour. **120 tests pass (same 8
+pre-existing env-only fails) — no regression by construction (defaults untouched, all new deps lazy).**
+
+- **Retrieval switch** `repair_retrieval_backend` (`chroma` default | `graphrag`) — the whole surface.
+  `parse_code_and_store.search()` and `build_codebase_index()` DISPATCH on it: `chroma` runs the exact
+  existing path; `graphrag` lazily imports the new `repair_agent/graphrag_store.py`. The document
+  collection was extracted into `collect_documents()` so BOTH backends index the identical chunks
+  (same chunking/skip rules) — only the vector STORE differs.
+- **`repair_agent/graphrag_store.py`** — the local backend. Uses the SAME local HuggingFace embeddings
+  (`_get_embedding_model`, reused — embeddings computed in-process, never sent out) stored as a Neo4j
+  **vector index** PLUS a lightweight **code graph** (`(:RepairChunk)-[:PART_OF]->(:File)`).
+  `search(query,k,where)` returns langchain `Document`s with the IDENTICAL metadata keys
+  (source/type/start_line/end_line/section) so `retrieve_context` is backend-agnostic; the
+  file-neighbourhood expansion (`search(where={"source":src})`) is a **graph traversal** (Cypher fetch
+  of a File's chunks), and type/code filters (`{"type":{"$in":[...]}}`) map to Neo4jVector filters
+  (with a robust over-fetch + Python post-filter fallback across langchain-neo4j versions).
+  `build_index()` reuses `collect_documents()`, resets nodes/index (batched), builds the vector index,
+  then adds the File graph. `langchain-neo4j` + `neo4j` are imported **lazily and only here** (new
+  `[graphrag]` extra), so the default carries no new dependency; a missing extra raises a clear,
+  actionable ImportError.
+- **LLM switch reuses the existing `repair_llm_backend`** (`claude` default | `local`) →
+  `get_local_llm()` (Ollama). The **local stack = `REPAIR_RETRIEVAL_BACKEND=graphrag` +
+  `REPAIR_LLM_BACKEND=local`**. For the demo on the **current CPU VM** (e2-standard-4, no GPU), the
+  lightweight Llama is **`llama3.2:3b`** (`REPAIR_LOCAL_MODEL=llama3.2:3b`) — Llama-4-class models
+  (Scout/Maverick) need a GPU and are deferred (review later; see `docs/GCP_Cost_Estimate.docx` §8).
+  This is a Neo4j-backed graph-RAG (vector + graph expansion) — the practical, VM-runnable form; the
+  heavier Microsoft GraphRAG entity/community pipeline can populate the SAME Neo4j store later.
+- **`retrieve_context` Chroma-dir guard** now only enforces `PERSIST_DIR` existence for the chroma
+  backend (graphrag stores in Neo4j, no local index dir). `/api/health` platform block now reports
+  `repair_retrieval` + `repair_llm` so the VM self-declares the active combination.
+- **To enable on the VM (test flow):** `pip install -e ".[graphrag]"` + `pip install langchain-ollama`;
+  run Neo4j (`docker run -p7687:7687 -p7474:7474 -e NEO4J_AUTH=neo4j/neo4jpassword neo4j`) and Ollama
+  (`ollama pull llama3.2:3b`); uncomment the "AUTO-REPAIR: LOCAL stack" block in `.env`; **rebuild the
+  index** (`POST /api/repair/index`, now writes to Neo4j) on the on-disk (buggy) code; run the failing
+  test → Auto-Repair diagnoses locally. **RESTART the backend** after the `.env` change (uvicorn has no
+  `--reload`). Unset the vars to revert to Chroma + Claude.
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login
