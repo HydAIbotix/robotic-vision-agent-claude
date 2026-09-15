@@ -143,6 +143,7 @@ services:
       #   docker compose --profile local-repair stop neo4j ollama  # (optional) free the RAM
       # REPAIR_RETRIEVAL_BACKEND: graphrag
       # REPAIR_LLM_BACKEND: local
+      # REPAIR_LOCAL_ONLY: "true"           # air-gap: NEVER fall back to Claude (local model + demo rule only)
       # REPAIR_LOCAL_MODEL: llama3.2:3b
       # REPAIR_LOCAL_BASE_URL: http://ollama:11434
       # NEO4J_URI: bolt://neo4j:7687

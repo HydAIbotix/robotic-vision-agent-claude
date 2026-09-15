@@ -428,10 +428,21 @@ class Settings(BaseSettings):
     # dependency until you use it. Requires `pip install langchain-ollama` + an Ollama server with the
     # model pulled (`ollama pull qwen2.5-coder:14b`).
     repair_llm_backend: str = "claude"          # claude | local
+    # AIR-GAP: when True, DIAGNOSE uses ONLY the local model (then the deterministic demo fallback) and
+    # NEVER calls Claude — so no code or defect text ever leaves the environment, even if the local
+    # model is slow, errors, or is unreachable (it fails to the demo rule, not to the remote model).
+    # Requires the local stack (repair_llm_backend=local + an Ollama server). Default False keeps the
+    # standard behaviour where Claude backs up the local model. Only meaningful with the local stack.
+    repair_local_only: bool = False
     repair_local_model: str = "qwen2.5-coder:14b"
     repair_local_base_url: str = "http://localhost:11434"
     repair_local_num_ctx: int = 8192            # context window for the local model (tokens)
-    repair_local_timeout_s: int = 120           # per-call timeout for the local model
+    # Per-call timeout for the local model. CPU inference on a small Llama (e.g. llama3.2:3b) is SLOW —
+    # prompt prefill over a large retrieved context + a cold model load can take minutes — so this is
+    # generous by default. It is BOTH the Ollama client timeout AND (via propose_patch) the local
+    # provider's outer DIAGNOSE deadline, so the local model is never abandoned mid-answer. Lower it
+    # only on a GPU box where inference is fast. (The remote Claude call keeps repair_diagnose_timeout_s.)
+    repair_local_timeout_s: int = 600
 
     # ── Auto-Repair RETRIEVAL backend (Chroma default; GraphRAG + Neo4j local option) ──────────
     # Picks HOW the offending code/spec is retrieved for a repair. Default reproduces the current
@@ -453,10 +464,11 @@ class Settings(BaseSettings):
     neo4j_user: str = "neo4j"
     neo4j_password: str = "neo4jpassword"
     neo4j_database: str = "neo4j"
-    # Hard wall-clock cap on EACH provider's DIAGNOSE call so a stuck/slow model (e.g. a cold local
-    # Ollama load, or a hung request) can never freeze the repair — on timeout the chain moves to the
-    # next provider, then the demo fallback. Keep < repair_local_timeout_s is fine; this is the outer
-    # guarantee regardless of whether the provider honours its own timeout.
+    # Outer wall-clock cap on the REMOTE (Claude) DIAGNOSE call so a hung request can never freeze the
+    # repair — on timeout the chain moves to the next provider, then the demo fallback. Claude is fast,
+    # so 90s is ample. The LOCAL provider does NOT use this — it gets its own, much larger budget
+    # derived from repair_local_timeout_s (see propose_patch), because a CPU Llama needs minutes and the
+    # outer deadline MUST be ≥ its own client timeout or it would be killed before it can answer.
     repair_diagnose_timeout_s: int = 90
 
     # Management API (FastAPI server for management frontend)

@@ -138,6 +138,7 @@ def health():
             "service_role":      settings.service_role,         # all | api | worker
             "repair_retrieval":  settings.repair_retrieval_backend,  # chroma | graphrag(neo4j)
             "repair_llm":        settings.repair_llm_backend,        # claude | local(ollama)
+            "repair_local_only": settings.repair_local_only,         # air-gap: never call Claude for repair
         },
     }
 

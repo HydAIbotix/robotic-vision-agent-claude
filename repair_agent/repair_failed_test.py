@@ -313,6 +313,10 @@ def _diagnose_providers() -> list[tuple[str, Callable[[], object]]]:
     touches Ollama and vice-versa."""
     claude = ("claude", get_llm)
     local = ("local", get_local_llm)
+    # AIR-GAP: local-only means the remote model is NEVER in the chain — DIAGNOSE runs the local model
+    # then (if it can't produce a patch) the deterministic demo rule, so nothing leaves the box.
+    if settings.repair_local_only:
+        return [local]
     return [local, claude] if settings.repair_llm_backend == "local" else [claude, local]
 
 
@@ -367,13 +371,24 @@ def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None
         except Exception as exc:
             print(f"  [REPAIR] DIAGNOSE provider '{label}' unavailable ({exc}) — trying next.")
             continue
+        # Per-provider budget. The remote Claude call is fast → the tight `timeout` (repair_diagnose_
+        # timeout_s). The LOCAL CPU model needs minutes, and its outer deadline MUST be ≥ its own Ollama
+        # client timeout or it gets killed before it can answer — so give it repair_local_timeout_s (+
+        # margin), and take just ONE attempt (retries=0): a slow model shouldn't be run 3× on timeout.
+        if label == "local":
+            provider_timeout = settings.repair_local_timeout_s + 30
+            provider_retries = 0
+        else:
+            provider_timeout = timeout
+            provider_retries = 2
         try:
             data = _invoke_with_deadline(
-                lambda: invoke_json(llm, [HumanMessage(content=prompt)], default=None, label=f"repair/{label}"),
-                timeout, cancel_check,
+                lambda llm=llm, r=provider_retries: invoke_json(
+                    llm, [HumanMessage(content=prompt)], default=None, retries=r, label=f"repair/{label}"),
+                provider_timeout, cancel_check,
             )
         except _DiagnoseTimeout:
-            print(f"  [REPAIR] DIAGNOSE provider '{label}' timed out after {timeout}s — trying next.")
+            print(f"  [REPAIR] DIAGNOSE provider '{label}' timed out after {provider_timeout}s — trying next.")
             continue
         if data and data.get("find") and data.get("replace") is not None:
             model_name = (
