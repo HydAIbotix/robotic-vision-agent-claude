@@ -547,9 +547,22 @@ def build_repair_index():
 @app.get("/api/repair/index")
 def repair_index_status():
     from repair_agent.parse_code_and_store import PERSIST_DIR
+    # "exists" must reflect the ACTIVE retrieval backend: the graphrag backend stores the index in
+    # Neo4j (no local persist dir), so statting PERSIST_DIR would report a completed graphrag build as
+    # not-built forever and the UI badge would never leave "building". Check Neo4j for graphrag.
+    backend = settings.repair_retrieval_backend
+    if backend == "graphrag":
+        try:
+            from repair_agent import graphrag_store
+            exists = graphrag_store.index_exists()
+        except Exception:
+            exists = False
+    else:
+        exists = PERSIST_DIR.exists()
     return {
         "building": RepairIndexState.building,
-        "exists":   PERSIST_DIR.exists(),
+        "exists":   exists,
+        "backend":  backend,
         "message":  RepairIndexState.last_message,
         "persist_dir": str(PERSIST_DIR),
     }

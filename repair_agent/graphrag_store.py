@@ -171,6 +171,17 @@ def search(query_text, k=4, where=None):
         return out[:k]
 
 
+def index_exists() -> bool:
+    """True if the Neo4j graph-RAG index holds any chunks. Cheap node count; best-effort so a
+    down/unreachable Neo4j reports 'not built' rather than raising. Used by the index-status endpoint
+    (the graphrag backend has no local persist dir to stat, unlike Chroma)."""
+    try:
+        rows = _run(f"MATCH (c:{NODE_LABEL}) RETURN count(c) AS n")
+        return bool(rows) and int(rows[0]["n"]) > 0
+    except Exception:
+        return False
+
+
 def _meta_matches(meta: dict, where: dict) -> bool:
     for key, cond in where.items():
         val = meta.get(key)
