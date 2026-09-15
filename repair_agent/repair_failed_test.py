@@ -180,6 +180,8 @@ def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
     the failure query is dominated by symptom/navigation vocabulary (e.g. a login failure reads as
     "wrong screen: products vs login"); a slightly wider code window keeps that chunk in the set
     without crowding out the design-doc / general context (final cap `_MAX_CONTEXT_BLOCKS`)."""
+    # Announce the ACTIVE retrieval backend so the console makes it obvious which stack ran.
+    print(f"  [REPAIR] RETRIEVE via {retrieval_tool_label()}")
     # The Chroma backend persists to PERSIST_DIR; the graphrag backend stores in Neo4j (no local dir).
     # Only enforce the on-disk-index precondition for Chroma so the graphrag path isn't blocked by it.
     if settings.repair_retrieval_backend != "graphrag" and not PERSIST_DIR.exists():
@@ -299,6 +301,21 @@ def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
 
 # ── 2. DIAGNOSE (Claude primary, local LLM backup) ──────────────────────────────
 
+def retrieval_tool_label() -> str:
+    """Human-readable name of the ACTIVE retrieval backend (for logs + the UI stage sub-label)."""
+    if settings.repair_retrieval_backend == "graphrag":
+        return "GraphRAG + Neo4j (local)"
+    return "Chroma + HuggingFace RAG"
+
+
+def diagnose_tool_label() -> str:
+    """Human-readable name of the ACTIVE diagnose model (for logs + the UI stage sub-label)."""
+    if settings.repair_llm_backend == "local":
+        suffix = ", air-gapped" if settings.repair_local_only else ""
+        return f"Llama · {settings.repair_local_model} (local{suffix})"
+    return f"Claude · {settings.anthropic_model}"
+
+
 def _diagnose_providers() -> list[tuple[str, Callable[[], object]]]:
     """Ordered (label, llm-factory) list for the DIAGNOSE call, driven by `repair_llm_backend`.
 
@@ -324,13 +341,15 @@ class _DiagnoseTimeout(Exception):
     """A single provider's DIAGNOSE call exceeded its wall-clock budget."""
 
 
-def _invoke_with_deadline(fn, timeout, cancel_check):
+def _invoke_with_deadline(fn, timeout, cancel_check, on_heartbeat=None, heartbeat_every=10.0):
     """Run `fn()` on a daemon thread and wait up to `timeout` seconds, polling `cancel_check`.
 
     A blocking LLM call (a cold local model, a hung request) can't be interrupted in-thread, so we
     run it on a daemon thread and watch it: on cancel we raise RepairCancelled, on timeout we raise
     _DiagnoseTimeout — either way the caller moves on immediately and the daemon thread is left to
-    finish harmlessly (daemon → never blocks shutdown). timeout=None / <=0 means wait indefinitely."""
+    finish harmlessly (daemon → never blocks shutdown). timeout=None / <=0 means wait indefinitely.
+    `on_heartbeat(elapsed_seconds)` is called every `heartbeat_every` seconds while waiting, so a slow
+    local model can report progress to the console + UI instead of looking hung."""
     box: dict = {}
     done = threading.Event()
 
@@ -345,10 +364,17 @@ def _invoke_with_deadline(fn, timeout, cancel_check):
     threading.Thread(target=worker, daemon=True).start()
     waited = 0.0
     step = 0.5
+    next_beat = heartbeat_every
     while not done.wait(step):
         waited += step
         if cancel_check and cancel_check():
             raise RepairCancelled()
+        if on_heartbeat and waited >= next_beat:
+            try:
+                on_heartbeat(waited)
+            except Exception:
+                pass
+            next_beat += heartbeat_every
         if timeout and timeout > 0 and waited >= timeout:
             raise _DiagnoseTimeout()
     if "error" in box:
@@ -356,12 +382,17 @@ def _invoke_with_deadline(fn, timeout, cancel_check):
     return box.get("value")
 
 
-def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None) -> RepairPatch:
+def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None, on_progress=None) -> RepairPatch:
     """Produce one minimal find/replace patch: try the selected model, then the backup model, then
     the deterministic demo rule. `repair_llm_backend` chooses primary vs backup order. Each provider
     call is bounded by `timeout` (seconds) and interruptible via `cancel_check` so a stuck/slow model
-    never freezes the repair."""
+    never freezes the repair. `on_progress(label, elapsed, budget)` is called periodically for a slow
+    (local) model so the UI can show live progress instead of a frozen 'working…'."""
     prompt = _DIAGNOSE_PROMPT.format(failure=failure, context=context)
+
+    chain = " → ".join(lbl for lbl, _ in _diagnose_providers())
+    air = "  (AIR-GAPPED: no remote fallback — nothing leaves the environment)" if settings.repair_local_only else ""
+    print(f"  [REPAIR] DIAGNOSE via {diagnose_tool_label()}  [providers: {chain}]{air}")
 
     for label, make_llm in _diagnose_providers():
         if cancel_check and cancel_check():
@@ -381,11 +412,19 @@ def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None
         else:
             provider_timeout = timeout
             provider_retries = 2
+        # Heartbeat only for the slow local model, so a multi-minute CPU inference reports progress to
+        # the console + UI instead of looking hung. Claude is fast → no heartbeat.
+        heartbeat = None
+        if label == "local":
+            def heartbeat(elapsed, _lbl=label, _budget=provider_timeout):
+                print(f"  [REPAIR] DIAGNOSE {diagnose_tool_label()} still working… {int(elapsed)}s / {int(_budget)}s")
+                if on_progress:
+                    on_progress(_lbl, int(elapsed), int(_budget))
         try:
             data = _invoke_with_deadline(
                 lambda llm=llm, r=provider_retries: invoke_json(
                     llm, [HumanMessage(content=prompt)], default=None, retries=r, label=f"repair/{label}"),
-                provider_timeout, cancel_check,
+                provider_timeout, cancel_check, on_heartbeat=heartbeat,
             )
         except _DiagnoseTimeout:
             print(f"  [REPAIR] DIAGNOSE provider '{label}' timed out after {provider_timeout}s — trying next.")
@@ -394,7 +433,8 @@ def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None
             model_name = (
                 settings.repair_local_model if label == "local" else settings.anthropic_model
             )
-            print(f"  [REPAIR] DIAGNOSE patch from '{label}' ({model_name}).")
+            who = {"local": "LOCAL Llama", "claude": "Claude"}.get(label, label)
+            print(f"  [REPAIR] DIAGNOSE ✓ patch produced by {who} ({model_name}).")
             return RepairPatch(
                 file_path=str(data.get("file_path", "")),
                 find=data["find"],
