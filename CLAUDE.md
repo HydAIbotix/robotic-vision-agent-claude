@@ -1529,6 +1529,53 @@ pre-existing env-only fails) — no regression by construction (defaults untouch
   test → Auto-Repair diagnoses locally. **RESTART the backend** after the `.env` change (uvicorn has no
   `--reload`). Unset the vars to revert to Chroma + Claude.
 
+### Recent progress (2026-09-15) — local Auto-Repair verified on GCE: timeouts, air-gap, logs, patch-quality
+
+The in-house stack (GraphRAG + Neo4j + local Llama) was run end-to-end on the GCE CPU VM
+(e2-standard-4). Retrieval worked; the DIAGNOSE by `llama3.2:3b` was the weak link. A series of fixes,
+all config-gated / additive, **no regression to the default Chroma + Claude path** (22/22
+`test_cloud_agnostic` green; `_reject_reason` unit-checked; studio `tsc` clean):
+
+- **Deploy ergonomics.** One-command switch: `graphrag`/`ollama` deps baked into the image (lazy, inert
+  by default — no rebuild to toggle); **CPU-only torch** in the Dockerfile (avoids a ~2.5 GB CUDA
+  download from `sentence-transformers`); profile-gated `neo4j` + `ollama` services (`--profile
+  local-repair`); a commented `REPAIR_*` env block with switch/revert recipes. Recommended on the VM:
+  keep VM-specific env in an untracked **`docker-compose.override.yml`** so `git pull` never conflicts.
+- **RAG-index status fix.** `GET /api/repair/index` reported `exists` from the Chroma dir, which the
+  graphrag path never creates → the UI badge stuck on "building" forever after a *successful* Neo4j
+  build. Status is now backend-aware (`graphrag_store.index_exists()` = a cheap Neo4j node count); the
+  studio also polls index status on its normal interval so the badge self-heals.
+- **Timeout fix (local model was always abandoned).** The 90s per-provider DIAGNOSE deadline applied to
+  the CPU model too — and was even shorter than its own 120s Ollama client timeout — so `llama3.2:3b`
+  never finished and the chain fell to Claude. The **local** provider now gets its own budget
+  (`repair_local_timeout_s`, default 120→**600**, +30s margin) and a **single** attempt; Claude keeps
+  the tight 90s bound. `_invoke_with_deadline` gained a heartbeat.
+- **Air-gap toggle** `repair_local_only` (default False): when true, DIAGNOSE uses ONLY the local model
+  then the deterministic demo rule and **never calls Claude** — even if local is slow/errors/unreachable
+  (no code leaves the box). Surfaced in `/api/health`. The LOCAL stack for data sovereignty is
+  `repair_retrieval_backend=graphrag` + `repair_llm_backend=local` + `repair_local_only=true`.
+- **Explicit logs + live progress.** `[REPAIR] RETRIEVE via GraphRAG + Neo4j`; `[REPAIR] DIAGNOSE via
+  Llama · <model> (air-gapped) [providers: local]`; a heartbeat every ~10s (`still working… Ns/Ms`); a
+  clear `✓ patch produced by LOCAL Llama`. Nodes stream a per-stage `tool` + `note`, so the studio shows
+  the REAL tool per stage (GraphRAG + Neo4j, Llama · model) and a live elapsed note instead of the old
+  hard-coded "Chroma + HuggingFace RAG"/"Claude Opus 4.8".
+- **Patch-quality guards (the observed failure).** On TC-VPS-009 (the hardest, cross-kiosk persistence
+  bug) `llama3.2:3b` returned a degenerate patch — `find:"amount"` → `replace:"amount"` (a no-op, and
+  `amount` occurs 26× → apply refused) and chose the *relabel* symptom, not the root cause. Two
+  additive guards: the DIAGNOSE prompt now requires `find` to be a **distinctive, verbatim multi-line
+  snippet unique in the file** (never a bare token) and to DIFFER from `replace`; and a cheap
+  `_reject_reason()` sanity check rejects no-op/empty/bare-token patches BEFORE apply, giving the LOCAL
+  model **one corrective retry** with the exact reason. These help all models and can't regress Claude
+  (they only reject patches that would fail at apply anyway).
+- **⚠️ The core limit is model capability, not config.** A 3B general model can't reliably root-cause a
+  reasoning-heavy bug or emit a precise unique patch. The main quality lever is **model choice**, not
+  fine-tuning: use a **code-specialised** model — `qwen2.5-coder:7b` is the practical CPU ceiling
+  (slow); `qwen2.5-coder:14b/32b` or a Llama-4-class model on a **GPU** (see `docs/GCP_Cost_Estimate`
+  §8) approaches Claude quality. Change via `REPAIR_LOCAL_MODEL` (no code change). Demo tip: show the
+  local path on the SIMPLER planted bugs (login `-bug`, products `0`) which 3B can handle, and reserve
+  the hard design bug for Claude or a GPU model. Fine-tuning is high-effort (GPU + curated dataset) and
+  a tuned 3B still won't match a larger off-the-shelf coder — not recommended as a first step.
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login

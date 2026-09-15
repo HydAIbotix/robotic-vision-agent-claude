@@ -60,11 +60,14 @@ Return a SINGLE JSON object (no markdown, no commentary) with exactly these keys
 }}
 
 Rules:
-- Make the SMALLEST possible fix — change ONLY the buggy sub-expression, ideally a single token.
-- PRESERVE every other condition, guard, and clause on the line. Do NOT drop, merge, simplify, or
-  reorder any logic that is not itself the bug (e.g. keep unrelated `||`/`&&` guards intact).
-- Keep "find" and "replace" nearly identical except for the exact buggy fragment.
-- "find" must appear EXACTLY ONCE in the target file so the replacement is unambiguous.
+- Make the SMALLEST possible CHANGE — the DIFFERENCE between "find" and "replace" should be one
+  sub-expression, ideally a single token. PRESERVE every other condition, guard, and clause (keep
+  unrelated `||`/`&&` guards intact); do NOT drop, merge, simplify, or reorder logic that is not the bug.
+- BUT "find" ITSELF must be a DISTINCTIVE, VERBATIM snippet that occurs EXACTLY ONCE in the file —
+  copy a WHOLE line, or 2–4 full lines including the buggy one. NEVER a bare word or a common token
+  like a variable name (e.g. `amount`, `value`, `data`): those match many places and will be REJECTED.
+- "replace" is that same snippet with only the buggy fragment changed, and MUST DIFFER from "find".
+  Returning "find" and "replace" identical is invalid (it changes nothing).
 - Do not reformat unrelated code. Do not invent files or symbols not in the context.
 - Fix the ROOT CAUSE, not the symptom. If the failure is a wrong/missing VALUE, LABEL or on-screen
   TEXT, do NOT make it pass by hardcoding or relabeling a string to match the expected text. Find and
@@ -316,6 +319,27 @@ def diagnose_tool_label() -> str:
     return f"Claude · {settings.anthropic_model}"
 
 
+def _reject_reason(data) -> str:
+    """Why a proposed patch is unusable BEFORE we try to apply it (cheap — no filesystem access; the
+    exact-occurrence check happens at apply). A no-op or a bare-token 'find' would otherwise green the
+    diagnose stage and then fail at apply ('find-text appears N times'), so we catch it here — which
+    also lets a weaker local model be re-prompted. Returns '' when the patch looks applicable."""
+    if not data:
+        return "no JSON object returned"
+    find = str(data.get("find") or "")
+    repl = data.get("replace")
+    if not find.strip():
+        return "empty 'find'"
+    if repl is None:
+        return "missing 'replace'"
+    if find.strip() == str(repl).strip():
+        return "'find' equals 'replace' (a no-op — nothing would change)"
+    core = find.strip()
+    if len(core) < 8 and "\n" not in core and " " not in core:
+        return f"'find' is a bare token ({core!r}) — it must be a distinctive multi-line snippet, unique in the file"
+    return ""
+
+
 def _diagnose_providers() -> list[tuple[str, Callable[[], object]]]:
     """Ordered (label, llm-factory) list for the DIAGNOSE call, driven by `repair_llm_backend`.
 
@@ -429,7 +453,29 @@ def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None
         except _DiagnoseTimeout:
             print(f"  [REPAIR] DIAGNOSE provider '{label}' timed out after {provider_timeout}s — trying next.")
             continue
-        if data and data.get("find") and data.get("replace") is not None:
+        # Sanity-check the patch before accepting. A weaker (local) model often returns a no-op or a
+        # bare-token 'find' (e.g. "amount") that greens diagnose then fails at apply — give it ONE
+        # corrective retry with the exact reason, which finished well within budget in practice.
+        reason = _reject_reason(data)
+        if reason and label == "local":
+            print(f"  [REPAIR] DIAGNOSE local patch rejected ({reason}) — one corrective retry.")
+            corrective = prompt + (
+                f"\n\nYOUR PREVIOUS ANSWER WAS REJECTED: {reason}. Return corrected JSON where 'find' is a "
+                f"DISTINCTIVE, VERBATIM multi-line snippet copied from the code above (a whole line or 2–4 "
+                f"lines, UNIQUE in the file — never a bare word), and 'replace' is that snippet with only "
+                f"the buggy fragment changed (it MUST differ from 'find'). Fix the ROOT CAUSE, not a label."
+            )
+            try:
+                data = _invoke_with_deadline(
+                    lambda: invoke_json(llm, [HumanMessage(content=corrective)], default=None,
+                                        retries=0, label="repair/local-retry"),
+                    provider_timeout, cancel_check, on_heartbeat=heartbeat,
+                )
+            except _DiagnoseTimeout:
+                print(f"  [REPAIR] DIAGNOSE local corrective retry timed out — trying next.")
+                continue
+            reason = _reject_reason(data)
+        if data and not reason and data.get("find") and data.get("replace") is not None:
             model_name = (
                 settings.repair_local_model if label == "local" else settings.anthropic_model
             )
@@ -443,7 +489,7 @@ def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None
                 source=label,
                 model=model_name,
             )
-        print(f"  [REPAIR] DIAGNOSE provider '{label}' returned no usable patch — trying next.")
+        print(f"  [REPAIR] DIAGNOSE provider '{label}' returned no usable patch ({reason or 'incomplete'}) — trying next.")
 
     fallback = _demo_fallback_patch()
     if fallback:
