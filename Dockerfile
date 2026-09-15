@@ -34,7 +34,13 @@ WORKDIR /app
 # a source-only change rebuilds in seconds (just `COPY . .`), not minutes.
 COPY pyproject.toml README.md ./
 RUN mkdir -p vision_agent && touch vision_agent/__init__.py
-RUN pip install --no-cache-dir -e ".[cloud,playwright,repair]" \
+# `graphrag` (langchain-neo4j + neo4j) and langchain-ollama are the deps for the OPTIONAL local
+# Auto-Repair stack (Neo4j graph-RAG + a local Llama). They are lazy-imported and inert unless
+# REPAIR_RETRIEVAL_BACKEND=graphrag / REPAIR_LLM_BACKEND=local are set, so baking them into the image
+# does NOT change default (Chroma + Claude) behaviour — it just means switching to the local stack
+# needs no image rebuild, only env + the neo4j/ollama services. Drop `,graphrag` and the langchain-ollama
+# line to slim the image if you will never use the local stack.
+RUN pip install --no-cache-dir -e ".[cloud,playwright,repair,graphrag]" langchain-ollama \
     && python -m playwright install --with-deps chromium
 
 # Now the real source. Editing anything here busts ONLY this layer (fast) — the dep layer stays cached.

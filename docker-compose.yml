@@ -126,6 +126,29 @@ services:
       GIT_AUTHOR_EMAIL: "auto-repair@kioskqa.local"
       GIT_COMMITTER_NAME: "Auto-Repair"
       GIT_COMMITTER_EMAIL: "auto-repair@kioskqa.local"
+      # ── OPTIONAL: Auto-Repair LOCAL stack (data-sovereignty — nothing leaves the box) ───────────
+      # DEFAULT = Chroma + Claude (leave the 8 lines below COMMENTED).
+      # To switch to the LOCAL stack (Neo4j graph-RAG + a local Llama via Ollama):
+      #   1. UNCOMMENT the 8 lines below.
+      #   2. Start the neo4j + ollama services (they are profile-gated so they DON'T run by default):
+      #        docker compose --profile local-repair up -d
+      #   3. Pull the model once:  docker compose exec ollama ollama pull llama3.2:3b
+      #   4. Rebuild the RAG index (now writes into Neo4j):  curl -X POST http://localhost:8001/api/repair/index
+      #   5. Verify:  curl localhost:8001/api/health  → "repair_retrieval":"graphrag","repair_llm":"local"
+      # Hosts are the compose SERVICE NAMES (neo4j / ollama), NOT localhost — the app runs in its own
+      # container. The image already ships the deps (see Dockerfile), so switching needs no rebuild.
+      # TO REVERT to Chroma + Claude: re-COMMENT the 8 lines, then
+      #   docker compose up -d                                   # recreate app without the local env
+      #   curl -X POST http://localhost:8001/api/repair/index    # rebuild the index back into Chroma
+      #   docker compose --profile local-repair stop neo4j ollama  # (optional) free the RAM
+      # REPAIR_RETRIEVAL_BACKEND: graphrag
+      # REPAIR_LLM_BACKEND: local
+      # REPAIR_LOCAL_MODEL: llama3.2:3b
+      # REPAIR_LOCAL_BASE_URL: http://ollama:11434
+      # NEO4J_URI: bolt://neo4j:7687
+      # NEO4J_USER: neo4j
+      # NEO4J_PASSWORD: neo4jpassword
+      # NEO4J_DATABASE: neo4j
     volumes:
       - ./data:/app/data                    # app_map.json + screenshots/ + results/  → visible on the host
       - ./data/test_plans:/app/test_plans   # cached Claude plans (path not env-configurable)
@@ -138,6 +161,31 @@ services:
   # scale-out (multiple API replicas + a dedicated worker tier) on Kubernetes, set the app's
   # EVENT_BUS_BACKEND=redis and TASK_QUEUE_BACKEND=redis and add a `worker` service (same image,
   # SERVICE_ROLE=worker → `python -m worker`, same env). See deploy/k8s/ for that topology.
+
+  # ── OPTIONAL: Auto-Repair LOCAL stack backends (Neo4j graph-RAG store + Ollama local Llama) ──────
+  # Both carry `profiles: [local-repair]`, so a plain `docker compose up -d` does NOT start them —
+  # the default Chroma + Claude path has no extra moving parts. Start them only when switching to the
+  # local stack:  docker compose --profile local-repair up -d  (then uncomment the REPAIR_* env in the
+  # app service above, pull the model, and rebuild the index — see that block). Stop/free RAM with:
+  #   docker compose --profile local-repair stop neo4j ollama
+  # Data persists in the neo4jdata / ollamadata volumes so the graph + pulled model survive restarts.
+  neo4j:
+    image: neo4j:5
+    profiles: ["local-repair"]
+    environment:
+      NEO4J_AUTH: neo4j/neo4jpassword     # matches NEO4J_USER/NEO4J_PASSWORD in the app service
+    ports: ["7474:7474", "7687:7687"]     # 7474 = Neo4j Browser UI (restrict in the firewall); 7687 = bolt
+    volumes:
+      - neo4jdata:/data
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["local-repair"]
+    ports: ["11434:11434"]                # local only; no need to open in the firewall
+    volumes:
+      - ollamadata:/root/.ollama          # pulled models persist here (llama3.2:3b etc.)
+    restart: unless-stopped
 
   # Adminer — a tiny web UI to BROWSE the Postgres database in a browser: every activity's rows
   # (kiosk_configs, test_cases, test_runs, test_results, defects, app_maps, device_configs,
@@ -155,3 +203,5 @@ services:
 volumes:
   pgdata:
   miniodata:
+  neo4jdata:      # OPTIONAL local Auto-Repair: Neo4j graph store (only used with --profile local-repair)
+  ollamadata:     # OPTIONAL local Auto-Repair: pulled Ollama models (only used with --profile local-repair)
