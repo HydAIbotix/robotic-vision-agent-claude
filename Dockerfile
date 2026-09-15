@@ -34,6 +34,12 @@ WORKDIR /app
 # a source-only change rebuilds in seconds (just `COPY . .`), not minutes.
 COPY pyproject.toml README.md ./
 RUN mkdir -p vision_agent && touch vision_agent/__init__.py
+# CPU-ONLY torch FIRST. sentence-transformers (in the [repair] extra) depends on torch, and the
+# default Linux torch wheel bundles ~2.5 GB of NVIDIA CUDA libraries we never use — this VM runs the
+# embeddings on CPU (the GPU work is Ollama/Llama in its own container, not torch). Installing the CPU
+# wheel from the PyTorch CPU index first satisfies that dependency, so the editable install below does
+# NOT pull the CUDA build. Result: a much smaller image and a far faster dep layer (which then caches).
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 # `graphrag` (langchain-neo4j + neo4j) and langchain-ollama are the deps for the OPTIONAL local
 # Auto-Repair stack (Neo4j graph-RAG + a local Llama). They are lazy-imported and inert unless
 # REPAIR_RETRIEVAL_BACKEND=graphrag / REPAIR_LLM_BACKEND=local are set, so baking them into the image
