@@ -46,12 +46,13 @@ case "$LOCAL_REPAIR" in
   *) echo "!! Unknown LOCAL_REPAIR='$LOCAL_REPAIR' (use 0 | graphrag | msgraphrag)" >&2; exit 1 ;;
 esac
 
-# Compose profile for the OPTIONAL local Auto-Repair backends (neo4j + ollama). Empty by default, so a
-# normal run starts nothing extra (no regression); a local mode adds --profile local-repair and EXPORTS
-# the env the compose file reads (${VAR:-default}) so the app container switches with no file edits.
-PROFILE_ARG=""
+# Compose profile for the OPTIONAL local Auto-Repair backends (neo4j + ollama). Nothing extra starts by
+# default (no regression); a local mode selects the `local-repair` profile via the COMPOSE_PROFILES env
+# var (NOT the `--profile` flag — its position after `up` is rejected on some compose versions, and the
+# env var is also seen by the later `exec ollama` calls) and EXPORTS the env the compose file reads
+# (${VAR:-default}) so the app container switches with no file edits.
 if [ -n "$REPAIR_MODE" ]; then
-  PROFILE_ARG="--profile local-repair"
+  export COMPOSE_PROFILES="local-repair"
   export REPAIR_RETRIEVAL_BACKEND="$REPAIR_MODE"
   export REPAIR_LLM_BACKEND="local"
   export REPAIR_LOCAL_ONLY="${REPAIR_LOCAL_ONLY:-true}"     # air-gap by default; override to false to keep Claude backup
@@ -103,8 +104,8 @@ fi
 echo "==> [1/3] Kiosk POS    ($POS_DIR)"
 ( cd "$POS_DIR" && PUBLIC_BASE_URL="http://${EXTERNAL_IP}" docker compose up -d --build )
 
-echo "==> [2/3] QA backend   ($BACKEND_DIR)${PROFILE_ARG:+  (+ local Auto-Repair: Neo4j + Ollama)}${COMPOSE_GPU:+  (GPU)}"
-( cd "$BACKEND_DIR" && docker compose $COMPOSE_GPU up -d --build $PROFILE_ARG )
+echo "==> [2/3] QA backend   ($BACKEND_DIR)${REPAIR_MODE:+  (+ local Auto-Repair: Neo4j + Ollama)}${COMPOSE_GPU:+  (GPU)}"
+( cd "$BACKEND_DIR" && docker compose $COMPOSE_GPU up -d --build )
 
 echo "==> waiting for the API to answer…"
 for _ in $(seq 1 40); do
