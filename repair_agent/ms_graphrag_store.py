@@ -130,85 +130,65 @@ def _write_inputs() -> dict:
     return meta
 
 
+def _default_template() -> str:
+    """GraphRAG's OWN default settings.yaml text (so we always match the installed version's schema).
+    We deliberately do NOT run `graphrag init`: in GraphRAG 3.x it is INTERACTIVE (prompts for the model
+    and aborts on EOF), which silently left us on a wrong hand-written fallback. Reading the package's
+    INIT_YAML template gives the exact schema with zero prompts."""
+    try:
+        from graphrag.config.init_content import INIT_YAML
+        return INIT_YAML
+    except Exception:
+        return _MINIMAL_SETTINGS
+
+
 def _scaffold_settings():
-    """Ensure <root>/settings.yaml exists (scaffold it for the INSTALLED GraphRAG version), then PATCH
-    only the model wiring to point at the local Ollama model + embeddings. Scaffolding via `graphrag init`
-    guarantees the file matches whatever schema the installed version expects; we edit as little as
-    possible so we stay compatible across releases."""
+    """Write a complete, version-matched settings.yaml wired to the local Ollama model + embeddings.
+
+    Start from GraphRAG's default template (INIT_YAML), then: point BOTH model groups at the same local
+    Ollama model via its OpenAI-compatible endpoint; set the plain-TEXT input reader over our per-chunk
+    .txt files (in GraphRAG 3.x `input.type` is the reader = 'text', and the folder lives under a SEPARATE
+    `input_storage.base_dir`; no file_pattern is needed — the text reader defaults to .txt, which also
+    sidesteps the '$' end-anchor Template issue); and DROP the prompt-file paths so GraphRAG falls back to
+    its BUILT-IN default prompts (we don't run init, so there is no prompts/ dir to load from)."""
     yaml = _need("yaml")
     root = _root()
+    root.mkdir(parents=True, exist_ok=True)
     settings_path = root / "settings.yaml"
-    if not settings_path.exists():
-        # `graphrag init` writes settings.yaml + prompts + .env for the installed version.
-        _run_graphrag(["init", "--root", str(root)], check=False)
-    if not settings_path.exists():
-        # Fallback minimal settings if init didn't produce one (older/newer CLI shapes).
-        settings_path.write_text(_MINIMAL_SETTINGS, encoding="utf-8")
 
-    cfg = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
+    cfg = yaml.safe_load(_default_template()) or {}
+    api_base = _api_base()
+    api_key = settings.graphrag_api_key or "ollama"
 
-    chat = {
-        "type": "openai_chat",
-        "api_base": _api_base(),
-        "api_key": settings.graphrag_api_key or "ollama",
-        "model": _llm_model(),
-        "model_supports_json": False,
-        "concurrent_requests": 1,
-        "async_mode": "threaded",
-        "requests_per_minute": 0,
-        "tokens_per_minute": 0,
-    }
-    embed = {
-        "type": "openai_embedding",
-        "api_base": _api_base(),
-        "api_key": settings.graphrag_api_key or "ollama",
-        "model": settings.graphrag_embedding_model,
-        "concurrent_requests": 1,
-        "async_mode": "threaded",
-        "requests_per_minute": 0,
-        "tokens_per_minute": 0,
-    }
+    # Both the completion (chat) model and the embedding model → the local Ollama server. The completion
+    # model is the SAME one that diagnoses the fix (_llm_model → repair_local_model), so a single local
+    # model builds the graph AND fixes the code. Overriding api_key here also removes the template's
+    # ${GRAPHRAG_API_KEY} placeholder, so no .env is required.
+    for group, model_name in (("completion_models", _llm_model()),
+                              ("embedding_models", settings.graphrag_embedding_model)):
+        models = cfg.get(group) or {}
+        for _mid, spec in models.items():
+            if isinstance(spec, dict):
+                spec["model_provider"] = "openai"     # Ollama exposes an OpenAI-compatible API
+                spec["model"] = model_name
+                spec["auth_method"] = "api_key"
+                spec["api_key"] = api_key
+                spec["api_base"] = api_base
+        cfg[group] = models
 
-    # v2 schema: a `models:` map referenced by name. v1 schema: top-level `llm:` + `embeddings.llm:`.
-    if isinstance(cfg.get("models"), dict) and cfg["models"]:
-        for name, spec in cfg["models"].items():
-            if not isinstance(spec, dict):
-                continue
-            is_embed = "embed" in name.lower() or spec.get("type", "").endswith("embedding")
-            spec.update(embed if is_embed else chat)
-    else:
-        cfg["llm"] = {**cfg.get("llm", {}), **chat}
-        cfg.setdefault("embeddings", {})
-        cfg["embeddings"]["llm"] = {**cfg["embeddings"].get("llm", {}), **embed}
+    # Input = plain-text reader over our chunk files (type is the READER; storage/base_dir is separate).
+    cfg.setdefault("input", {})["type"] = "text"
+    cfg.setdefault("input_storage", {"type": "file"})["base_dir"] = _INPUT_SUBDIR
+    cfg.setdefault("chunking", {})["size"] = int(settings.graphrag_chunk_size)
 
-    # Point input at our per-chunk .txt files and set the text-unit size. IMPORTANT: preserve the input
-    # block that `graphrag init` scaffolded for the INSTALLED version and only nudge the few fields we
-    # need — do NOT force `type`. In current GraphRAG `input.type` is the READER type registered in the
-    # InputReaderFactory ("text"/"csv"/"json"), so hardcoding "file" fails ("type 'file' is not
-    # registered"). We ensure a text reader (set file_type/type to "text" only where the scaffold already
-    # uses that key, so we never inject an invalid one), point base_dir at our chunk dir (flat OR nested
-    # `storage` layout), and set file_pattern.
-    # NOTE the DOUBLE '$$': GraphRAG runs string.Template env-substitution over the whole settings.yaml
-    # before parsing it, so a bare '$' (the regex end-anchor) is a malformed placeholder → "Invalid
-    # placeholder in string". '$$' is the Template escape → collapses to a literal '$' → regex `.*\.txt$`.
-    inp = dict(cfg.get("input", {}))
-    if "file_type" in inp:                 # schema with a separate reader field → make it text
-        inp["file_type"] = "text"
-    if inp.get("type") in (None, "file", "blob", ""):
-        # `type` is the reader selector in this schema (its current value is a storage kind or empty) →
-        # a text reader is what our .txt chunks need. If the scaffold already set a real reader type
-        # (e.g. "text"/"csv"), leave it untouched.
-        if "file_type" not in inp:
-            inp["type"] = "text"
-    if isinstance(inp.get("storage"), dict):   # nested-storage layout (newer schema)
-        inp["storage"]["base_dir"] = _INPUT_SUBDIR
-    else:
-        inp["base_dir"] = _INPUT_SUBDIR
-    inp["file_pattern"] = r".*\.txt$$"
-    cfg["input"] = inp
-    cfg.setdefault("chunks", {})
-    cfg["chunks"]["size"] = int(settings.graphrag_chunk_size)
-    cfg["chunks"].setdefault("overlap", 100)
+    # Use GraphRAG's built-in default prompts (no prompts/ dir since we skip init): remove the file paths.
+    for section in ("extract_graph", "summarize_descriptions", "community_reports", "extract_claims",
+                    "local_search", "global_search", "drift_search", "basic_search"):
+        sec = cfg.get(section)
+        if isinstance(sec, dict):
+            for key in ("prompt", "graph_prompt", "text_prompt", "map_prompt", "reduce_prompt",
+                        "knowledge_prompt"):
+                sec.pop(key, None)
 
     settings_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
@@ -542,28 +522,37 @@ def index_exists() -> bool:
         return False
 
 
-# Minimal fallback settings.yaml if `graphrag init` is unavailable in the installed version (patched by
-# _scaffold_settings before use). Uses the v2 `models:` schema.
+# Fallback settings.yaml used ONLY if GraphRAG's own INIT_YAML template can't be imported (unexpected
+# package layout). Matches the GraphRAG 3.x schema (completion_models/embedding_models, input.type as the
+# reader, separate input_storage) and is finalised by _scaffold_settings (model wiring + our chunk dir).
 _MINIMAL_SETTINGS = """\
-models:
-  default_chat_model:
-    type: openai_chat
+completion_models:
+  default_completion_model:
+    model_provider: openai
     model: placeholder
+embedding_models:
   default_embedding_model:
-    type: openai_embedding
+    model_provider: openai
     model: placeholder
 input:
+  type: text
+input_storage:
   type: file
-  file_type: text
   base_dir: input
-  file_pattern: '.*\\.txt$$'
-chunks:
+output_storage:
+  type: file
+  base_dir: output
+chunking:
+  type: tokens
   size: 1200
   overlap: 100
+vector_store:
+  type: lancedb
+  db_uri: output/lancedb
 embed_text:
-  model_id: default_embedding_model
+  embedding_model_id: default_embedding_model
 extract_graph:
-  model_id: default_chat_model
+  completion_model_id: default_completion_model
 community_reports:
-  model_id: default_chat_model
+  completion_model_id: default_completion_model
 """
