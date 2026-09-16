@@ -513,6 +513,19 @@ class Settings(BaseSettings):
     # Set False to always do a full rebuild. The FIRST build is always full (nothing to diff against);
     # delete <graphrag_root_dir>/output to force a full rebuild.
     graphrag_incremental: bool = True
+    # DOMAIN entity types for extraction — this is what makes the graph speak POS instead of the generic
+    # default (organization/person/geo/event). GraphRAG's extraction prompt is parameterised by these, so
+    # the model tags SmartCard/Transaction/KioskStation/Function/... nodes. Comma-separated (env-friendly).
+    graphrag_entity_types: str = "Function,SmartCard,Transaction,Balance,KioskStation,Endpoint,Screen"
+    # Prepend a SHORT POS-domain preamble to GraphRAG's own extraction prompt (best-effort: we augment the
+    # installed default so the strict tuple format stays valid; if the default can't be located, we fall
+    # back to entity_types only — still POS-typed). Set False to use the stock prompt unchanged.
+    graphrag_domain_prompt: bool = True
+    # WHOLE-FUNCTION retrieval: GraphRAG re-chunks code into ~1200-token text units, which can SPLIT a
+    # function so the buggy line (e.g. a guard) and its symptom land in different units. When on, a search
+    # hit is expanded to the ORIGINAL whole tree-sitter chunk (the full function/section) via the sidecar,
+    # so the model sees the cause and the symptom together — matching the Chroma/Neo4j backends' behaviour.
+    graphrag_whole_function: bool = True
     # Outer wall-clock cap on the REMOTE (Claude) DIAGNOSE call so a hung request can never freeze the
     # repair — on timeout the chain moves to the next provider, then the demo fallback. Claude is fast,
     # so 90s is ample. The LOCAL provider does NOT use this — it gets its own, much larger budget

@@ -1666,6 +1666,20 @@ the live run (all committed on `cloud-agnostic-agent`):
 - ⏱️ Live timing: `extract_graph` ≈ 4–5 units/min for 513 units on the L4 (~2–3 h full build). Incremental
   makes routine re-indexes after a code/doc edit far cheaper. `python -m graphrag` is the working CLI form
   (the `graphrag` console `init` prompts); `_run_graphrag` uses it for `index`/`update`.
+- **POS-domain typing + whole-function retrieval** (after the first live diagnose miss — qwen-14b relabelled
+  `RPS_STATION_ID`→`VPS_STATION_ID` instead of removing the `&& !issuedSmartCard` guard). Two additive fixes:
+  (a) `graphrag_entity_types` (default `Function,SmartCard,Transaction,Balance,KioskStation,Endpoint,Screen`)
+  is written into `extract_graph.entity_types`, and — best-effort — a short POS preamble (`_POS_PREAMBLE`) is
+  prepended to GraphRAG's OWN default extraction prompt (fetched via `_default_extract_prompt()`; if the
+  template can't be located, entity_types still apply) → the Neo4j graph now uses POS types.
+  (b) `graphrag_whole_function` (default on): GraphRAG re-chunks code into ~1200-token text units, which can
+  SPLIT a function so the buggy guard and its symptom land in different units; `search()` now expands each
+  hit to the ORIGINAL whole tree-sitter chunk (read from `input/<content-hash>.txt` via the sidecar,
+  deduped) so the cause + symptom are shown together, matching the Chroma/Neo4j whole-function behaviour.
+  Both improve retrieval/graph quality but do NOT change the reasoning ceiling — a correct root-cause fix on
+  the hardest bug still needs a stronger model (qwen2.5-coder:32b / Claude). No regression (defaults inert
+  for non-msgraphrag; 22/22 `test_cloud_agnostic` green). A demo walk-through doc lives at
+  `docs/Auto_Repair_GraphRAG_Demo_Walkthrough.docx`.
 
 ### Never
 

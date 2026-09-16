@@ -189,8 +189,9 @@ def _scaffold_settings():
     cfg.setdefault("input_storage", {"type": "file"})["base_dir"] = _INPUT_SUBDIR
     cfg.setdefault("chunking", {})["size"] = int(settings.graphrag_chunk_size)
 
-    # Use GraphRAG's built-in default prompts (no prompts/ dir since we skip init): remove the file paths.
-    for section in ("extract_graph", "summarize_descriptions", "community_reports", "extract_claims",
+    # Use GraphRAG's built-in default prompts for MOST stages (no prompts/ dir since we skip init):
+    # remove the file paths. extract_graph is handled separately below (POS domain typing).
+    for section in ("summarize_descriptions", "community_reports", "extract_claims",
                     "local_search", "global_search", "drift_search", "basic_search"):
         sec = cfg.get(section)
         if isinstance(sec, dict):
@@ -198,7 +199,61 @@ def _scaffold_settings():
                         "knowledge_prompt"):
                 sec.pop(key, None)
 
+    # ── POS DOMAIN TYPING (the lever that makes the graph speak POS) ────────────────────────────
+    eg = cfg.setdefault("extract_graph", {})
+    types = [t.strip() for t in settings.graphrag_entity_types.split(",") if t.strip()]
+    if types:
+        eg["entity_types"] = types      # GraphRAG's extraction prompt is parameterised by these
+    # Optionally add a short POS preamble to GraphRAG's OWN default extraction prompt (keeps the strict
+    # tuple format valid). If we can't locate the default template, fall back to the built-in prompt —
+    # entity_types alone still make the graph POS-typed.
+    if settings.graphrag_domain_prompt and (base := _default_extract_prompt()):
+        pdir = root / "prompts"; pdir.mkdir(parents=True, exist_ok=True)
+        (pdir / "extract_graph.txt").write_text(_POS_PREAMBLE.rstrip() + "\n\n" + base, encoding="utf-8")
+        eg["prompt"] = "prompts/extract_graph.txt"
+        print("  [msgraphrag] POS extraction prompt written (entity_types + domain preamble).")
+    else:
+        eg.pop("prompt", None)
+        print(f"  [msgraphrag] POS entity_types applied ({', '.join(types)}); using default extraction prompt.")
+
     settings_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+
+# A short domain preamble PREPENDED to GraphRAG's own extraction prompt. It only adds context — the
+# strict tuple format + placeholders come from the appended default prompt, so this can't break parsing.
+_POS_PREAMBLE = """\
+-Domain context-
+The text below is source code and design/requirements/test documentation for a POINT-OF-SALE (POS)
+kiosk application. It has two kiosk stations: an RPS station where PURCHASES happen, and a VPS
+ValuePass station where SMART CARDS are issued/validated and BALANCES are checked. A purchase at RPS
+must reduce the card BALANCE and record a PURCHASE TRANSACTION so it is visible when the card is later
+checked at VPS. When extracting, prefer the domain entity types provided and capture control/data flow
+relationships such as: a Function CALLS another Function; a purchase RECORDS a Transaction; a
+Transaction UPDATES a Balance; a KioskStation ISSUES/VALIDATES a SmartCard; an Endpoint/module
+PERSISTS data. Then follow the standard instructions below exactly.
+"""
+
+
+def _default_extract_prompt() -> str | None:
+    """GraphRAG's own default entity/relationship extraction prompt text, so we can AUGMENT it (keeping
+    its exact tuple format) rather than hand-writing one that might not match the installed version.
+    Tries the known module locations across GraphRAG 1.x–3.x; returns None if none match (→ we then use
+    the built-in prompt with just entity_types)."""
+    candidates = [
+        ("graphrag.index.operations.extract_graph.graph_extractor_prompt", "GRAPH_EXTRACTION_PROMPT"),
+        ("graphrag.prompts.index.extract_graph", "GRAPH_EXTRACTION_PROMPT"),
+        ("graphrag.prompts.index.extract_graph", "EXTRACT_GRAPH_PROMPT"),
+        ("graphrag.index.graph.extractors.graph.prompts", "GRAPH_EXTRACTION_PROMPT"),
+    ]
+    for mod, attr in candidates:
+        try:
+            m = __import__(mod, fromlist=[attr])
+            v = getattr(m, attr, None)
+            if isinstance(v, str) and "{input_text}" in v and "tuple_delimiter" in v:
+                return v
+        except Exception:
+            continue
+    return None
 
 
 def _run_graphrag(args: list[str], check: bool = True):
@@ -253,6 +308,7 @@ def build_index() -> int:
           f"'{_llm_model()}' via {_api_base()} (LLM-heavy; slow on CPU)…")
     _run_graphrag([op, "--root", str(root)], check=True)
     _TU_CACHE.clear()
+    _WHOLE_CACHE.clear()
 
     n = _count_text_units()
     print(f"Microsoft GraphRAG index complete: {n} text units + entity/community graph at {_output_dir()}.")
@@ -394,6 +450,50 @@ def _title_to_meta() -> dict:
     return {k: v for k, v in _metadata_map().items()}
 
 
+def _title_variants(title: str):
+    """Filename spellings GraphRAG may store as the document `title` (with/without .txt, path or bare)."""
+    if not title:
+        return []
+    name = Path(title).name
+    return [name, name + ".txt", Path(name).stem + ".txt", title]
+
+
+def _sidecar_lookup(title: str, sidecar: dict) -> dict:
+    """Robustly resolve a document title to our metadata sidecar entry across title spellings."""
+    for cand in _title_variants(title):
+        if cand in sidecar:
+            return dict(sidecar[cand])
+    return {}
+
+
+def _chunk_filename(title: str) -> str:
+    """The on-disk input filename for a title (the WHOLE original tree-sitter chunk), or ''."""
+    for cand in _title_variants(title):
+        if (_input_dir() / cand).exists():
+            return cand
+    return ""
+
+
+_WHOLE_CACHE: dict = {}
+
+
+def _whole_chunk_for(chunk_file: str) -> str | None:
+    """Read the ORIGINAL whole tree-sitter chunk (full function / doc section) for a hit, so the model
+    sees the buggy line and its context together even when GraphRAG split the function into text units.
+    Cached per file; returns None if the file is missing (→ caller keeps the text-unit snippet)."""
+    if not chunk_file:
+        return None
+    if chunk_file in _WHOLE_CACHE:
+        return _WHOLE_CACHE[chunk_file]
+    p = _input_dir() / chunk_file
+    try:
+        txt = p.read_text(encoding="utf-8") if p.exists() else None
+    except Exception:
+        txt = None
+    _WHOLE_CACHE[chunk_file] = txt
+    return txt
+
+
 def _load_text_units() -> dict:
     """Load text units with their real source metadata and local embeddings, cached per output build.
 
@@ -431,10 +531,9 @@ def _load_text_units() -> dict:
             first = doc_ids[0] if doc_ids is not None and len(doc_ids) else None
         except Exception:
             first = None
-        if first is not None:
-            title = id_to_title.get(str(first))
-            if title:
-                m = dict(title_meta.get(Path(title).name, {}))
+        title = id_to_title.get(str(first)) if first is not None else None
+        if title:
+            m = _sidecar_lookup(title, title_meta)
         texts.append(text)
         meta.append({
             "source": m.get("source", ""),
@@ -442,6 +541,7 @@ def _load_text_units() -> dict:
             "start_line": m.get("start_line"),
             "end_line": m.get("end_line"),
             "section": m.get("section"),
+            "_chunk_file": _chunk_filename(title),   # the input file = the WHOLE original tree-sitter chunk
         })
 
     embs = np.array(_embeddings().embed_documents(texts), dtype="float32") if texts else np.zeros((0, 1), "float32")
@@ -485,7 +585,7 @@ def _rank(q, M, np):
 # ── search ─────────────────────────────────────────────────────────────────────────
 def _doc(i: int, cache) -> "object":
     from langchain_core.documents import Document
-    return Document(page_content=cache["texts"][i], metadata=dict(cache["meta"][i]))
+    return Document(page_content=cache["texts"][i], metadata=_clean_meta(cache["meta"][i]))
 
 
 def search(query_text, k=4, where=None):
@@ -507,14 +607,42 @@ def search(query_text, k=4, where=None):
 
     # Optional type filter ({"type": {"$in": [...]}} or {"type": "x"}) — post-filter on real metadata.
     type_ok = _type_predicate(where)
-    picked = [i for i in order if type_ok(meta[i])][:k]
-    results = [_doc(i, cache) for i in picked]
+    from langchain_core.documents import Document
+    results, seen = [], set()
+    for i in order:
+        if not type_ok(meta[i]):
+            continue
+        m = meta[i]
+        # WHOLE-FUNCTION expansion: return the ORIGINAL tree-sitter chunk (full function/section) instead
+        # of GraphRAG's possibly-truncated text unit, so the buggy line + its context stay together. Dedupe
+        # by the source chunk so several units of one function collapse to one whole-function hit.
+        whole = _whole_chunk_for(m.get("_chunk_file")) if settings.graphrag_whole_function else None
+        if whole is not None:
+            key = m.get("_chunk_file")
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(Document(page_content=whole, metadata=_clean_meta(m)))
+        else:
+            key = (m.get("source"), texts[i][:40])
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(_doc(i, cache))
+        if len(results) >= k:
+            break
 
     # Blend in the graph's community summaries only for an unfiltered query (retrieve_context's main
     # code/general passes), never for the type-filtered code-only or source passes — keeps those pure.
     if not where:
         results += _community_docs(query_text, k=2)
     return results
+
+
+def _clean_meta(m: dict) -> dict:
+    """Drop internal (_-prefixed) keys so the Document carries only the standard metadata the other
+    backends expose (source/type/start_line/end_line/section)."""
+    return {k: v for k, v in m.items() if not k.startswith("_")}
 
 
 def _type_predicate(where):
