@@ -49,6 +49,20 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 RUN pip install --no-cache-dir -e ".[cloud,playwright,repair,graphrag]" langchain-ollama \
     && python -m playwright install --with-deps chromium
 
+# OPTIONAL: the REAL Microsoft GraphRAG pipeline (REPAIR_RETRIEVAL_BACKEND=msgraphrag). It is a HEAVY
+# package whose resolver pins can clash with the core stack, so it is NOT installed by default — the
+# default image is byte-identical and carries zero regression risk. Turn it on for the machine (e.g. a
+# GPU box running qwen2.5-coder) with `--build-arg INSTALL_MSGRAPHRAG=true`; the compose `build.args`
+# wires this to the INSTALL_MSGRAPHRAG env, and start-all.sh sets it for LOCAL_REPAIR=msgraphrag. When
+# false this RUN is a no-op layer. graphrag is lazy-imported (ms_graphrag_store), so even when installed
+# it changes nothing until msgraphrag is actually selected.
+ARG INSTALL_MSGRAPHRAG=false
+RUN if [ "$INSTALL_MSGRAPHRAG" = "true" ]; then \
+        pip install --no-cache-dir -e ".[msgraphrag]"; \
+    else \
+        echo "Skipping [msgraphrag] (build with --build-arg INSTALL_MSGRAPHRAG=true to include it)"; \
+    fi
+
 # Now the real source. Editing anything here busts ONLY this layer (fast) — the dep layer stays cached.
 COPY . .
 

@@ -307,11 +307,15 @@ def collect_documents():
 def build_codebase_index():
     """Walks through artifacts, parses files, and populates the active retrieval store.
 
-    Backend is config-gated (settings.repair_retrieval_backend): "chroma" (default, unchanged) or
-    "graphrag" (Neo4j). The graphrag path is a lazy import so the default carries no new dependency."""
+    Backend is config-gated (settings.repair_retrieval_backend): "chroma" (default, unchanged),
+    "graphrag" (Neo4j graph-RAG) or "msgraphrag" (the real Microsoft GraphRAG pipeline). The two graph
+    backends are lazy imports so the default carries no new dependency."""
     if settings.repair_retrieval_backend == "graphrag":
         from repair_agent import graphrag_store   # lazy: only when the graphrag backend is selected
         return graphrag_store.build_index()
+    if settings.repair_retrieval_backend == "msgraphrag":
+        from repair_agent import ms_graphrag_store   # lazy: only when the Microsoft GraphRAG backend is selected
+        return ms_graphrag_store.build_index()
 
     all_documents = collect_documents()
 
@@ -397,12 +401,16 @@ def search(query_text, k=4, where=None):
     """Semantic search over the active retrieval store, with an optional metadata filter (e.g.
     {"type": {"$in": ["code_block", "code_file"]}} to bias toward source code).
 
-    Config-gated backend (settings.repair_retrieval_backend): "chroma" (default) or "graphrag"
-    (Neo4j). Both return LangChain Documents with identical metadata keys (source/type/start_line/
-    end_line/section), so retrieve_context is backend-agnostic. The graphrag path is a lazy import."""
+    Config-gated backend (settings.repair_retrieval_backend): "chroma" (default), "graphrag" (Neo4j)
+    or "msgraphrag" (Microsoft GraphRAG). All return LangChain Documents with identical metadata keys
+    (source/type/start_line/end_line/section), so retrieve_context is backend-agnostic. The graph
+    backends are lazy imports."""
     if settings.repair_retrieval_backend == "graphrag":
         from repair_agent import graphrag_store   # lazy: only when the graphrag backend is selected
         return graphrag_store.search(query_text, k=k, where=where)
+    if settings.repair_retrieval_backend == "msgraphrag":
+        from repair_agent import ms_graphrag_store   # lazy: only when the Microsoft GraphRAG backend is selected
+        return ms_graphrag_store.search(query_text, k=k, where=where)
 
     vector_db = _vector_db()
     if where:

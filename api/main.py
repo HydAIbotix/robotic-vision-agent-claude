@@ -558,6 +558,12 @@ def repair_index_status():
             exists = graphrag_store.index_exists()
         except Exception:
             exists = False
+    elif backend == "msgraphrag":
+        try:
+            from repair_agent import ms_graphrag_store
+            exists = ms_graphrag_store.index_exists()
+        except Exception:
+            exists = False
     else:
         exists = PERSIST_DIR.exists()
     return {

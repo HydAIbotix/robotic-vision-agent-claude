@@ -453,17 +453,46 @@ class Settings(BaseSettings):
     #                          file-neighbourhood expansion done as a graph query. Nothing leaves the
     #                          box. `langchain_neo4j` / `neo4j` are imported LAZILY (in graphrag_store),
     #                          so selecting "chroma" carries no new dependency and nothing changes.
+    #   "msgraphrag"         — the REAL Microsoft GraphRAG pipeline: a LOCAL LLM reads the code + docs
+    #                          and extracts entities/relationships, clusters them into communities and
+    #                          writes community summaries, producing a knowledge graph (parquet +
+    #                          LanceDB). Retrieval draws on the graph's text units + community reports.
+    #                          `graphrag`/`pandas` are imported LAZILY (in ms_graphrag_store), so
+    #                          selecting anything else carries no new dependency. See the Microsoft
+    #                          GraphRAG block below.
     # The LOCAL auto-repair stack (for a customer who wants repair done entirely in-house, no code or
-    # documents sent out) = repair_retrieval_backend="graphrag" + repair_llm_backend="local" (Ollama
-    # with a lightweight Llama, e.g. REPAIR_LOCAL_MODEL=llama3.2:3b for a CPU demo). Both are the
-    # SECONDARY/backup option; Chroma + Claude stays the primary, default combination.
-    repair_retrieval_backend: str = "chroma"    # chroma | graphrag
+    # documents sent out) = a local retrieval backend ("graphrag" or "msgraphrag") + repair_llm_backend
+    # ="local" (Ollama). "graphrag" + a lightweight Llama (REPAIR_LOCAL_MODEL=llama3.2:3b) is the
+    # runnable CPU default; "msgraphrag" + a code model (qwen2.5-coder) is the higher-quality GPU option.
+    # All are the SECONDARY/backup path; Chroma + Claude stays the primary, default combination.
+    repair_retrieval_backend: str = "chroma"    # chroma | graphrag | msgraphrag
     # Neo4j connection (only used when repair_retrieval_backend == "graphrag"). Defaults suit a local
     # single-node Neo4j (e.g. `docker run -p7687:7687 -p7474:7474 neo4j`). Change the password.
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
     neo4j_password: str = "neo4jpassword"
     neo4j_database: str = "neo4j"
+
+    # ── Microsoft GraphRAG (real entity/community LLM-built graph) — repair_retrieval_backend="msgraphrag" ──
+    # The genuine Microsoft GraphRAG indexing pipeline: an LLM reads the code + docs and EXTRACTS
+    # entities/relationships, clusters them into communities (Leiden) and writes community summaries,
+    # producing a knowledge graph that retrieval draws on. It is the heavier, higher-quality cousin of
+    # the Neo4j graph-RAG option.
+    #   CONSISTENCY (why this is ONE model): the graph is BUILT with the SAME local model that DIAGNOSES
+    #   the fix — set repair_llm_backend="local" + repair_local_model=<the code model>, and leave
+    #   graphrag_llm_model empty so GraphRAG reuses repair_local_model. GraphRAG reaches it through
+    #   Ollama's OpenAI-compatible endpoint (graphrag_api_base, default = repair_local_base_url + "/v1").
+    #   The indexing LLM is reasoning-heavy, so this stack is meant for a code model (qwen2.5-coder) and,
+    #   for the larger sizes, a GPU. `graphrag` + `pandas` are imported LAZILY (in ms_graphrag_store) and
+    #   only when this backend is selected, so the default carries no new dependency.
+    graphrag_root_dir: str = "graphrag_workspace"     # GraphRAG workspace (input/output/cache); on the VM /app/data/graphrag
+    graphrag_llm_model: str = ""                        # empty → use repair_local_model (ONE model for graph + fix)
+    graphrag_embedding_model: str = "nomic-embed-text"  # Ollama embedding model GraphRAG uses when building the graph
+    graphrag_api_base: str = ""                        # empty → repair_local_base_url + "/v1" (Ollama OpenAI-compatible)
+    graphrag_api_key: str = "ollama"                   # placeholder; Ollama ignores it but the OpenAI client needs a non-empty key
+    graphrag_search: str = "local"                     # local | global — retrieval strategy over the built graph
+    graphrag_chunk_size: int = 1200                    # GraphRAG text-unit size (tokens) when it re-chunks the inputs
+    graphrag_community_level: int = 2                  # community-hierarchy depth surfaced as extra context
     # Outer wall-clock cap on the REMOTE (Claude) DIAGNOSE call so a hung request can never freeze the
     # repair — on timeout the chain moves to the next provider, then the demo fallback. Claude is fast,
     # so 90s is ample. The LOCAL provider does NOT use this — it gets its own, much larger budget

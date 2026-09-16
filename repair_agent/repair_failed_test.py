@@ -185,9 +185,9 @@ def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
     without crowding out the design-doc / general context (final cap `_MAX_CONTEXT_BLOCKS`)."""
     # Announce the ACTIVE retrieval backend so the console makes it obvious which stack ran.
     print(f"  [REPAIR] RETRIEVE via {retrieval_tool_label()}")
-    # The Chroma backend persists to PERSIST_DIR; the graphrag backend stores in Neo4j (no local dir).
-    # Only enforce the on-disk-index precondition for Chroma so the graphrag path isn't blocked by it.
-    if settings.repair_retrieval_backend != "graphrag" and not PERSIST_DIR.exists():
+    # The Chroma backend persists to PERSIST_DIR; the graph backends store elsewhere (Neo4j /
+    # GraphRAG parquet workspace), so only enforce the on-disk-index precondition for Chroma.
+    if settings.repair_retrieval_backend == "chroma" and not PERSIST_DIR.exists():
         raise RuntimeError(
             f"RAG index not found at {PERSIST_DIR}. Build it first: "
             f"python -m repair_agent.parse_code_and_store"
@@ -308,6 +308,8 @@ def retrieval_tool_label() -> str:
     """Human-readable name of the ACTIVE retrieval backend (for logs + the UI stage sub-label)."""
     if settings.repair_retrieval_backend == "graphrag":
         return "GraphRAG + Neo4j (local)"
+    if settings.repair_retrieval_backend == "msgraphrag":
+        return f"Microsoft GraphRAG · {settings.graphrag_llm_model or settings.repair_local_model} (local)"
     return "Chroma + HuggingFace RAG"
 
 

@@ -79,6 +79,18 @@ graphrag = [
     "langchain-neo4j>=0.1",       # Neo4jVector (vector index) + Neo4jGraph over the code graph
     "neo4j>=5.14",                # Neo4j Python driver
 ]
+# Optional LOCAL auto-repair retrieval: the REAL Microsoft GraphRAG entity/community pipeline.
+# Selected with REPAIR_RETRIEVAL_BACKEND=msgraphrag; imported lazily in repair_agent/ms_graphrag_store.py,
+# so installing this changes nothing until that backend is chosen. HEAVY + reasoning-driven — meant for a
+# code model (qwen2.5-coder) via Ollama's OpenAI-compatible endpoint, on a GPU for the larger sizes. NOT
+# baked into the default image (its resolver pins can conflict); build with --build-arg INSTALL_MSGRAPHRAG=true
+# or `pip install -e ".[msgraphrag]"`. Pins are floors — bump if the installed GraphRAG needs newer.
+msgraphrag = [
+    "graphrag>=1.2",              # Microsoft GraphRAG: LLM-built entity/relationship/community graph
+    "pandas>=2.0",               # read the GraphRAG output parquet artifacts (text units, communities)
+    "pyarrow>=15.0",             # parquet engine for pandas
+    "pyyaml>=6.0",               # scaffold + patch GraphRAG's settings.yaml
+]
 dev = [
     "pytest>=8.0",
     "rich>=13.0",

@@ -1576,6 +1576,60 @@ all config-gated / additive, **no regression to the default Chroma + Claude path
   the hard design bug for Claude or a GPU model. Fine-tuning is high-effort (GPU + curated dataset) and
   a tuned 3B still won't match a larger off-the-shelf coder — not recommended as a first step.
 
+### Recent progress (2026-09-16) — REAL Microsoft GraphRAG backend (3rd retrieval option, ONE local model)
+
+Added the genuine **Microsoft GraphRAG** entity/community indexing pipeline as a THIRD, config-only
+Auto-Repair retrieval backend, alongside Chroma (default) and the Neo4j graph-RAG. It is switchable
+with the SAME env/parameter mechanism as the existing local stack — **no code rework to switch tools
+or models** — and uses **ONE local model for both graph-building AND code-fixing**. Defaults are
+untouched (Chroma + Claude), so **no regression by construction** (22/22 `test_cloud_agnostic` green,
+compose/YAML + `start-all.sh` syntax validated, lazy imports keep the default image identical).
+
+- **New value `repair_retrieval_backend="msgraphrag"`** (chroma | graphrag | **msgraphrag**). The whole
+  surface is the same seam the other backends use — `parse_code_and_store.build_codebase_index()` /
+  `search()` DISPATCH on it (lazy import), `retrieval_tool_label()` + `/api/repair/index` +
+  `/api/health` are backend-aware — so `retrieve_context` and the whole diagnose pipeline are unchanged.
+- **`repair_agent/ms_graphrag_store.py`** (new, mirrors `graphrag_store.py`'s public API:
+  `build_index()/search()/index_exists()`):
+  - **build** = the REAL pipeline. Writes each collected chunk as its own input file + a `metadata.json`
+    sidecar (preserves source/lines through GraphRAG's processing), **scaffolds `settings.yaml` via
+    `graphrag init`** (so it matches the INSTALLED version's schema) and PATCHES only the model wiring
+    to point at Ollama's **OpenAI-compatible** endpoint, then runs `graphrag index`. The LLM does the
+    entity/relationship extraction + Leiden community detection + community summaries.
+  - **search** = similarity over the graph's **text units** (re-embedded with the same cached local
+    HuggingFace model → fast + version-independent of LanceDB), mapped back to Documents with the
+    IDENTICAL metadata keys; supports the `{'source': …}` file-neighbourhood expansion and the
+    `{'type': {'$in': …}}` code filter; for an unfiltered query it also appends the top **community
+    reports** (the graph's synthesised "big picture"). Version-tolerant parquet loading (`text_units` /
+    `create_final_text_units`, etc.).
+- **ONE model for retrieval-graph + fix (the consistency ask).** `GRAPHRAG_LLM_MODEL` defaults empty →
+  `ms_graphrag_store._llm_model()` falls back to `repair_local_model`, and `graphrag_api_base` defaults
+  to `repair_local_base_url + "/v1"`. So the SAME Ollama model (e.g. `qwen2.5-coder:7b`) both BUILDS the
+  graph and DIAGNOSES the patch. Embeddings for the build use a small `nomic-embed-text` (separate, tiny
+  — not "the model"). New config block: `graphrag_root_dir`, `graphrag_llm_model`,
+  `graphrag_embedding_model`, `graphrag_api_base`, `graphrag_api_key`, `graphrag_search`,
+  `graphrag_chunk_size`, `graphrag_community_level`.
+- **Env-switchable, no compose edits — same mechanism as the local stack.** The `docker-compose.yml`
+  app service now reads `REPAIR_*` / `GRAPHRAG_*` from `${VAR:-default}` (defaults reproduce Chroma +
+  Claude byte-for-byte), so switching stacks is env-only. Three one-command recipes are documented IN
+  the compose file (A: Chroma+Claude, B: graphrag+Llama, C: msgraphrag+Qwen).
+- **`start-all.sh` parameter mode extended** (as requested — "add one more value"):
+  `LOCAL_REPAIR=graphrag` (=1, current: Neo4j graph-RAG + Llama) and **`LOCAL_REPAIR=msgraphrag`** (=2:
+  Microsoft GraphRAG + Qwen). The script EXPORTS the right `REPAIR_*`/`INSTALL_MSGRAPHRAG` env (so
+  compose's `${VAR:-default}` picks them up), starts `--profile local-repair` (Ollama; Neo4j idles for
+  msgraphrag), and pulls the model **+ the embedding model** (msgraphrag). Both local modes air-gap by
+  default (`REPAIR_LOCAL_ONLY=true`).
+- **Heavy deps are opt-in (no default-image regression).** New `[msgraphrag]` extra
+  (`graphrag`,`pandas`,`pyarrow`,`pyyaml`). The Dockerfile installs it only under
+  `--build-arg INSTALL_MSGRAPHRAG=true` (compose `build.args` wires it to the `INSTALL_MSGRAPHRAG` env;
+  `LOCAL_REPAIR=msgraphrag` sets it). Default build = unchanged image. `graphrag` is lazy-imported, so
+  even when installed it changes nothing until msgraphrag is selected.
+- **To run on the VM/GPU:** `LOCAL_REPAIR=msgraphrag ./start-all.sh` (or the compose recipe C), then
+  `POST /api/repair/index` (this RUNS the pipeline — slow on CPU, meant for a GPU with `qwen2.5-coder`),
+  then a failing test. Verify: `/api/health` → `"repair_retrieval":"msgraphrag","repair_llm":"local"`.
+  ⚠️ The GraphRAG index build is LLM-heavy; a 3B/CPU box is impractical for it — this is the GPU-track
+  quality option. The graph workspace persists under `./data/graphrag`.
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login
