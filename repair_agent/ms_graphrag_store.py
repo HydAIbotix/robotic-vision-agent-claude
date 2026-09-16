@@ -182,8 +182,12 @@ def _scaffold_settings():
         cfg["embeddings"]["llm"] = {**cfg["embeddings"].get("llm", {}), **embed}
 
     # Point input at our per-chunk .txt files and set the text-unit size. Keep other keys as scaffolded.
+    # NOTE the DOUBLE '$$': GraphRAG runs string.Template env-substitution over the whole settings.yaml
+    # before parsing it, so a bare '$' (the regex end-anchor) is treated as a malformed placeholder and
+    # raises "Invalid placeholder in string". '$$' is the Template escape → collapses back to a literal
+    # '$', giving the regex `.*\.txt$`. (GraphRAG's own default file_pattern uses the same $$ escape.)
     cfg["input"] = {**cfg.get("input", {}), "type": "file", "file_type": "text",
-                    "base_dir": _INPUT_SUBDIR, "file_pattern": r".*\.txt$"}
+                    "base_dir": _INPUT_SUBDIR, "file_pattern": r".*\.txt$$"}
     cfg.setdefault("chunks", {})
     cfg["chunks"]["size"] = int(settings.graphrag_chunk_size)
     cfg["chunks"].setdefault("overlap", 100)
@@ -443,7 +447,7 @@ input:
   type: file
   file_type: text
   base_dir: input
-  file_pattern: ".*\\\\.txt$"
+  file_pattern: '.*\\.txt$$'
 chunks:
   size: 1200
   overlap: 100
