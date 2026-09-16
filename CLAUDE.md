@@ -1630,6 +1630,43 @@ compose/YAML + `start-all.sh` syntax validated, lazy imports keep the default im
   ⚠️ The GraphRAG index build is LLM-heavy; a 3B/CPU box is impractical for it — this is the GPU-track
   quality option. The graph workspace persists under `./data/graphrag`.
 
+#### Update (2026-09-16, later) — verified live on a GCE **g2-standard-8 (L4)**; 5 follow-ups
+
+Ran the real Microsoft GraphRAG build end-to-end on the L4 (`qwen2.5-coder:14b`). Fixes/additions after
+the live run (all committed on `cloud-agnostic-agent`):
+- **GraphRAG 3.1.2 schema.** `graphrag init` is INTERACTIVE in 3.x (prompts for the model → aborts under
+  subprocess), so `_scaffold_settings` was silently using a wrong hand-written template. Now it builds
+  `settings.yaml` from GraphRAG's own `init_content.INIT_YAML` (always version-matched) and wires it to
+  Ollama: `completion_models`/`embedding_models` maps (NOT `models:`), `input.type: text` is the READER
+  (`file` was invalid → "not registered in InputReaderFactory"), storage/base_dir under a SEPARATE
+  `input_storage:`, NO `file_pattern` (text reader defaults to `.txt`, which also killed a `$`-anchor
+  `string.Template` "Invalid placeholder" error), and prompt-file paths DROPPED so GraphRAG uses built-in
+  default prompts (no `prompts/` dir since we skip `init`). Ollama reached via its OpenAI-compatible
+  endpoint (`api_base = repair_local_base_url + /v1`); overriding `api_key` removes the template's
+  `${GRAPHRAG_API_KEY}` (no `.env` needed).
+- **GPU wiring.** `docker-compose.gpu.yml` reserves the NVIDIA GPU for the `ollama` service; `start-all.sh`
+  `GPU=1` layers it (with a pre-check on the nvidia runtime). Host needs the driver + nvidia-container-
+  toolkit; on GCE Shielded VMs **Secure Boot must be OFF** or the module won't load. `OLLAMA_CONTEXT_LENGTH`
+  (default 8192) on the ollama service so community-report prompts (~8k) aren't truncated (Ollama defaults
+  to 4k).
+- **Knowledge docs are config-driven** (`repair_design_doc` / `repair_requirements_doc` (new) /
+  `repair_test_cases` under `repair_docs_dir`). The VM compose points them at the mounted POS repo
+  `docs/Expanded_Version` (Design + Requirements + Test Cases). Requirements doc indexed as authoritative
+  intent.
+- **GraphRAG → Neo4j export** (`graphrag_export_neo4j`, default on): after the build, entities/relationships/
+  community summaries load into Neo4j as `(:Entity)-[:RELATED]->(:Entity)` + `(:Community)` (distinct from
+  the graphrag(Neo4j) RAG store's `RepairChunk/File`), so the graph is BROWSABLE at `:7474`. Best-effort;
+  a down Neo4j never fails the build.
+- **INCREMENTAL builds** (`graphrag_incremental`, default on): after the first full `index`, subsequent
+  `POST /api/repair/index` runs GraphRAG's **`update`** — only NEW/CHANGED code+docs are re-extracted and
+  merged (community detection still re-runs globally). Chunk files are named by a CONTENT hash (source +
+  text, line-independent), so an unchanged function/doc keeps the same identity and is skipped. Delete
+  `data/graphrag/output` (or set `graphrag_incremental=false`) to force a full rebuild. The `update` diffs
+  against the OUTPUT parquet, which is never deleted (only the input dir is rewritten).
+- ⏱️ Live timing: `extract_graph` ≈ 4–5 units/min for 513 units on the L4 (~2–3 h full build). Incremental
+  makes routine re-indexes after a code/doc edit far cheaper. `python -m graphrag` is the working CLI form
+  (the `graphrag` console `init` prompts); `_run_graphrag` uses it for `index`/`update`.
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login

@@ -506,6 +506,13 @@ class Settings(BaseSettings):
     # graphrag(Neo4j) RAG store (RepairChunk/File). Best-effort: a down/unreachable Neo4j logs a warning
     # and does NOT fail the (expensive) build. Reuses the NEO4J_* connection settings above.
     graphrag_export_neo4j: bool = True
+    # INCREMENTAL builds: when a graph already exists, run GraphRAG's `update` (re-extracts only NEW/
+    # CHANGED docs and merges) instead of a full `index` rebuild. Chunk files are named by a CONTENT hash
+    # (source + text, line-independent), so an unchanged function/doc keeps the same identity and is
+    # skipped; only edited/added code + docs are re-processed (community detection still re-runs globally).
+    # Set False to always do a full rebuild. The FIRST build is always full (nothing to diff against);
+    # delete <graphrag_root_dir>/output to force a full rebuild.
+    graphrag_incremental: bool = True
     # Outer wall-clock cap on the REMOTE (Claude) DIAGNOSE call so a hung request can never freeze the
     # repair — on timeout the chain moves to the next provider, then the demo fallback. Claude is fast,
     # so 90s is ample. The LOCAL provider does NOT use this — it gets its own, much larger budget

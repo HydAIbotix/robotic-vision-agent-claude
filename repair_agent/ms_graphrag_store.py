@@ -106,19 +106,27 @@ def _write_inputs() -> dict:
     stores each input file's name as the document title, which we join back on at search time)."""
     from repair_agent.parse_code_and_store import collect_documents
 
+    import hashlib
     documents = collect_documents()
     inp = _input_dir()
-    # Clean slate so a rebuild reflects the CURRENT on-disk code (mirrors the other backends' reset).
+    # Clean slate so the input dir reflects EXACTLY the current chunks. Filenames are CONTENT hashes
+    # (below), so identical content lands at the identical filename → GraphRAG's `update` recognises an
+    # unchanged document and skips re-extracting it; only edited/added chunks get new names/ids. Wiping
+    # here is safe for incremental because `update` diffs against the OUTPUT parquet (which we never
+    # delete), not against the input folder.
     if inp.exists():
         import shutil
         shutil.rmtree(inp, ignore_errors=True)
     inp.mkdir(parents=True, exist_ok=True)
 
     meta: dict = {}
-    for i, doc in enumerate(documents):
-        name = f"chunk_{i:05d}.txt"
-        (inp / name).write_text(doc.page_content, encoding="utf-8")
+    for doc in documents:
         m = dict(doc.metadata)
+        # Line-INDEPENDENT identity: hash source + text (not line numbers), so a function that only
+        # shifted lines after an edit elsewhere keeps the same id and is not needlessly re-extracted.
+        key = (str(m.get("source", "")) + "\n" + doc.page_content).encode("utf-8")
+        name = hashlib.md5(key).hexdigest()[:20] + ".txt"
+        (inp / name).write_text(doc.page_content, encoding="utf-8")
         meta[name] = {
             "source": m.get("source", ""),
             "type": m.get("type", ""),
@@ -222,10 +230,12 @@ def _run_graphrag(args: list[str], check: bool = True):
 def build_index() -> int:
     """Run the Microsoft GraphRAG pipeline over the collected chunks and return the number indexed.
 
-    Writes per-chunk inputs + a metadata sidecar, scaffolds/patches settings.yaml to use the local
-    Ollama model + embeddings, then runs `graphrag index`. The heavy work (entity/relationship
-    extraction, community detection + summarisation) is the LLM's — it is SLOW on CPU and meant for a
-    code model on a GPU. Idempotent: safe to re-run to reflect the current on-disk code."""
+    Writes per-chunk inputs + a metadata sidecar, scaffolds settings.yaml (local Ollama model +
+    embeddings), then runs the pipeline. INCREMENTAL by default: if a graph already exists and
+    settings.graphrag_incremental is on, run GraphRAG's `update` (re-extract only NEW/CHANGED docs and
+    merge) instead of a full `index`; otherwise a full `index`. The heavy work (entity/relationship
+    extraction, community detection + summarisation) is the LLM's — SLOW, meant for a code model on a GPU.
+    Idempotent: safe to re-run to reflect the current on-disk code."""
     root = _root()
     root.mkdir(parents=True, exist_ok=True)
     meta = _write_inputs()
@@ -233,10 +243,15 @@ def build_index() -> int:
         print("No valid chunks found to index (msgraphrag).")
         return 0
 
-    print(f"Extracted {len(meta)} chunks. Building the Microsoft GraphRAG graph with "
-          f"'{_llm_model()}' via {_api_base()} (this is LLM-heavy and slow on CPU)…")
     _scaffold_settings()
-    _run_graphrag(["index", "--root", str(root)], check=True)
+    # Full `index` on the first build (nothing to diff against); `update` (incremental) afterwards. The
+    # first build establishes the OUTPUT parquet that `update` diffs the current inputs against.
+    incremental = settings.graphrag_incremental and index_exists()
+    op = "update" if incremental else "index"
+    print(f"Extracted {len(meta)} chunks. Running Microsoft GraphRAG '{op}' "
+          f"({'incremental — only new/changed docs' if incremental else 'full build'}) with "
+          f"'{_llm_model()}' via {_api_base()} (LLM-heavy; slow on CPU)…")
+    _run_graphrag([op, "--root", str(root)], check=True)
     _TU_CACHE.clear()
 
     n = _count_text_units()
