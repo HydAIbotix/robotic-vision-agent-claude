@@ -7,24 +7,43 @@
 #   [2] QA backend + agents             → FastAPI :8001 + worker
 #         + Postgres + Redis + MinIO    (this repo: robotic-vision-agent-claude)
 #
-# Usage:
-#   ~/robotic-vision-agent-claude/start-all.sh            # build + start both
-#   POS_DIR=/path/to/robotics-kiosk-pos ./start-all.sh    # if the POS repo is elsewhere
-#   PULL=1 ./start-all.sh                                 # git pull both repos first
-#   LOCAL_REPAIR=graphrag  ./start-all.sh                 # ALSO start the LOCAL Auto-Repair stack:
-#                                                         #   Neo4j graph-RAG + a local Llama via Ollama
-#                                                         #   (CPU-friendly). Same as LOCAL_REPAIR=1.
-#   LOCAL_REPAIR=msgraphrag ./start-all.sh                # LOCAL stack using the REAL Microsoft GraphRAG
-#                                                         #   pipeline + a Qwen code model via Ollama
-#                                                         #   (best quality; bakes the graphrag deps,
-#                                                         #   pulls an embedding model). Same as =2.
-#   LOCAL_REPAIR=0 (default) → the standard Chroma + Claude Auto-Repair (no extra services).
-#   GPU=1 LOCAL_REPAIR=msgraphrag ./start-all.sh          # run Ollama on the host NVIDIA GPU (e.g. L4 on
-#                                                         #   a GCE g2-*); needs the NVIDIA driver +
-#                                                         #   nvidia-container-toolkit (see the runbook).
+# ===========================================================================
+# THE THREE AUTO-REPAIR STACKS — exact command + the env values each one sets
+# ===========================================================================
+# You pick a stack with the LEFT-HAND env on the command line; start-all.sh then EXPORTS the
+# RIGHT-HAND values for the app container (compose reads them as ${VAR:-default}). Nothing else changes.
 #
-#   Both local modes are AIR-GAPPED by default (REPAIR_LOCAL_ONLY=true, nothing leaves the box); the
-#   model, base URL, etc. are overridable via the same env names the compose file reads.
+# ── CASE 1 — Default: Chroma + Claude (cloud; no extra services) ────────────────────────────────
+#     ./start-all.sh
+#   Effective values:
+#     LOCAL_REPAIR=0            (nothing exported)
+#     REPAIR_RETRIEVAL_BACKEND = chroma      REPAIR_LLM_BACKEND = claude
+#     (no neo4j/ollama, no GPU, REPAIR_LOCAL_* and INSTALL_MSGRAPHRAG unused)
+#
+# ── CASE 2 — Neo4j graph-RAG + local Llama (data-sovereign; CPU-friendly) ───────────────────────
+#     LOCAL_REPAIR=graphrag REPAIR_LOCAL_MODEL=llama3.2:3b ./start-all.sh      # add GPU=1 to use the GPU
+#   Effective values (exported by the script):
+#     COMPOSE_PROFILES         = local-repair          (starts neo4j + ollama)
+#     REPAIR_RETRIEVAL_BACKEND = graphrag              REPAIR_LLM_BACKEND = local
+#     REPAIR_LOCAL_ONLY        = true   (air-gap)      REPAIR_LOCAL_MODEL = llama3.2:3b  (default if omitted)
+#     INSTALL_MSGRAPHRAG       = (unset → false)       GPU = 0  (set GPU=1 to run Ollama on the GPU)
+#
+# ── CASE 3 — REAL Microsoft GraphRAG + Qwen coder (best quality; GPU) ────────────────────────────
+#     GPU=1 LOCAL_REPAIR=msgraphrag REPAIR_LOCAL_MODEL=qwen2.5-coder:14b ./start-all.sh
+#   Effective values (exported by the script):
+#     GPU                      = 1                     (layers docker-compose.gpu.yml → Ollama on the L4)
+#     COMPOSE_PROFILES         = local-repair          (starts neo4j + ollama)
+#     REPAIR_RETRIEVAL_BACKEND = msgraphrag            REPAIR_LLM_BACKEND = local
+#     REPAIR_LOCAL_ONLY        = true   (air-gap)      REPAIR_LOCAL_MODEL = qwen2.5-coder:14b  (default 7b if omitted)
+#     INSTALL_MSGRAPHRAG       = true   (bakes the GraphRAG deps into the image; needs --build)
+#     GRAPHRAG_EMBEDDING_MODEL = nomic-embed-text (compose default, pulled)   GRAPHRAG_EXPORT_NEO4J = true
+#   → one Ollama model (qwen2.5-coder:14b) BUILDS the graph AND fixes the code; the graph is also loaded
+#     into Neo4j so you can browse it (http://<EXTERNAL_IP>:7474).
+#
+# Notes: both local stacks are AIR-GAPPED by default (REPAIR_LOCAL_ONLY=true — nothing leaves the box);
+#   set REPAIR_LOCAL_ONLY=false to keep Claude as a fallback. Any RIGHT-HAND value is overridable on the
+#   command line (they use the SAME names the compose file reads). Other flags:
+#     POS_DIR=/path ./start-all.sh   (POS repo elsewhere)     PULL=1 ./start-all.sh   (git pull first)
 #
 # The QA backend reaches the POS over the VM's INTERNAL IP (from inside the app
 # container); browsers reach the POS over the EXTERNAL IP. Both are printed below.
