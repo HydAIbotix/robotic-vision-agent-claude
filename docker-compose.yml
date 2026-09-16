@@ -261,6 +261,13 @@ services:
     image: ollama/ollama:latest
     profiles: ["local-repair"]
     ports: ["11434:11434"]                # local only; no need to open in the firewall
+    environment:
+      # Default context window for served models. Ollama's own default is small (2k–4k); the Microsoft
+      # GraphRAG community-report step feeds up to ~8k tokens, which would otherwise be TRUNCATED and
+      # weaken the summaries. 8192 covers it. Applies on the next ollama (re)start — a running build is
+      # unaffected. Takes effect for msgraphrag; harmless for the graphrag/Llama stack. GPU VRAM headroom
+      # on the L4 (24 GB) is ample for a 14B model at this context.
+      OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-8192}
     volumes:
       - ollamadata:/root/.ollama          # pulled models persist here (llama3.2:3b etc.)
     restart: unless-stopped
