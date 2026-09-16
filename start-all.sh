@@ -19,6 +19,9 @@
 #                                                         #   (best quality; bakes the graphrag deps,
 #                                                         #   pulls an embedding model). Same as =2.
 #   LOCAL_REPAIR=0 (default) → the standard Chroma + Claude Auto-Repair (no extra services).
+#   GPU=1 LOCAL_REPAIR=msgraphrag ./start-all.sh          # run Ollama on the host NVIDIA GPU (e.g. L4 on
+#                                                         #   a GCE g2-*); needs the NVIDIA driver +
+#                                                         #   nvidia-container-toolkit (see the runbook).
 #
 #   Both local modes are AIR-GAPPED by default (REPAIR_LOCAL_ONLY=true, nothing leaves the box); the
 #   model, base URL, etc. are overridable via the same env names the compose file reads.
@@ -61,6 +64,22 @@ if [ -n "$REPAIR_MODE" ]; then
   echo "==> Local Auto-Repair mode: $REPAIR_MODE  (model: $REPAIR_LOCAL_MODEL, air-gap: ${REPAIR_LOCAL_ONLY})"
 fi
 
+# GPU overlay for Ollama (e.g. the L4 on a GCE g2-* machine). GPU=1 layers docker-compose.gpu.yml so the
+# local model + the Microsoft GraphRAG build run on the GPU instead of the CPU (qwen 14b on CPU is
+# impractical). We pre-check that Docker can actually reach the GPU and, if not, print the fix and keep
+# going on CPU rather than failing the whole launch. Only meaningful with a local-repair mode.
+COMPOSE_GPU=""
+if [ "${GPU:-0}" = "1" ] && [ -n "$REPAIR_MODE" ]; then
+  if command -v nvidia-smi >/dev/null 2>&1 && docker info 2>/dev/null | grep -qi 'nvidia'; then
+    COMPOSE_GPU="-f docker-compose.yml -f docker-compose.gpu.yml"
+    echo "==> GPU enabled for Ollama (docker-compose.gpu.yml)."
+  else
+    echo "!! GPU=1 but Docker cannot see an NVIDIA GPU. Install the driver + nvidia-container-toolkit and" >&2
+    echo "   verify:  docker run --rm --gpus all ollama/ollama:latest nvidia-smi  — then re-run with GPU=1." >&2
+    echo "   Continuing on CPU for now (local inference will be VERY slow)." >&2
+  fi
+fi
+
 # External IP (GCP metadata first, then a public echo as fallback).
 EXTERNAL_IP="$(curl -s -H 'Metadata-Flavor: Google' \
   http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip 2>/dev/null || true)"
@@ -84,8 +103,8 @@ fi
 echo "==> [1/3] Kiosk POS    ($POS_DIR)"
 ( cd "$POS_DIR" && PUBLIC_BASE_URL="http://${EXTERNAL_IP}" docker compose up -d --build )
 
-echo "==> [2/3] QA backend   ($BACKEND_DIR)${PROFILE_ARG:+  (+ local Auto-Repair: Neo4j + Ollama)}"
-( cd "$BACKEND_DIR" && docker compose up -d --build $PROFILE_ARG )
+echo "==> [2/3] QA backend   ($BACKEND_DIR)${PROFILE_ARG:+  (+ local Auto-Repair: Neo4j + Ollama)}${COMPOSE_GPU:+  (GPU)}"
+( cd "$BACKEND_DIR" && docker compose $COMPOSE_GPU up -d --build $PROFILE_ARG )
 
 echo "==> waiting for the API to answer…"
 for _ in $(seq 1 40); do

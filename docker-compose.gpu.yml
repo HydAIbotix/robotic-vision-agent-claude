@@ -1,0 +1,24 @@
+# GPU overlay for the OPTIONAL local Auto-Repair stack — gives Ollama access to the host NVIDIA GPU
+# (e.g. the L4 on a GCE g2-* machine) so a code model like qwen2.5-coder:14b and the Microsoft GraphRAG
+# graph build run on the GPU instead of the CPU.
+#
+# Use it AS AN OVERLAY on top of the base compose (order matters — base first, this second):
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile local-repair up -d
+# start-all.sh adds it automatically for a local-repair mode when you pass GPU=1.
+#
+# PREREQUISITES on the host (one-time — see the runbook / CLAUDE.md):
+#   1. NVIDIA driver installed  (verify:  nvidia-smi)
+#   2. nvidia-container-toolkit installed + `nvidia-ctk runtime configure --runtime=docker`, docker restarted
+#   3. verify Docker can see the GPU:  docker run --rm --gpus all ollama/ollama:latest nvidia-smi
+#
+# This overlay ONLY touches the `ollama` service, so it changes nothing for the app/postgres/minio/redis
+# and nothing at all unless you explicitly pass both files. No effect on a CPU-only host that never uses it.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
