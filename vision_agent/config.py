@@ -398,6 +398,13 @@ class Settings(BaseSettings):
     #   repair_pr_remote / repair_pr_base — git remote + base branch a prepared PR targets.
     repair_codebase_dir: str = "../Kiosk_App/robotics-kiosk-pos"
     repair_docs_dir: str = "./docs"
+    # The specific artifacts under repair_docs_dir that are indexed alongside the code (filenames,
+    # relative to repair_docs_dir). Configurable so a deployment points at its OWN spec/tests without a
+    # code change — e.g. the expanded POS keeps them in the mounted repo under docs/Expanded_Version.
+    # repair_requirements_doc is optional (empty = none); design + test-cases keep the historical names.
+    repair_design_doc: str = "Kiosk_POS_and_SmartCardStation_Production_Design.docx"
+    repair_requirements_doc: str = ""      # optional 2nd .docx (e.g. RPS_VPS_Expanded_Requirements.docx)
+    repair_test_cases: str = "kiosk_e2e_tests.xlsx"
     repair_persist_dir: str = "./docs/chroma_code_db"
     repair_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     # Auto-run the repair agent when a test run has failures (the first failed test), and
@@ -493,6 +500,12 @@ class Settings(BaseSettings):
     graphrag_search: str = "local"                     # local | global — retrieval strategy over the built graph
     graphrag_chunk_size: int = 1200                    # GraphRAG text-unit size (tokens) when it re-chunks the inputs
     graphrag_community_level: int = 2                  # community-hierarchy depth surfaced as extra context
+    # After the pipeline builds the graph (parquet), also LOAD the entities/relationships/community
+    # summaries into Neo4j so the graph is BROWSABLE in the Neo4j Browser (http://<host>:7474,
+    # bolt://…:7687). Uses distinct labels (Entity/Community/RELATED) so it never clashes with the
+    # graphrag(Neo4j) RAG store (RepairChunk/File). Best-effort: a down/unreachable Neo4j logs a warning
+    # and does NOT fail the (expensive) build. Reuses the NEO4J_* connection settings above.
+    graphrag_export_neo4j: bool = True
     # Outer wall-clock cap on the REMOTE (Claude) DIAGNOSE call so a hung request can never freeze the
     # repair — on timeout the chain moves to the next provider, then the demo fallback. Claude is fast,
     # so 90s is ample. The LOCAL provider does NOT use this — it gets its own, much larger budget

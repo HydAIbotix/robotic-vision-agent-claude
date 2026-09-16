@@ -48,8 +48,11 @@ def _resolve(path_str: str) -> Path:
 
 CODEBASE_DIR = _resolve(settings.repair_codebase_dir)
 DOCS_DIR = _resolve(settings.repair_docs_dir)
-DESIGN_DOC_PATH = DOCS_DIR / "Kiosk_POS_and_SmartCardStation_Production_Design.docx"
-TEST_CASES_PATH = DOCS_DIR / "kiosk_e2e_tests.xlsx"
+# The design/requirements/test artifacts are config-driven (filenames under DOCS_DIR) so a deployment
+# points at its own spec without a code change. Requirements doc is optional (blank = none).
+DESIGN_DOC_PATH = DOCS_DIR / settings.repair_design_doc
+REQUIREMENTS_DOC_PATH = (DOCS_DIR / settings.repair_requirements_doc) if settings.repair_requirements_doc else None
+TEST_CASES_PATH = DOCS_DIR / settings.repair_test_cases
 PERSIST_DIR = _resolve(settings.repair_persist_dir)
 EMBEDDING_MODEL_NAME = settings.repair_embedding_model
 
@@ -300,6 +303,10 @@ def collect_documents():
                 print(f"Error parsing {file_path}: {e}")
 
     all_documents.extend(extract_docx_text(DESIGN_DOC_PATH))
+    if REQUIREMENTS_DOC_PATH is not None:
+        # Indexed with the same "design_document" type as the design spec — both are authoritative intent
+        # the code must conform to, so retrieve_context weights them as ground truth for DIAGNOSE.
+        all_documents.extend(extract_docx_text(REQUIREMENTS_DOC_PATH))
     all_documents.extend(extract_xlsx_text(TEST_CASES_PATH))
     return all_documents
 

@@ -261,7 +261,98 @@ def build_index() -> int:
 
     n = _count_text_units()
     print(f"Microsoft GraphRAG index complete: {n} text units + entity/community graph at {_output_dir()}.")
+    # Also load the graph into Neo4j so it is browsable in the Neo4j Browser (best-effort, never fatal).
+    _export_to_neo4j()
     return n or len(meta)
+
+
+def _export_to_neo4j() -> None:
+    """Load the built graph (entities + relationships + community summaries) into Neo4j so it is
+    BROWSABLE in the Neo4j Browser (http://<host>:7474 · bolt://…:7687). Best-effort: any failure
+    (Neo4j down, unexpected parquet columns) logs a warning and NEVER fails the expensive index build.
+    Uses labels Entity/Community + a RELATED edge, distinct from the graphrag(Neo4j) RAG store's
+    RepairChunk/File, so both can coexist in the same database."""
+    if not settings.graphrag_export_neo4j:
+        return
+    try:
+        from repair_agent.graphrag_store import _run   # reuses the NEO4J_* connection settings
+    except Exception as e:
+        print(f"  [msgraphrag] Neo4j export skipped (neo4j driver unavailable: {e})")
+        return
+
+    ents = _load_df("entities")
+    if ents is None or len(ents) == 0:
+        print("  [msgraphrag] no entities parquet found — skipping Neo4j export.")
+        return
+    rels = _load_df("relationships")
+    reports = _load_df("community_reports")
+
+    def _col(df, *names):
+        for nm in names:
+            if nm in df.columns:
+                return nm
+        return None
+
+    try:
+        # Fresh slate for the EXPORTED graph only (leave the RAG store's RepairChunk/File untouched).
+        _run("MATCH (n:Entity) DETACH DELETE n")
+        _run("MATCH (n:Community) DETACH DELETE n")
+
+        name_c, type_c, desc_c = _col(ents, "title", "name"), _col(ents, "type"), _col(ents, "description")
+        erows = []
+        for _, r in ents.iterrows():
+            nm = str(r.get(name_c) or "").strip()
+            if nm:
+                erows.append({"name": nm,
+                              "type": str(r.get(type_c) or "") if type_c else "",
+                              "description": str(r.get(desc_c) or "") if desc_c else ""})
+        _run("UNWIND $rows AS row MERGE (e:Entity {name: row.name}) "
+             "SET e.type = row.type, e.description = row.description", {"rows": erows})
+
+        rel_n = 0
+        if rels is not None and len(rels):
+            s_c, t_c = _col(rels, "source"), _col(rels, "target")
+            rd_c, w_c = _col(rels, "description"), _col(rels, "weight")
+            rrows = []
+            for _, r in rels.iterrows():
+                s, t = str(r.get(s_c) or "").strip(), str(r.get(t_c) or "").strip()
+                if not s or not t:
+                    continue
+                try:
+                    w = float(r.get(w_c)) if w_c and r.get(w_c) is not None else 1.0
+                except Exception:
+                    w = 1.0
+                rrows.append({"s": s, "t": t, "weight": w,
+                              "description": str(r.get(rd_c) or "") if rd_c else ""})
+            _run("UNWIND $rows AS row MERGE (a:Entity {name: row.s}) MERGE (b:Entity {name: row.t}) "
+                 "MERGE (a)-[x:RELATED]->(b) SET x.description = row.description, x.weight = row.weight",
+                 {"rows": rrows})
+            rel_n = len(rrows)
+
+        com_n = 0
+        if reports is not None and len(reports):
+            id_c, lvl_c = _col(reports, "community", "id"), _col(reports, "level")
+            tit_c, sum_c = _col(reports, "title"), _col(reports, "summary", "full_content")
+            crows = []
+            for _, r in reports.iterrows():
+                cid = r.get(id_c)
+                if cid is None:
+                    continue
+                try:
+                    lvl = int(r.get(lvl_c)) if lvl_c and r.get(lvl_c) is not None else 0
+                except Exception:
+                    lvl = 0
+                crows.append({"id": str(cid), "level": lvl,
+                              "title": str(r.get(tit_c) or "") if tit_c else "",
+                              "summary": str(r.get(sum_c) or "") if sum_c else ""})
+            _run("UNWIND $rows AS row MERGE (c:Community {id: row.id}) "
+                 "SET c.level = row.level, c.title = row.title, c.summary = row.summary", {"rows": crows})
+            com_n = len(crows)
+
+        print(f"  [msgraphrag] Neo4j export: {len(erows)} entities, {rel_n} relationships, "
+              f"{com_n} community reports → {settings.neo4j_uri} (browse in the Neo4j Browser).")
+    except Exception as e:
+        print(f"  [msgraphrag] Neo4j export failed (non-fatal): {e}")
 
 
 # ── output artifact loading (version-tolerant) ─────────────────────────────────────

@@ -179,6 +179,16 @@ services:
       GRAPHRAG_EMBEDDING_MODEL: ${GRAPHRAG_EMBEDDING_MODEL:-nomic-embed-text}
       GRAPHRAG_API_BASE: ${GRAPHRAG_API_BASE:-http://ollama:11434/v1}
       GRAPHRAG_SEARCH: ${GRAPHRAG_SEARCH:-local}
+      # After building the graph, ALSO load entities/relationships/community summaries into Neo4j so the
+      # graph is browsable at http://<host>:7474 (bolt://…:7687). Best-effort; needs the neo4j service up.
+      GRAPHRAG_EXPORT_NEO4J: ${GRAPHRAG_EXPORT_NEO4J:-true}
+      # --- Auto-Repair KNOWLEDGE SOURCES: the spec/requirements/test docs indexed alongside the POS code
+      # (the graph is built from these three docs + /repos/pos source). They live in the MOUNTED POS repo
+      # under docs/Expanded_Version, so they travel with the app under test. Override any of them by env.
+      REPAIR_DOCS_DIR: ${REPAIR_DOCS_DIR:-/repos/pos/docs/Expanded_Version}
+      REPAIR_DESIGN_DOC: ${REPAIR_DESIGN_DOC:-RPS_VPS_Expanded_Design.docx}
+      REPAIR_REQUIREMENTS_DOC: ${REPAIR_REQUIREMENTS_DOC:-RPS_VPS_Expanded_Requirements.docx}
+      REPAIR_TEST_CASES: ${REPAIR_TEST_CASES:-RPS_VPS_Expanded_Test_Cases.xlsx}
     volumes:
       - ./data:/app/data                    # app_map.json + screenshots/ + results/  → visible on the host
       - ./data/test_plans:/app/test_plans   # cached Claude plans (path not env-configurable)
