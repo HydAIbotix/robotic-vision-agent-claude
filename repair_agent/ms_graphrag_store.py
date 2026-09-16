@@ -181,13 +181,31 @@ def _scaffold_settings():
         cfg.setdefault("embeddings", {})
         cfg["embeddings"]["llm"] = {**cfg["embeddings"].get("llm", {}), **embed}
 
-    # Point input at our per-chunk .txt files and set the text-unit size. Keep other keys as scaffolded.
+    # Point input at our per-chunk .txt files and set the text-unit size. IMPORTANT: preserve the input
+    # block that `graphrag init` scaffolded for the INSTALLED version and only nudge the few fields we
+    # need — do NOT force `type`. In current GraphRAG `input.type` is the READER type registered in the
+    # InputReaderFactory ("text"/"csv"/"json"), so hardcoding "file" fails ("type 'file' is not
+    # registered"). We ensure a text reader (set file_type/type to "text" only where the scaffold already
+    # uses that key, so we never inject an invalid one), point base_dir at our chunk dir (flat OR nested
+    # `storage` layout), and set file_pattern.
     # NOTE the DOUBLE '$$': GraphRAG runs string.Template env-substitution over the whole settings.yaml
-    # before parsing it, so a bare '$' (the regex end-anchor) is treated as a malformed placeholder and
-    # raises "Invalid placeholder in string". '$$' is the Template escape → collapses back to a literal
-    # '$', giving the regex `.*\.txt$`. (GraphRAG's own default file_pattern uses the same $$ escape.)
-    cfg["input"] = {**cfg.get("input", {}), "type": "file", "file_type": "text",
-                    "base_dir": _INPUT_SUBDIR, "file_pattern": r".*\.txt$$"}
+    # before parsing it, so a bare '$' (the regex end-anchor) is a malformed placeholder → "Invalid
+    # placeholder in string". '$$' is the Template escape → collapses to a literal '$' → regex `.*\.txt$`.
+    inp = dict(cfg.get("input", {}))
+    if "file_type" in inp:                 # schema with a separate reader field → make it text
+        inp["file_type"] = "text"
+    if inp.get("type") in (None, "file", "blob", ""):
+        # `type` is the reader selector in this schema (its current value is a storage kind or empty) →
+        # a text reader is what our .txt chunks need. If the scaffold already set a real reader type
+        # (e.g. "text"/"csv"), leave it untouched.
+        if "file_type" not in inp:
+            inp["type"] = "text"
+    if isinstance(inp.get("storage"), dict):   # nested-storage layout (newer schema)
+        inp["storage"]["base_dir"] = _INPUT_SUBDIR
+    else:
+        inp["base_dir"] = _INPUT_SUBDIR
+    inp["file_pattern"] = r".*\.txt$$"
+    cfg["input"] = inp
     cfg.setdefault("chunks", {})
     cfg["chunks"]["size"] = int(settings.graphrag_chunk_size)
     cfg["chunks"].setdefault("overlap", 100)
