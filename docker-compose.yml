@@ -10,6 +10,41 @@
 # Run:  docker compose up --build
 # The identical image + env also deploys to Kubernetes (see deploy/k8s/). Claude is unchanged —
 # set ANTHROPIC_API_KEY in a .env file next to this compose file (VISION_BACKEND=anthropic).
+#
+# ──────────────────────────────────────────────────────────────────────────────────────────────
+# LAUNCH PARAMETERS — the env vars you set before `./start-all.sh` (or a plain `docker compose up`)
+# ──────────────────────────────────────────────────────────────────────────────────────────────
+# Example (this VM — REAL Microsoft GraphRAG + Qwen-14B on the GPU):
+#     GPU=1 LOCAL_REPAIR=msgraphrag REPAIR_LOCAL_MODEL=qwen2.5-coder:14b ./start-all.sh
+#
+# A) start-all.sh flags — consumed by the LAUNCH SCRIPT (not by compose directly; see start-all.sh):
+#     GPU=1                Run Ollama on the host NVIDIA GPU by layering docker-compose.gpu.yml. Needs the
+#                          NVIDIA driver + nvidia-container-toolkit on the host. Omit / GPU=0 = CPU only.
+#     LOCAL_REPAIR=<mode>  Which Auto-Repair stack to bring up (also starts neo4j + ollama, and EXPORTS
+#                          the REPAIR_*/GRAPHRAG_* vars in (B) so the app switches with NO file edits):
+#                            0 / unset  → Chroma + Claude          (default; no extra services)
+#                            graphrag   → Neo4j graph-RAG + local Llama via Ollama          [alias: 1]
+#                            msgraphrag → REAL Microsoft GraphRAG + a Qwen coder via Ollama  [alias: 2]
+#     PULL=1               git pull backend + POS (+ studio) before building.
+#     POS_DIR / STUDIO_DIR Override the sibling repo locations (defaults ~/robotics-kiosk-pos, ~/kiosk-test-studio).
+#
+# B) App env vars — read by THIS compose file as ${VAR:-default} on the `app` service. start-all sets
+#    them per LOCAL_REPAIR mode; you can also set any of them yourself for a plain `docker compose up`:
+#     REPAIR_RETRIEVAL_BACKEND  chroma | graphrag | msgraphrag   — HOW the offending code/spec is retrieved
+#     REPAIR_LLM_BACKEND        claude | local                   — WHICH model diagnoses (and, for
+#                                                                   msgraphrag, BUILDS the graph)
+#     REPAIR_LOCAL_MODEL        Ollama model for the local path, e.g. qwen2.5-coder:14b (msgraphrag),
+#                               llama3.2:3b (graphrag CPU demo). One model does graph-build AND fix.
+#     REPAIR_LOCAL_ONLY         true = air-gap (never fall back to Claude — nothing leaves the box)
+#     INSTALL_MSGRAPHRAG        true = bake the (heavy) Microsoft GraphRAG deps into the image at build
+#     GRAPHRAG_* / NEO4J_*      Microsoft-GraphRAG + Neo4j knobs — see the `app` environment: block below
+#    Full switch/revert recipes for each stack are in that block (search "Auto-Repair RETRIEVAL + LLM").
+#
+# Equivalent of the example WITHOUT start-all.sh (what the flags above expand to):
+#     INSTALL_MSGRAPHRAG=true REPAIR_RETRIEVAL_BACKEND=msgraphrag REPAIR_LLM_BACKEND=local \
+#       REPAIR_LOCAL_ONLY=true REPAIR_LOCAL_MODEL=qwen2.5-coder:14b COMPOSE_PROFILES=local-repair \
+#       docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+# ──────────────────────────────────────────────────────────────────────────────────────────────
 services:
   postgres:
     image: postgres:16-alpine
