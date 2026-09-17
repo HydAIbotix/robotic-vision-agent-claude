@@ -268,6 +268,15 @@ services:
       # unaffected. Takes effect for msgraphrag; harmless for the graphrag/Llama stack. GPU VRAM headroom
       # on the L4 (24 GB) is ample for a 14B model at this context.
       OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-8192}
+      # Max concurrent requests Ollama serves for a loaded model. Microsoft GraphRAG fires MANY
+      # concurrent extraction/summarize requests during a build; with the default (1) Ollama serialises
+      # them, which is the main reason a full graph build takes hours. Raising this to e.g. 4 lets the
+      # GPU work several in parallel and can cut a build 2–4×. ⚠ Each parallel slot reserves its own KV
+      # cache (num_parallel × num_ctx), so use it ONLY for a graph build with a SMALL model
+      # (qwen2.5-coder:7b/14b at OLLAMA_CONTEXT_LENGTH=8192 fits the L4 with room). For a 32B DIAGNOSE at
+      # num_ctx=16384, leave this at 1 — 4 slots would not fit 24 GB VRAM. Default 1 = current behaviour
+      # (no regression); set OLLAMA_NUM_PARALLEL=4 only when launching a msgraphrag BUILD on the 14B/7b.
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
     volumes:
       - ollamadata:/root/.ollama          # pulled models persist here (llama3.2:3b etc.)
     restart: unless-stopped
