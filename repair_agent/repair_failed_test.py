@@ -170,6 +170,7 @@ def _action_query(failure: str) -> str:
 _SMALL_FILE_MAX_CHUNKS = 25   # a file with ≤ this many indexed chunks is a "small module" → expand fully
 _EXPAND_FILES          = 2    # expand at most this many implicated small modules
 _MAX_CONTEXT_BLOCKS    = 16   # hard cap on chunks handed to the LLM
+_CHARS_PER_TOKEN       = 3.5  # conservative estimate (code is token-dense) for fitting the local window
 _DESIGN_DOCS           = 5    # design-doc chunks to ALWAYS include (the spec that reveals the root cause).
                               # The doc is small (~12 focused section chunks); a symptom-side failure query
                               # can rank the CAUSE-side section (e.g. "Payment and Card Reader Design") ~#4,
@@ -299,6 +300,26 @@ def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
             "Snippet:",
             doc.page_content[:_SNIPPET_PROMPT],
         ]))
+
+    # FIT THE LOCAL WINDOW. A local Ollama model has a fixed context window (repair_local_num_ctx); if the
+    # assembled prompt exceeds it, Ollama SILENTLY TRUNCATES (dropping the front — the rules + failure — or
+    # the first code blocks), so the model may never see the buggy code or the instructions. Claude's window
+    # is huge, so this only applies to the local path. Keep WHOLE blocks in priority order (code first, then
+    # design) until the char budget is hit — never truncate a function mid-body; drop the least-important
+    # tail blocks instead. Self-adjusts to whatever num_ctx is set (so a smaller, VRAM-safe window is fine).
+    if settings.repair_llm_backend == "local" and blocks:
+        reserve_tokens = 1024 + 550          # model JSON output + the fixed prompt scaffold (rules)
+        fail_tokens = len(failure) / _CHARS_PER_TOKEN
+        ctx_char_budget = int(max(2000, settings.repair_local_num_ctx - reserve_tokens - fail_tokens) * _CHARS_PER_TOKEN)
+        kept, total = [], 0
+        for b in blocks:
+            if kept and total + len(b) + 2 > ctx_char_budget:
+                break
+            kept.append(b); total += len(b) + 2
+        if len(kept) < len(blocks):
+            print(f"  [REPAIR] context trimmed to fit local window: {len(kept)}/{len(blocks)} blocks "
+                  f"(~{total} chars, budget ~{ctx_char_budget}, num_ctx={settings.repair_local_num_ctx}).")
+        blocks, hits = kept, hits[:len(kept)]
     return "\n\n".join(blocks), hits
 
 
@@ -415,6 +436,14 @@ def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None
     never freezes the repair. `on_progress(label, elapsed, budget)` is called periodically for a slow
     (local) model so the UI can show live progress instead of a frozen 'working…'."""
     prompt = _DIAGNOSE_PROMPT.format(failure=failure, context=context)
+
+    # Visibility into what the model actually receives — the #1 thing to check when a fix looks wrong.
+    approx_tokens = int(len(prompt) / _CHARS_PER_TOKEN)
+    print(f"  [REPAIR] DIAGNOSE prompt: {len(prompt)} chars (~{approx_tokens} tokens).")
+    if settings.repair_llm_backend == "local" and approx_tokens > settings.repair_local_num_ctx:
+        print(f"  [REPAIR] ⚠ prompt (~{approx_tokens} tok) EXCEEDS local num_ctx="
+              f"{settings.repair_local_num_ctx} → Ollama will TRUNCATE it. Raise REPAIR_LOCAL_NUM_CTX "
+              f"or reduce retrieved context.")
 
     chain = " → ".join(lbl for lbl, _ in _diagnose_providers())
     air = "  (AIR-GAPPED: no remote fallback — nothing leaves the environment)" if settings.repair_local_only else ""

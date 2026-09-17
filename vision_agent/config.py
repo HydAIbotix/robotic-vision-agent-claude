@@ -443,7 +443,14 @@ class Settings(BaseSettings):
     repair_local_only: bool = False
     repair_local_model: str = "qwen2.5-coder:14b"
     repair_local_base_url: str = "http://localhost:11434"
-    repair_local_num_ctx: int = 8192            # context window for the local model (tokens)
+    # Context window for the LOCAL diagnose model (tokens). The assembled DIAGNOSE prompt (rules +
+    # failure + retrieved whole-function/design blocks) can be large; if it exceeds this, Ollama silently
+    # TRUNCATES it and the model may never see the buggy code — so retrieve_context now trims the context
+    # to fit THIS value (no truncation at any setting). Bigger = more context kept. ⚠ VRAM: the KV cache
+    # lives on the GPU and grows with num_ctx — on a 24 GB L4, qwen2.5-coder:32b at 16384 is near the edge
+    # (~23.5 GB); if `ollama ps` shows any CPU offload, drop this to 12288 (or run diagnose on 14B). 14B
+    # has ample headroom at 16384. Env-overridable via REPAIR_LOCAL_NUM_CTX.
+    repair_local_num_ctx: int = 16384
     # Per-call timeout for the local model. CPU inference on a small Llama (e.g. llama3.2:3b) is SLOW —
     # prompt prefill over a large retrieved context + a cold model load can take minutes — so this is
     # generous by default. It is BOTH the Ollama client timeout AND (via propose_patch) the local
