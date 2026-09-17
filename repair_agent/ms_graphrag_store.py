@@ -494,6 +494,30 @@ def _whole_chunk_for(chunk_file: str) -> str | None:
     return txt
 
 
+def _infer_type(source: str, text: str) -> str:
+    """Last-resort type when the sidecar can't be resolved — never blindly call a document 'code_block'."""
+    ext = Path(source).suffix.lower() if source else ""
+    if ext in {".ts", ".tsx", ".js", ".jsx", ".py", ".json", ".css", ".html"}:
+        return "code_block"
+    if ext in {".docx", ".doc", ".md", ".txt"}:
+        return "design_document"
+    if ext in {".xlsx", ".xls", ".csv"}:
+        return "test_cases"
+    low = text.lower()
+    if any(s in low for s in ("shall", "requirement", "req-", "design", "capability", "the user")):
+        return "design_document"
+    if text.count(";") >= 2 and any(s in text for s in ("=>", "function ", "const ", "import ", "return ")):
+        return "code_block"
+    return "text"
+
+
+def _content_probe(text: str) -> str:
+    """A distinctive anchor from a text unit for content-based source matching: its longest line, else head."""
+    longest = max((ln for ln in text.splitlines()), key=lambda s: len(s.strip()), default="")
+    longest = " ".join(longest.split())
+    return (longest if len(longest) >= 24 else " ".join(text.split())[:80])[:160]
+
+
 def _load_text_units() -> dict:
     """Load text units with their real source metadata and local embeddings, cached per output build.
 
@@ -520,12 +544,35 @@ def _load_text_units() -> dict:
             id_to_title = dict(zip(docs["id"].astype(str), docs[title_col].astype(str)))
     title_meta = _title_to_meta()
 
+    # Content-fallback index: GraphRAG's text_unit → document → title join varies by output schema/version
+    # and can fail to land our metadata — then EVERY unit defaulted to 'code_block' (mislabelling design /
+    # requirements chunks) AND whole-function expansion was lost (the `_chunk_file` also comes from the
+    # title). Each input file is ONE original chunk and every text unit is a substring of exactly one of
+    # them, so a unit can also be resolved to its source chunk by CONTENT. Built once (cached in _TU_CACHE).
+    inp = _input_dir()
+    norm_inputs = []
+    for fname in title_meta:
+        try:
+            norm_inputs.append((fname, " ".join((inp / fname).read_text(encoding="utf-8").split())))
+        except Exception:
+            pass
+
+    def _resolve_by_content(t):
+        probe = _content_probe(t)
+        if len(probe) < 12:
+            return "", {}
+        for fname, content in norm_inputs:
+            if probe in content:
+                return fname, dict(title_meta.get(fname, {}))
+        return "", {}
+
     text_col = "text" if "text" in tu.columns else ("chunk" if "chunk" in tu.columns else None)
     texts, meta = [], []
+    n_title = n_content = n_unresolved = 0
     for _, row in tu.iterrows():
         text = str(row[text_col]) if text_col else ""
-        # text_unit → document_ids[0] → document title (our input filename) → real metadata.
-        m = {}
+        # 1) primary: text_unit → document_ids[0] → document title (our input filename) → real metadata.
+        m, chunk_file, via = {}, "", ""
         doc_ids = row.get("document_ids")
         try:
             first = doc_ids[0] if doc_ids is not None and len(doc_ids) else None
@@ -534,15 +581,29 @@ def _load_text_units() -> dict:
         title = id_to_title.get(str(first)) if first is not None else None
         if title:
             m = _sidecar_lookup(title, title_meta)
+            if m:
+                chunk_file, via = (_chunk_filename(title) or ""), "title"
+        # 2) fallback: resolve by CONTENT when the parquet join didn't yield real metadata.
+        if not m:
+            chunk_file, m = _resolve_by_content(text)
+            if m:
+                via = "content"
+        n_title += via == "title"
+        n_content += via == "content"
+        n_unresolved += via == ""
         texts.append(text)
         meta.append({
             "source": m.get("source", ""),
-            "type": m.get("type", "code_block"),
+            # Never blindly claim 'code_block': use the resolved type, else infer from source/content.
+            "type": (m.get("type") or _infer_type(m.get("source", ""), text)),
             "start_line": m.get("start_line"),
             "end_line": m.get("end_line"),
             "section": m.get("section"),
-            "_chunk_file": _chunk_filename(title),   # the input file = the WHOLE original tree-sitter chunk
+            "_chunk_file": chunk_file,   # the input file = the WHOLE original tree-sitter chunk
         })
+    if texts:
+        print(f"  [msgraphrag] text-unit metadata: {n_title} via title, {n_content} via content, "
+              f"{n_unresolved} unresolved (of {len(texts)}).")
 
     embs = np.array(_embeddings().embed_documents(texts), dtype="float32") if texts else np.zeros((0, 1), "float32")
     _TU_CACHE.clear()
