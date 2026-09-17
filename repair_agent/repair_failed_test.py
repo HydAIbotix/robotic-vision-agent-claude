@@ -541,6 +541,22 @@ def _demo_fallback_patch() -> Optional[RepairPatch]:
 
 # ── 3. APPLY ────────────────────────────────────────────────────────────────────
 
+def _match_lines(text: str, find: str) -> list[int]:
+    """1-based line numbers where `find` begins in `text` (every occurrence)."""
+    out, idx = [], text.find(find)
+    while idx != -1:
+        out.append(text.count("\n", 0, idx) + 1)
+        idx = text.find(find, idx + 1)
+    return out
+
+
+def _find_preview(find: str, limit: int = 400) -> str:
+    """A readable, bounded echo of the patch find-text for the error message / UI, so the user can see
+    exactly what the model tried to match when an edit is refused."""
+    f = (find or "").strip("\n")
+    return f if len(f) <= limit else f[:limit] + "\n… (truncated)"
+
+
 def _locate_file(patch: RepairPatch) -> Path:
     """Resolve the patch target to a real in-codebase file, tolerating odd paths from the LLM."""
     codebase = CODEBASE_DIR.resolve()
@@ -568,8 +584,15 @@ def _locate_file(patch: RepairPatch) -> Path:
     if len(matches) == 1:
         return matches[0].resolve()
     if not matches:
-        raise RuntimeError("Patch target not found: the 'find' text is not present in any codebase file.")
-    raise RuntimeError(f"Patch 'find' text appears in {len(matches)} files; refusing an ambiguous edit.")
+        raise RuntimeError(
+            "Patch target not found: the 'find' text is not present in any codebase file.\n"
+            f"--- find-text the model proposed ---\n{_find_preview(patch.find)}\n--- end ---"
+        )
+    files = ", ".join(str(m.relative_to(codebase)) for m in matches)
+    raise RuntimeError(
+        f"Patch 'find' text appears in {len(matches)} files ({files}); refusing an ambiguous edit.\n"
+        f"--- find-text the model proposed ---\n{_find_preview(patch.find)}\n--- end ---"
+    )
 
 
 def apply_patch(patch: RepairPatch) -> Path:
@@ -580,10 +603,20 @@ def apply_patch(patch: RepairPatch) -> Path:
 
     text = target.read_text(encoding="utf-8")
     count = text.count(patch.find)
+    rel = target.relative_to(codebase) if codebase in target.parents else target.name
     if count == 0:
-        raise RuntimeError("Patch find-text was not found in the target file.")
+        raise RuntimeError(
+            f"Patch find-text was not found in {rel} (it may be stale — the RAG index can lag the on-disk "
+            f"code). Rebuild the index against the current branch.\n"
+            f"--- find-text the model proposed ---\n{_find_preview(patch.find)}\n--- end ---"
+        )
     if count > 1:
-        raise RuntimeError(f"Patch find-text appears {count} times; refusing an ambiguous edit.")
+        locs = ", ".join(map(str, _match_lines(text, patch.find)))
+        raise RuntimeError(
+            f"Patch find-text appears {count} times in {rel} (lines {locs}); refusing an ambiguous edit. "
+            f"The model must include enough surrounding context that the find-text matches exactly one place.\n"
+            f"--- find-text the model proposed ---\n{_find_preview(patch.find)}\n--- end ---"
+        )
 
     target.write_text(text.replace(patch.find, patch.replace, 1), encoding="utf-8")
     return target
