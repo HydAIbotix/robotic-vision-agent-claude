@@ -204,6 +204,11 @@ services:
       REPAIR_LOCAL_ONLY: ${REPAIR_LOCAL_ONLY:-false}                    # air-gap: never fall back to Claude
       REPAIR_LOCAL_MODEL: ${REPAIR_LOCAL_MODEL:-qwen2.5-coder:14b}      # Ollama model for local diagnose + graph build
       REPAIR_LOCAL_BASE_URL: ${REPAIR_LOCAL_BASE_URL:-http://ollama:11434}
+      # DEBUG: dump the EXACT diagnose prompt + raw model response (per call) to REPAIR_DEBUG_DIR. Off by
+      # default; set REPAIR_DEBUG_DUMP=true (env or .env) + recreate `app`. Dir is under host-mounted ./data
+      # so the files are readable on the host at ./data/repair_debug.
+      REPAIR_DEBUG_DUMP: ${REPAIR_DEBUG_DUMP:-false}
+      REPAIR_DEBUG_DIR: ${REPAIR_DEBUG_DIR:-/app/data/repair_debug}
       NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}                        # graphrag backend only
       NEO4J_USER: ${NEO4J_USER:-neo4j}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-neo4jpassword}
