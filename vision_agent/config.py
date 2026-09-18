@@ -446,17 +446,31 @@ class Settings(BaseSettings):
     # Context window for the LOCAL diagnose model (tokens). The assembled DIAGNOSE prompt (rules +
     # failure + retrieved whole-function/design blocks) can be large; if it exceeds this, Ollama silently
     # TRUNCATES it and the model may never see the buggy code — so retrieve_context now trims the context
-    # to fit THIS value (no truncation at any setting). Bigger = more context kept. ⚠ VRAM: the KV cache
-    # lives on the GPU and grows with num_ctx — on a 24 GB L4, qwen2.5-coder:32b at 16384 is near the edge
-    # (~23.5 GB); if `ollama ps` shows any CPU offload, drop this to 12288 (or run diagnose on 14B). 14B
-    # has ample headroom at 16384. Env-overridable via REPAIR_LOCAL_NUM_CTX.
+    # to fit the EFFECTIVE window (no truncation at any setting). Bigger = more context kept. ⚠ VRAM: the
+    # KV cache lives on the GPU and grows with num_ctx. 14B/7B have ample headroom at 16384. A ~32B model
+    # is large enough that this window is clamped for VRAM safety — see repair_local_num_ctx_cap_large.
+    # Env-overridable via REPAIR_LOCAL_NUM_CTX. (Use vision_agent.llm.effective_local_num_ctx() to read
+    # the value that is ACTUALLY sent to Ollama — it applies the large-model clamp below.)
     repair_local_num_ctx: int = 16384
+    # VRAM guard for LARGE diagnose models (≥ ~30B). On a 24 GB L4, a 32B (~20 GB weights) plus a big KV
+    # cache overflows the GPU → Ollama offloads layers to CPU → generation runs ~10× slower → the diagnose
+    # times out (the exact failure seen with qwen2.5-coder:32b). So for a model whose name advertises ≥30B,
+    # the effective num_ctx is capped to THIS value (default 12288 → ~3 GB KV + 20 GB weights ≈ 23 GB, on-
+    # GPU). 14B/7B are never clamped. This pairs with OLLAMA_NUM_PARALLEL=0 (auto) in docker-compose so the
+    # 32B loads with a single KV slot (see the compose comment). 0 disables the clamp.
+    repair_local_num_ctx_cap_large: int = 12288
     # Per-call timeout for the local model. CPU inference on a small Llama (e.g. llama3.2:3b) is SLOW —
     # prompt prefill over a large retrieved context + a cold model load can take minutes — so this is
     # generous by default. It is BOTH the Ollama client timeout AND (via propose_patch) the local
     # provider's outer DIAGNOSE deadline, so the local model is never abandoned mid-answer. Lower it
     # only on a GPU box where inference is fast. (The remote Claude call keeps repair_diagnose_timeout_s.)
     repair_local_timeout_s: int = 600
+    # DEBUG DUMP: when true, every DIAGNOSE call writes a plain-text file to repair_debug_dir capturing the
+    # EXACT prompt sent to the model AND the model's raw response (+ parsed patch, reject reason, timing and
+    # a GPU VRAM report) — the ground truth for "what did we send QWEN and what did it say" when a fix looks
+    # wrong or the model stalls. Off by default (no I/O in normal runs); enable with REPAIR_DEBUG_DUMP=true.
+    repair_debug_dump: bool = False
+    repair_debug_dir: str = "./data/repair_debug"
 
     # ── Auto-Repair RETRIEVAL backend (Chroma default; GraphRAG + Neo4j local option) ──────────
     # Picks HOW the offending code/spec is retrieved for a repair. Default reproduces the current

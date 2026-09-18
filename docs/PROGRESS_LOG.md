@@ -1352,3 +1352,64 @@ the live run (all committed on `cloud-agnostic-agent`):
   for non-msgraphrag; 22/22 `test_cloud_agnostic` green). A demo walk-through doc lives at
   `docs/Auto_Repair_GraphRAG_Demo_Walkthrough.docx`.
 
+
+---
+
+### 2026-09-18 — repair robustness: retrieval re-rank + build-vs-diagnose VRAM split + diagnose debug dump
+
+Context: on the GCE `g2-standard-8` (L4 24 GB) with `repair_retrieval_backend=msgraphrag` +
+`repair_local_model=qwen2.5-coder:32b`, a TC-RPS-003 repair (the planted `quantity <= 1` product-quantity
+bug) failed twice over: (a) the buggy line was in the index/text-units but never SURFACED in retrieval, and
+(b) the 32B diagnose ran ~10 min and TIMED OUT with "(no output)". Root causes and fixes (all no-regression;
+defaults inert for the Chroma+Claude primary path):
+
+**1. Retrieval-ranking rescue (`repair_agent/repair_failed_test.py::retrieve_context`).**
+- Root cause: pure vector similarity ranks by the failure's DOMINANT vocabulary (design-intent + navigation
+  words), which buries the exact buggy function even when it is indexed. TC-RPS-003's failure reads as
+  "product quantity / cart" but the design-doc + a `goTo(...)` nav chunk out-ranked the `quantity <= 1`
+  guard, so it fell outside the retrieved top_k on BOTH Chroma and msgraphrag.
+- Fix: pull a WIDER candidate pool (`_POOL_MULT=3` × top_k) and run a **lexical re-rank** that PROMOTES up
+  to `_SIGNAL_PROMOTE=2` code chunks sharing ≥ `_SIGNAL_MIN=2` DISTINCT signal tokens with the failure.
+  Signals (`_signal_tokens`) = identifiers (camelCase or ≥4 chars), small integer literals, and quoted
+  values, minus a jargon/English stoplist (`_SIGNAL_STOP`). `_lexical_score` counts distinct matches
+  (word-boundary for numbers, substring for compound code identifiers). Promoted chunks are slotted after
+  the top-4 vector hits.
+- Properties: ADDITIVE (the vector top_k is untouched; slicing the wider pool back to top_k reproduces the
+  prior top_k exactly since vector order is stable) and a STRICT NO-OP when nothing clears the threshold —
+  so the login / cross-kiosk design-bug behaviour is unchanged. Backend-agnostic: it runs over whatever
+  `search()` returned, so it covers Chroma AND the msgraphrag whole-function chunks.
+- Verified in isolation: on a simulated TC-RPS-003 failure the `quantity <= 1` chunk scores 4 vs 0 for a
+  nav helper and is the ONLY chunk promoted, even when the "vector top hits" list deliberately excludes it.
+
+**2. Build-vs-diagnose parallelism split — the 10-min timeout (`docker-compose.yml`, `vision_agent/llm.py`,
+`vision_agent/config.py`).**
+- Root cause: Ollama reserves KV cache = `num_parallel × num_ctx` PER LOADED MODEL. `OLLAMA_NUM_PARALLEL`
+  had been hard-set high (8) to speed the 14B msgraphrag BUILD; that same value applied to the 32B DIAGNOSE
+  model → 8 × 16384 KV ≫ 24 GB VRAM → Ollama offloaded layers to CPU → generation ~10× slower → the diagnose
+  blew its `repair_local_timeout_s + 30` = 630 s budget and returned "(no output)".
+- Fix (primary): `OLLAMA_NUM_PARALLEL` default changed `1 → 0` (auto). In auto mode Ollama sizes parallel
+  slots PER MODEL by free VRAM — a 14B build model gets up to 4 slots (still parallel/fast), a 32B diagnose
+  model gets 1 slot (VRAM-safe). This is the split, done automatically; no hand-toggling, and no separate
+  Ollama server needed unless builds/diagnoses run on different GPUs.
+- Fix (belt-and-braces): `vision_agent.llm.effective_local_num_ctx()` clamps a ≥30B diagnose model's
+  `num_ctx` to `repair_local_num_ctx_cap_large` (12288 → ~3 GB KV + 20 GB weights ≈ 23 GB, on-GPU at 1
+  slot). 14B/7B are never clamped (keep 16384). `get_local_llm()` sends the effective value AND
+  `retrieve_context`'s context fit-trim reads the SAME effective value, so the prompt is packed to the
+  window the model actually runs with (no silent truncation). `_is_large_local_model` matches a param count
+  ≥30 in the model name (32b/70b true; 14b/7b false).
+- Diagnostic: on a local diagnose TIMEOUT, `propose_patch` now calls `_ollama_vram_report()` (GET
+  `/api/ps`) and logs each model's VRAM/CPU split, warning loudly on `⚠ OFFLOAD` with the exact remedy.
+
+**3. Diagnose debug dump — "what did we send QWEN and what did it say" (`vision_agent/llm.py::invoke_json`,
+`repair_agent/repair_failed_test.py::propose_patch`).**
+- `invoke_json` gains an optional `on_raw(text)` hook, called with the model's RAW response before JSON
+  parsing (default None → no behaviour change for any existing caller).
+- With `REPAIR_DEBUG_DUMP=true` (config `repair_debug_dump`, dir `repair_debug_dir=./data/repair_debug`),
+  `propose_patch` writes a per-call text file: the EXACT prompt, and for each provider the raw response,
+  parsed patch, reject reason, elapsed time, outcome, and the `ollama ps` VRAM report. Written in a
+  `finally` so even a full timeout ("no output") is captured. Off by default (zero I/O in normal runs).
+
+No-regression: `pytest tests/` = 120 passed, 5 skipped, and the SAME 8 pre-existing failures
+(`test_template_match` ×4 needing local reference PNGs, `test_vision_agent` screen-analysis ×4 needing an
+API key) that fail identically on clean HEAD (verified by stashing the edits). `py_compile` clean;
+`effective_local_num_ctx` / `_is_large_local_model` unit-checked (32b→12288, 14b→16384).

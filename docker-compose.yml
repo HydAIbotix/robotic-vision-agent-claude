@@ -268,15 +268,18 @@ services:
       # unaffected. Takes effect for msgraphrag; harmless for the graphrag/Llama stack. GPU VRAM headroom
       # on the L4 (24 GB) is ample for a 14B model at this context.
       OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-8192}
-      # Max concurrent requests Ollama serves for a loaded model. Microsoft GraphRAG fires MANY
-      # concurrent extraction/summarize requests during a build; with the default (1) Ollama serialises
-      # them, which is the main reason a full graph build takes hours. Raising this to e.g. 4 lets the
-      # GPU work several in parallel and can cut a build 2–4×. ⚠ Each parallel slot reserves its own KV
-      # cache (num_parallel × num_ctx), so use it ONLY for a graph build with a SMALL model
-      # (qwen2.5-coder:7b/14b at OLLAMA_CONTEXT_LENGTH=8192 fits the L4 with room). For a 32B DIAGNOSE at
-      # num_ctx=16384, leave this at 1 — 4 slots would not fit 24 GB VRAM. Default 1 = current behaviour
-      # (no regression); set OLLAMA_NUM_PARALLEL=4 only when launching a msgraphrag BUILD on the 14B/7b.
-      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
+      # Max concurrent requests Ollama serves for a loaded model — the BUILD-vs-DIAGNOSE parallelism split.
+      # Microsoft GraphRAG fires MANY concurrent requests during a build (fast with a small model); the
+      # DIAGNOSE is a SINGLE request to a big model. ⚠ Each parallel slot reserves its OWN KV cache
+      # (num_parallel × num_ctx), PER LOADED MODEL. Hard-setting a high value (e.g. 8) applies it to the
+      # 32B diagnose model too → 8 × 16384 KV overflows a 24 GB L4 → Ollama offloads to CPU → the diagnose
+      # runs ~10× slower and TIMES OUT (this was the ~10-minute stall we hit).
+      #   0 = AUTO (recommended, and now the default): Ollama sizes slots per model by FREE VRAM — a 14B
+      #   build model gets up to 4 slots (parallel/fast), a 32B diagnose model gets 1 slot (VRAM-safe). This
+      #   is the split, done automatically, so you no longer toggle it by hand. (The diagnose window is also
+      #   clamped for ≥30B models — see repair_local_num_ctx_cap_large.)
+      # Pin a fixed high value ONLY if builds and diagnoses run on SEPARATE Ollama servers/GPUs.
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-0}
     volumes:
       - ollamadata:/root/.ollama          # pulled models persist here (llama3.2:3b etc.)
     restart: unless-stopped

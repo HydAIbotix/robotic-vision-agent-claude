@@ -11,8 +11,33 @@ output-token cap, kept separate so exploration / short-response tiers can be tun
   get_fast_llm()     — Opus 4.8: short JSON responses (validate_pipeline verify, conclusive verdict)
 """
 import json
+import re
 from langchain_core.language_models import BaseChatModel
 from vision_agent.config import settings
+
+
+def _is_large_local_model(model: str) -> bool:
+    """True when the model name advertises a parameter count ≥ 30B (e.g. 'qwen2.5-coder:32b').
+
+    Used to clamp the KV-cache window for models big enough to overflow a 24 GB GPU. Matches a number
+    immediately followed by 'b' (32b, 70b), ignoring version tokens like '2.5' or ':14' that aren't
+    param counts."""
+    m = re.search(r"(\d{2,3})\s*b(?![a-z0-9])", (model or "").lower())
+    return bool(m and int(m.group(1)) >= 30)
+
+
+def effective_local_num_ctx() -> int:
+    """The num_ctx ACTUALLY sent to Ollama for the local diagnose model.
+
+    Equals settings.repair_local_num_ctx, except a LARGE model (≥ ~30B) is clamped to
+    repair_local_num_ctx_cap_large so its KV cache fits the GPU (a 32B + a 16k window offloads to CPU on a
+    24 GB L4 → ~10× slower → diagnose timeout). Both get_local_llm() and retrieve_context()'s fit-trim read
+    THIS so the context is packed to the same window the model runs with (no silent truncation)."""
+    n = settings.repair_local_num_ctx
+    cap = settings.repair_local_num_ctx_cap_large
+    if cap and n > cap and _is_large_local_model(settings.repair_local_model):
+        return cap
+    return n
 
 
 def detect_image_media_type(image_bytes: bytes) -> str:
@@ -86,13 +111,18 @@ def _extract_json_object(text: str) -> str:
     return ""
 
 
-def invoke_json(llm: BaseChatModel, messages: list, *, retries: int = 2, default=None, label: str = "llm"):
+def invoke_json(llm: BaseChatModel, messages: list, *, retries: int = 2, default=None, label: str = "llm",
+                on_raw=None):
     """Invoke an LLM and parse its response as JSON, resiliently.
 
     Real models occasionally return an empty string or a non-JSON preamble — and a bare
     json.loads() on that crashes the whole graph with "Expecting value: line 1 column 1".
     This helper retries a few times and, if every attempt fails, returns `default` instead
     of raising, so one flaky response degrades a single step rather than killing the run.
+
+    `on_raw(text)`, when provided, is called with the model's RAW response string on every attempt
+    (before JSON parsing). It's the hook the repair debug-dump uses to capture exactly what the model
+    said — even when the text fails to parse. It never affects control flow; exceptions in it are ignored.
     """
     # Tracing (no-op unless TRACING_BACKEND is set). invoke_json is the central LLM path, so this one
     # wire-point traces EVERY agent's Claude calls: Langfuse via callbacks, OpenTelemetry via a span
@@ -117,6 +147,11 @@ def invoke_json(llm: BaseChatModel, messages: list, *, retries: int = 2, default
                 content = "".join(
                     b.get("text", "") if isinstance(b, dict) else str(b) for b in content
                 )
+            if on_raw:
+                try:
+                    on_raw(content)
+                except Exception:
+                    pass
             raw = _strip_fences(content)
             if not raw:
                 raise ValueError("empty response")
@@ -180,10 +215,15 @@ def get_local_llm() -> BaseChatModel:
             "Local repair LLM requires the 'langchain-ollama' package. Install it with "
             "`pip install langchain-ollama` and run an Ollama server."
         ) from e
+    num_ctx = effective_local_num_ctx()
+    if num_ctx != settings.repair_local_num_ctx:
+        print(f"  [REPAIR] VRAM guard: {settings.repair_local_model} num_ctx "
+              f"{settings.repair_local_num_ctx}→{num_ctx} so the KV cache stays on-GPU "
+              f"(a large model at the full window offloads to CPU → diagnose timeout).")
     return ChatOllama(
         model=settings.repair_local_model,
         base_url=settings.repair_local_base_url,
-        num_ctx=settings.repair_local_num_ctx,
+        num_ctx=num_ctx,
         temperature=0,
         client_kwargs={"timeout": settings.repair_local_timeout_s},
     )

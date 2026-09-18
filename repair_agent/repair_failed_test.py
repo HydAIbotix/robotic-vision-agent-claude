@@ -23,14 +23,16 @@ import platform
 import re
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
 from langchain_core.messages import HumanMessage
 
 from vision_agent.config import settings
-from vision_agent.llm import get_llm, get_local_llm, invoke_json
+from vision_agent.llm import get_llm, get_local_llm, invoke_json, effective_local_num_ctx
 from repair_agent.canceller import RepairCancelled
 from repair_agent.parse_code_and_store import CODEBASE_DIR, PERSIST_DIR, SKIP_DIRS, search
 
@@ -175,6 +177,101 @@ _DESIGN_DOCS           = 5    # design-doc chunks to ALWAYS include (the spec th
                               # The doc is small (~12 focused section chunks); a symptom-side failure query
                               # can rank the CAUSE-side section (e.g. "Payment and Card Reader Design") ~#4,
                               # so pull a few to reliably include it without bloating context.
+_POOL_MULT             = 3    # pull this × top_k CODE candidates so the lexical re-rank has a wider pool to
+                              # rescue from; slicing back to top_k reproduces the prior top_k exactly.
+_SIGNAL_PROMOTE        = 2    # at most this many lexically-matched code chunks are promoted into context.
+_SIGNAL_MIN            = 2    # a promoted chunk must share ≥ this many DISTINCT signal tokens with the failure.
+
+# Words that carry NO discriminating signal between code chunks — test-harness jargon, generic UI verbs,
+# and common English. Stripped before scoring so the lexical re-rank keys on the DISTINCTIVE identifiers /
+# values / numbers in the failure (e.g. `quantity`, `1`, `topup`) rather than "screen"/"failed"/"the".
+_SIGNAL_STOP = {
+    "failed", "failing", "failure", "test", "tests", "case", "cases", "step", "steps", "expected",
+    "observed", "showed", "actual", "attempted", "order", "assertion", "assertions", "behaviour",
+    "behavior", "intent", "only", "adding",
+    "design", "spec", "root", "cause", "defect", "result", "results", "wrong", "missing", "reach",
+    "reached", "screen", "screens", "button", "buttons", "tap", "tapped", "click", "clicked", "page",
+    "pages", "kiosk", "field", "fields", "enter", "entered", "submit", "submitted", "display",
+    "displayed", "show", "shown", "verify", "verified", "should", "must", "value", "values", "state",
+    "current", "correct", "incorrect", "error", "errors", "the", "and", "for", "that", "with", "this",
+    "from", "into", "when", "then", "than", "have", "has", "had", "not", "was", "were", "are", "its",
+    "was", "will", "would", "could", "one", "two", "get", "got", "set", "via", "per", "use", "used",
+    "using", "does", "did", "done", "which", "what", "where", "after", "before", "because", "your",
+    "you", "they", "their", "our", "but",
+}
+
+
+def _dkey(doc) -> tuple:
+    """Stable dedupe/identity key for a retrieved Document (source + start line + content prefix)."""
+    m = getattr(doc, "metadata", {}) or {}
+    return (m.get("source"), m.get("start_line"), (getattr(doc, "page_content", "") or "")[:40])
+
+
+def _short(path):
+    return os.path.basename(path) if path else path
+
+
+def _signal_tokens(failure: str) -> set:
+    """DISTINCTIVE tokens from the failure to lexically match against code: identifiers (camelCase or
+    ≥4 chars), small integer literals, and words inside quotes/backticks. Jargon/common words removed."""
+    toks: set = set()
+    for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", failure):
+        wl = w.lower()
+        if wl in _SIGNAL_STOP:
+            continue
+        if len(wl) < 4 and not any(c.isupper() for c in w[1:]):   # keep short camelCase (e.g. isVip), drop 'the'
+            continue
+        toks.add(wl)
+    for n in re.findall(r"(?<![\w.])\d{1,4}(?![\w.])", failure):    # small literals (a guard bound, a count)
+        toks.add(n)
+    for q in re.findall(r"[\"'`]([^\"'`\n]{2,40})[\"'`]", failure):  # quoted expected/observed values/labels
+        for w in re.findall(r"[A-Za-z0-9_]{3,}", q):
+            wl = w.lower()
+            if wl not in _SIGNAL_STOP:
+                toks.add(wl)
+    return toks
+
+
+def _lexical_score(text: str, signals: set) -> int:
+    """Count DISTINCT signal tokens present in `text` (word-boundary match for numbers, substring for
+    identifiers — code identifiers are compound so a substring hit is meaningful)."""
+    tl = (text or "").lower()
+    score = 0
+    for s in signals:
+        if s.isdigit():
+            if re.search(r"(?<![\w.])" + re.escape(s) + r"(?![\w.])", tl):
+                score += 1
+        elif s in tl:
+            score += 1
+    return score
+
+
+def _promote_signal_hits(pool, failure, *, already, limit, min_score):
+    """From `pool`, return up to `limit` code chunks NOT already selected that share ≥ min_score distinct
+    signal tokens with the failure (highest first). This rescues a buggy chunk that pure vector similarity
+    ranked below top_k. Returns [] when nothing clears the bar — so it is a strict no-op in that case."""
+    signals = _signal_tokens(failure)
+    if not signals:
+        return []
+    akeys = {_dkey(d) for d in already}
+    scored = []
+    for d in pool:
+        if _dkey(d) in akeys:
+            continue
+        sc = _lexical_score(getattr(d, "page_content", "") or "", signals)
+        if sc >= min_score:
+            scored.append((sc, d))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    out, seen = [], set()
+    for _sc, d in scored:
+        k = _dkey(d)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(d)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
@@ -209,27 +306,51 @@ def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
     # both lanes are represented. When there is no distinct steps line the action query collapses to
     # the intent query, so this degrades cleanly to the previous single-lane behaviour.
     rq_action = _action_query(failure)
-    intent_code = search(rq, k=top_k, where=code_where)
+    # Pull a WIDER candidate pool than we finally keep, so the lexical re-rank below can rescue a buggy
+    # chunk that vector similarity buried. Slicing the pool to top_k reproduces the previous top_k exactly
+    # (vector order is stable), so the base two-lane behaviour is unchanged.
+    pool_k = top_k * _POOL_MULT
+    intent_code = search(rq, k=pool_k, where=code_where)
     if rq_action == rq:
-        code_docs = intent_code
+        interleaved = list(intent_code)
     else:
-        action_code = search(rq_action, k=top_k, where=code_where)
-        code_docs, _cseen = [], set()
+        action_code = search(rq_action, k=pool_k, where=code_where)
+        interleaved, _cseen = [], set()
         for a, b in zip(intent_code, action_code):
             for d in (a, b):
-                ck = (d.metadata.get("source"), d.metadata.get("start_line"), d.page_content[:40])
+                ck = _dkey(d)
                 if ck not in _cseen:
                     _cseen.add(ck)
-                    code_docs.append(d)
+                    interleaved.append(d)
         # append any tail (unequal lengths) preserving order, still deduped
         for d in list(intent_code) + list(action_code):
-            ck = (d.metadata.get("source"), d.metadata.get("start_line"), d.page_content[:40])
+            ck = _dkey(d)
             if ck not in _cseen:
                 _cseen.add(ck)
-                code_docs.append(d)
-        # Keep only the interleaved top-`top_k` so the two lanes don't crowd the DESIGN/general docs
-        # out of the final `_MAX_CONTEXT_BLOCKS` budget (both lanes' best hits are up front).
-        code_docs = code_docs[:top_k]
+                interleaved.append(d)
+    # Keep the interleaved top-`top_k` (both lanes' best hits) as the base set.
+    code_docs = interleaved[:top_k]
+
+    # LEXICAL RE-RANK (rescue). Pure vector similarity ranks by the failure's DOMINANT vocabulary (design
+    # intent + navigation), which can bury the exact buggy function even when it IS indexed — observed on
+    # TC-RPS-003, where the `quantity <= 1` guard sat in the index/text-units but never made the retrieved
+    # set. So from the WIDER pool we promote up to `_SIGNAL_PROMOTE` code chunks that share the most
+    # DISTINCTIVE tokens with the failure (identifiers / numbers / quoted values) yet fell outside top_k,
+    # and slot them high. Additive: the vector top hits are kept; when nothing clears `_SIGNAL_MIN` this is
+    # a strict no-op (prior behaviour). Backend-agnostic — runs over whatever search() returned (Chroma or
+    # msgraphrag whole-function chunks).
+    promoted = _promote_signal_hits(interleaved, failure, already=code_docs,
+                                    limit=_SIGNAL_PROMOTE, min_score=_SIGNAL_MIN)
+    if promoted:
+        srcs = ", ".join(f"{_short(d.metadata.get('source'))}:{d.metadata.get('start_line')}" for d in promoted)
+        print(f"  [REPAIR] lexical re-rank promoted {len(promoted)} code chunk(s) into context: {srcs}")
+        merged, seen = [], set()
+        for d in code_docs[:4] + promoted + code_docs[4:]:   # keep the top-4 vector hits ahead of promotions
+            k = _dkey(d)
+            if k not in seen:
+                seen.add(k)
+                merged.append(d)
+        code_docs = merged[:top_k + _SIGNAL_PROMOTE]
     # DESIGN INTENT. The design doc states the SPEC ("if the purchase succeeds … a PURCHASE transaction
     # is recorded"), which is what tells the LLM the ROOT CAUSE — e.g. that a guard skipping the record
     # for issued cards is the bug, not a label to relabel. It IS indexed but ranks below code in a plain
@@ -308,9 +429,10 @@ def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
     # design) until the char budget is hit — never truncate a function mid-body; drop the least-important
     # tail blocks instead. Self-adjusts to whatever num_ctx is set (so a smaller, VRAM-safe window is fine).
     if settings.repair_llm_backend == "local" and blocks:
+        local_ctx = effective_local_num_ctx()   # the window the model ACTUALLY runs with (large-model clamp applied)
         reserve_tokens = 1024 + 550          # model JSON output + the fixed prompt scaffold (rules)
         fail_tokens = len(failure) / _CHARS_PER_TOKEN
-        ctx_char_budget = int(max(2000, settings.repair_local_num_ctx - reserve_tokens - fail_tokens) * _CHARS_PER_TOKEN)
+        ctx_char_budget = int(max(2000, local_ctx - reserve_tokens - fail_tokens) * _CHARS_PER_TOKEN)
         kept, total = [], 0
         for b in blocks:
             if kept and total + len(b) + 2 > ctx_char_budget:
@@ -318,7 +440,7 @@ def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
             kept.append(b); total += len(b) + 2
         if len(kept) < len(blocks):
             print(f"  [REPAIR] context trimmed to fit local window: {len(kept)}/{len(blocks)} blocks "
-                  f"(~{total} chars, budget ~{ctx_char_budget}, num_ctx={settings.repair_local_num_ctx}).")
+                  f"(~{total} chars, budget ~{ctx_char_budget}, num_ctx={local_ctx}).")
         blocks, hits = kept, hits[:len(kept)]
     return "\n\n".join(blocks), hits
 
@@ -429,6 +551,75 @@ def _invoke_with_deadline(fn, timeout, cancel_check, on_heartbeat=None, heartbea
     return box.get("value")
 
 
+def _ollama_vram_report() -> str:
+    """One-line summary of what Ollama has loaded and whether it fits the GPU, from /api/ps.
+
+    Detects the CPU-offload condition that makes a big diagnose model ~10× slower (the timeout cause we
+    hit with qwen2.5-coder:32b under a high OLLAMA_NUM_PARALLEL). Best-effort: returns a short note if the
+    endpoint can't be reached; never raises. Only meaningful once the model is loaded (after the first
+    request), so callers invoke it around the diagnose call."""
+    try:
+        import urllib.request
+        base = settings.repair_local_base_url.rstrip("/")
+        with urllib.request.urlopen(f"{base}/api/ps", timeout=5) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception as exc:
+        return f"(ollama /api/ps unavailable: {exc})"
+    parts = []
+    for m in data.get("models", []):
+        total = m.get("size", 0) or 0
+        vram = m.get("size_vram", 0) or 0
+        if total <= 0:
+            continue
+        gpu_pct = int(round(100 * vram / total))
+        tag = "100% GPU" if vram >= total else f"{gpu_pct}% GPU / {100 - gpu_pct}% CPU  ⚠ OFFLOAD"
+        parts.append(f"{m.get('name', '?')} {vram / 1e9:.1f}/{total / 1e9:.1f} GB {tag}")
+    return "; ".join(parts) if parts else "(no models loaded)"
+
+
+def _dump_diagnose_debug(failure: str, prompt: str, records: list, vram: str = "") -> None:
+    """Write the EXACT prompt + each provider's RAW response to a per-call file (REPAIR_DEBUG_DUMP=true).
+
+    This is the ground truth for "what did we send the model and what did it say" — including the empty/
+    timed-out case (raw = None) that the UI shows as "(no output)". Never raises; a dump failure only prints."""
+    try:
+        d = Path(settings.repair_debug_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        m = re.search(r"\bTC-[A-Za-z0-9]+-\d+\b", failure or "")
+        tid = m.group(0) if m else "repair"
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fp = d / f"diagnose_{ts}_{tid}.txt"
+        lines = [
+            f"# DIAGNOSE debug dump  {ts}",
+            f"# test:              {tid}",
+            f"# retrieval backend: {retrieval_tool_label()}",
+            f"# diagnose model:    {diagnose_tool_label()}",
+            f"# local num_ctx:     {effective_local_num_ctx()} (effective)",
+            f"# GPU (ollama ps):   {vram or '(n/a)'}",
+            f"# prompt size:       {len(prompt or '')} chars",
+            "",
+            "=" * 90, "PROMPT SENT TO MODEL", "=" * 90, prompt or "", "",
+        ]
+        for rec in records:
+            lines += [
+                "=" * 90,
+                f"PROVIDER: {rec.get('label')}  ({rec.get('model', '')})  "
+                f"elapsed={rec.get('elapsed', '?')}s  outcome={rec.get('outcome', '')}",
+                "=" * 90,
+                "--- RAW RESPONSE ---",
+                rec.get("raw") if rec.get("raw") is not None else "(no output — timed out or empty)",
+                "--- PARSED PATCH ---",
+                json.dumps(rec.get("parsed"), indent=2) if rec.get("parsed") else "(none)",
+                "--- REJECT REASON ---",
+                rec.get("reason") or "(accepted / n.a.)",
+                "",
+            ]
+        fp.write_text("\n".join(lines), encoding="utf-8")
+        print(f"  [REPAIR] debug dump → {fp}")
+    except Exception as exc:
+        print(f"  [REPAIR] debug dump failed: {exc}")
+
+
 def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None, on_progress=None) -> RepairPatch:
     """Produce one minimal find/replace patch: try the selected model, then the backup model, then
     the deterministic demo rule. `repair_llm_backend` chooses primary vs backup order. Each provider
@@ -440,94 +631,132 @@ def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None
     # Visibility into what the model actually receives — the #1 thing to check when a fix looks wrong.
     approx_tokens = int(len(prompt) / _CHARS_PER_TOKEN)
     print(f"  [REPAIR] DIAGNOSE prompt: {len(prompt)} chars (~{approx_tokens} tokens).")
-    if settings.repair_llm_backend == "local" and approx_tokens > settings.repair_local_num_ctx:
+    if settings.repair_llm_backend == "local" and approx_tokens > effective_local_num_ctx():
         print(f"  [REPAIR] ⚠ prompt (~{approx_tokens} tok) EXCEEDS local num_ctx="
-              f"{settings.repair_local_num_ctx} → Ollama will TRUNCATE it. Raise REPAIR_LOCAL_NUM_CTX "
+              f"{effective_local_num_ctx()} → Ollama will TRUNCATE it. Raise REPAIR_LOCAL_NUM_CTX "
               f"or reduce retrieved context.")
 
     chain = " → ".join(lbl for lbl, _ in _diagnose_providers())
     air = "  (AIR-GAPPED: no remote fallback — nothing leaves the environment)" if settings.repair_local_only else ""
     print(f"  [REPAIR] DIAGNOSE via {diagnose_tool_label()}  [providers: {chain}]{air}")
 
-    for label, make_llm in _diagnose_providers():
-        if cancel_check and cancel_check():
-            raise RepairCancelled()
-        try:
-            llm = make_llm()   # lazy — a missing/unreachable backup raises here, we move on
-        except Exception as exc:
-            print(f"  [REPAIR] DIAGNOSE provider '{label}' unavailable ({exc}) — trying next.")
-            continue
-        # Per-provider budget. The remote Claude call is fast → the tight `timeout` (repair_diagnose_
-        # timeout_s). The LOCAL CPU model needs minutes, and its outer deadline MUST be ≥ its own Ollama
-        # client timeout or it gets killed before it can answer — so give it repair_local_timeout_s (+
-        # margin), and take just ONE attempt (retries=0): a slow model shouldn't be run 3× on timeout.
-        if label == "local":
-            provider_timeout = settings.repair_local_timeout_s + 30
-            provider_retries = 0
-        else:
-            provider_timeout = timeout
-            provider_retries = 2
-        # Heartbeat only for the slow local model, so a multi-minute CPU inference reports progress to
-        # the console + UI instead of looking hung. Claude is fast → no heartbeat.
-        heartbeat = None
-        if label == "local":
-            def heartbeat(elapsed, _lbl=label, _budget=provider_timeout):
-                print(f"  [REPAIR] DIAGNOSE {diagnose_tool_label()} still working… {int(elapsed)}s / {int(_budget)}s")
-                if on_progress:
-                    on_progress(_lbl, int(elapsed), int(_budget))
-        try:
-            data = _invoke_with_deadline(
-                lambda llm=llm, r=provider_retries: invoke_json(
-                    llm, [HumanMessage(content=prompt)], default=None, retries=r, label=f"repair/{label}"),
-                provider_timeout, cancel_check, on_heartbeat=heartbeat,
-            )
-        except _DiagnoseTimeout:
-            print(f"  [REPAIR] DIAGNOSE provider '{label}' timed out after {provider_timeout}s — trying next.")
-            continue
-        # Sanity-check the patch before accepting. A weaker (local) model often returns a no-op or a
-        # bare-token 'find' (e.g. "amount") that greens diagnose then fails at apply — give it ONE
-        # corrective retry with the exact reason, which finished well within budget in practice.
-        reason = _reject_reason(data)
-        if reason and label == "local":
-            print(f"  [REPAIR] DIAGNOSE local patch rejected ({reason}) — one corrective retry.")
-            corrective = prompt + (
-                f"\n\nYOUR PREVIOUS ANSWER WAS REJECTED: {reason}. Return corrected JSON where 'find' is a "
-                f"DISTINCTIVE, VERBATIM multi-line snippet copied from the code above (a whole line or 2–4 "
-                f"lines, UNIQUE in the file — never a bare word), and 'replace' is that snippet with only "
-                f"the buggy fragment changed (it MUST differ from 'find'). Fix the ROOT CAUSE, not a label."
-            )
+    # DEBUG DUMP bookkeeping (Q2). `records` collects, per provider, the raw response + parsed patch +
+    # outcome; `vram_report` snapshots the GPU when a local model runs. Written to a file in a finally so
+    # even a full timeout ("no output") is captured. All no-ops unless REPAIR_DEBUG_DUMP is set.
+    debug = settings.repair_debug_dump
+    records: list = []
+    vram_report = ""
+
+    def _record(label, model, raw_holder, parsed, reason, t0, outcome):
+        if debug:
+            records.append({
+                "label": label, "model": model, "raw": raw_holder.get("text"),
+                "parsed": parsed, "reason": reason,
+                "elapsed": round(time.time() - t0, 1), "outcome": outcome,
+            })
+
+    try:
+        for label, make_llm in _diagnose_providers():
+            if cancel_check and cancel_check():
+                raise RepairCancelled()
+            try:
+                llm = make_llm()   # lazy — a missing/unreachable backup raises here, we move on
+            except Exception as exc:
+                print(f"  [REPAIR] DIAGNOSE provider '{label}' unavailable ({exc}) — trying next.")
+                continue
+            model_name = settings.repair_local_model if label == "local" else settings.anthropic_model
+            # Per-provider budget. The remote Claude call is fast → the tight `timeout` (repair_diagnose_
+            # timeout_s). The LOCAL CPU model needs minutes, and its outer deadline MUST be ≥ its own Ollama
+            # client timeout or it gets killed before it can answer — so give it repair_local_timeout_s (+
+            # margin), and take just ONE attempt (retries=0): a slow model shouldn't be run 3× on timeout.
+            if label == "local":
+                provider_timeout = settings.repair_local_timeout_s + 30
+                provider_retries = 0
+            else:
+                provider_timeout = timeout
+                provider_retries = 2
+            # Heartbeat only for the slow local model, so a multi-minute CPU inference reports progress to
+            # the console + UI instead of looking hung. Claude is fast → no heartbeat.
+            heartbeat = None
+            if label == "local":
+                def heartbeat(elapsed, _lbl=label, _budget=provider_timeout):
+                    print(f"  [REPAIR] DIAGNOSE {diagnose_tool_label()} still working… {int(elapsed)}s / {int(_budget)}s")
+                    if on_progress:
+                        on_progress(_lbl, int(elapsed), int(_budget))
+            # Capture the model's raw text for the debug dump (before JSON parsing) — the ground truth for
+            # "what did QWEN say", including a garbled/partial answer that fails to parse.
+            raw_holder = {"text": None}
+            on_raw_cb = (lambda t: raw_holder.__setitem__("text", t)) if debug else None
+            t0 = time.time()
             try:
                 data = _invoke_with_deadline(
-                    lambda: invoke_json(llm, [HumanMessage(content=corrective)], default=None,
-                                        retries=0, label="repair/local-retry"),
+                    lambda llm=llm, r=provider_retries: invoke_json(
+                        llm, [HumanMessage(content=prompt)], default=None, retries=r,
+                        label=f"repair/{label}", on_raw=on_raw_cb),
                     provider_timeout, cancel_check, on_heartbeat=heartbeat,
                 )
             except _DiagnoseTimeout:
-                print(f"  [REPAIR] DIAGNOSE local corrective retry timed out — trying next.")
+                print(f"  [REPAIR] DIAGNOSE provider '{label}' timed out after {provider_timeout}s — trying next.")
+                # A local timeout is almost always CPU-offload (the model didn't fit the GPU). Snapshot
+                # /api/ps so the cause is in the logs, and warn with the exact fix (Q3).
+                if label == "local":
+                    vram_report = _ollama_vram_report()
+                    print(f"  [REPAIR] GPU at timeout (ollama ps): {vram_report}")
+                    if "OFFLOAD" in vram_report:
+                        print("  [REPAIR] ⚠ diagnose model is CPU-OFFLOADED — the cause of the slow/timed-out "
+                              "run. Set OLLAMA_NUM_PARALLEL=0 (auto) and/or lower REPAIR_LOCAL_NUM_CTX so the "
+                              "model + KV cache fit the GPU.")
+                _record(label, model_name, raw_holder, None, "timed out", t0, "timeout")
                 continue
+            # Sanity-check the patch before accepting. A weaker (local) model often returns a no-op or a
+            # bare-token 'find' (e.g. "amount") that greens diagnose then fails at apply — give it ONE
+            # corrective retry with the exact reason, which finished well within budget in practice.
             reason = _reject_reason(data)
-        if data and not reason and data.get("find") and data.get("replace") is not None:
-            model_name = (
-                settings.repair_local_model if label == "local" else settings.anthropic_model
-            )
-            who = {"local": "LOCAL Llama", "claude": "Claude"}.get(label, label)
-            print(f"  [REPAIR] DIAGNOSE ✓ patch produced by {who} ({model_name}).")
-            return RepairPatch(
-                file_path=str(data.get("file_path", "")),
-                find=data["find"],
-                replace=data["replace"],
-                explanation=data.get("explanation", f"{label}-proposed repair."),
-                source=label,
-                model=model_name,
-            )
-        print(f"  [REPAIR] DIAGNOSE provider '{label}' returned no usable patch ({reason or 'incomplete'}) — trying next.")
+            if reason and label == "local":
+                print(f"  [REPAIR] DIAGNOSE local patch rejected ({reason}) — one corrective retry.")
+                corrective = prompt + (
+                    f"\n\nYOUR PREVIOUS ANSWER WAS REJECTED: {reason}. Return corrected JSON where 'find' is a "
+                    f"DISTINCTIVE, VERBATIM multi-line snippet copied from the code above (a whole line or 2–4 "
+                    f"lines, UNIQUE in the file — never a bare word), and 'replace' is that snippet with only "
+                    f"the buggy fragment changed (it MUST differ from 'find'). Fix the ROOT CAUSE, not a label."
+                )
+                try:
+                    data = _invoke_with_deadline(
+                        lambda: invoke_json(llm, [HumanMessage(content=corrective)], default=None,
+                                            retries=0, label="repair/local-retry", on_raw=on_raw_cb),
+                        provider_timeout, cancel_check, on_heartbeat=heartbeat,
+                    )
+                except _DiagnoseTimeout:
+                    print(f"  [REPAIR] DIAGNOSE local corrective retry timed out — trying next.")
+                    _record(label, model_name, raw_holder, None, "corrective retry timed out", t0, "timeout")
+                    continue
+                reason = _reject_reason(data)
+            if data and not reason and data.get("find") and data.get("replace") is not None:
+                if debug and label == "local":
+                    vram_report = vram_report or _ollama_vram_report()
+                _record(label, model_name, raw_holder, data, "", t0, "accepted")
+                who = {"local": "LOCAL Llama", "claude": "Claude"}.get(label, label)
+                print(f"  [REPAIR] DIAGNOSE ✓ patch produced by {who} ({model_name}).")
+                return RepairPatch(
+                    file_path=str(data.get("file_path", "")),
+                    find=data["find"],
+                    replace=data["replace"],
+                    explanation=data.get("explanation", f"{label}-proposed repair."),
+                    source=label,
+                    model=model_name,
+                )
+            _record(label, model_name, raw_holder, data, reason or "incomplete", t0, "no-usable-patch")
+            print(f"  [REPAIR] DIAGNOSE provider '{label}' returned no usable patch ({reason or 'incomplete'}) — trying next.")
 
-    fallback = _demo_fallback_patch()
-    if fallback:
-        print("  [REPAIR] No model produced a usable patch — using demo fallback rule.")
-        return fallback
+        fallback = _demo_fallback_patch()
+        if fallback:
+            print("  [REPAIR] No model produced a usable patch — using demo fallback rule.")
+            return fallback
 
-    raise RuntimeError("No repair patch could be produced (no model returned a usable patch and no fallback matched).")
+        raise RuntimeError("No repair patch could be produced (no model returned a usable patch and no fallback matched).")
+    finally:
+        if debug:
+            _dump_diagnose_debug(failure, prompt, records, vram_report)
 
 
 def _demo_fallback_patch() -> Optional[RepairPatch]:

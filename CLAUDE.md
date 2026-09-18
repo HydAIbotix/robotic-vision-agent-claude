@@ -379,10 +379,28 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   root-cause a reasoning-heavy bug or emit a precise unique patch; use a code-specialised model
   (`qwen2.5-coder:14b/32b`) on a GPU, or Claude. Demo the local path on the simpler planted bugs
   (login `-bug`, products `0`); reserve the hard cross-kiosk transaction bug for a strong model.
+  BUT first rule out RETRIEVAL: a buggy chunk that is indexed yet never surfaced (vector similarity
+  buries it under design-intent/navigation vocabulary — seen on TC-RPS-003's `quantity <= 1` guard)
+  is a ranking miss, not a model failure. `retrieve_context` now runs a **lexical re-rank** over a
+  wider candidate pool (`_POOL_MULT`×top_k) that PROMOTES ≤2 code chunks sharing the most distinctive
+  tokens (identifiers/numbers/quoted values) with the failure — additive, backend-agnostic (Chroma +
+  msgraphrag), a strict no-op when nothing clears `_SIGNAL_MIN`.
+- **Diagnose "what did we send / get" is dumpable.** `REPAIR_DEBUG_DUMP=true` writes the EXACT prompt
+  + each provider's RAW response (+ parsed patch, reject reason, timing, `ollama ps` VRAM) to
+  `repair_debug_dir` per call — captures even the timed-out "(no output)" case. Off by default (no I/O).
 - **GPU on GCE (msgraphrag / local models):** `g2-standard-8` = 1× NVIDIA L4 24GB; needs the
   NVIDIA driver (570 for kernel 6.8) + nvidia-container-toolkit, and **Secure Boot OFF** on Shielded
   VMs (blocks the unsigned module). `docker-compose.gpu.yml` reserves the GPU for `ollama`
   (`start-all.sh GPU=1`); `OLLAMA_CONTEXT_LENGTH=8192` so community-report prompts aren't truncated.
+- **⚠️ BUILD-vs-DIAGNOSE parallelism split (one L4, one Ollama).** Ollama reserves KV cache =
+  `num_parallel × num_ctx` PER LOADED MODEL. Hard-setting `OLLAMA_NUM_PARALLEL` high (e.g. 8) for a
+  fast 14B graph build ALSO applies it to the 32B diagnose → KV overflows 24GB → CPU offload →
+  ~10× slower → the diagnose TIMES OUT (`repair_local_timeout_s+30`). Fix: **`OLLAMA_NUM_PARALLEL=0`
+  (auto, now the default)** — Ollama sizes slots per model by free VRAM (14B → up to 4 = parallel
+  build; 32B → 1 = safe). Belt-and-braces: a ≥30B diagnose model's `num_ctx` is auto-clamped to
+  `repair_local_num_ctx_cap_large` (12288) via `vision_agent.llm.effective_local_num_ctx()` (14B keeps
+  16384; the context fit-trim reads the same effective value). A local timeout logs `ollama ps` and
+  warns loudly on `⚠ OFFLOAD`. Only pin a high NUM_PARALLEL when builds/diagnoses run on SEPARATE GPUs.
 - **GCP firewall single-IP rules go STALE.** Rules scoped to a laptop `/32` source-range break when
   the IP rotates (studio/neo4j/adminer "not accessible" though the ports listen fine). Update
   `--source-ranges` to the current IP; datastore ports (5432/6379/9000/9001) stay VM-internal.
@@ -415,6 +433,14 @@ Detailed history → [`docs/PROGRESS_LOG.md`](docs/PROGRESS_LOG.md). Design/depl
 - **2026-09-16 · REAL Microsoft GraphRAG backend** (3rd retrieval option, ONE local model).
   Verified live on a GCE `g2-standard-8` (L4) with `qwen2.5-coder:14b`: GraphRAG 3.1.2 schema, GPU
   wiring, Neo4j export, incremental builds, POS-domain entity types + whole-function retrieval.
+- **2026-09-18 · repair robustness: retrieval re-rank + VRAM split + debug dump.** Three fixes after
+  the 32B-on-L4 diagnose timed out: (1) **lexical re-rank** in `retrieve_context` promotes the buggy
+  chunk that vector similarity buried (TC-RPS-003 `quantity <= 1`), backend-agnostic + additive;
+  (2) **build-vs-diagnose parallelism split** — `OLLAMA_NUM_PARALLEL=0` (auto) + a ≥30B `num_ctx`
+  clamp (`effective_local_num_ctx()`) so a 32B diagnose stays on-GPU while 14B builds stay parallel,
+  plus an `ollama ps` offload warning on timeout; (3) **`REPAIR_DEBUG_DUMP`** writes the exact
+  prompt + raw model response per diagnose. No-regression: full suite unchanged (same 8 pre-existing
+  vision/template fixture failures). Detail → `docs/PROGRESS_LOG.md`.
 
 ### Never
 
