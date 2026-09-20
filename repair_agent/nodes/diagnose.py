@@ -26,6 +26,7 @@ def diagnose_node(state: RepairAgentState) -> dict:
         timeout=settings.repair_diagnose_timeout_s,
         cancel_check=lambda: canceller.is_cancelled(rid),
         on_progress=_progress,
+        hits=state.get("hits"),   # P0b: lets DIAGNOSE verify the patch targets the failed symptom
     )
     patch_dict = asdict(patch)
     # Report the tool that ACTUALLY produced the patch (source may differ from the selected primary

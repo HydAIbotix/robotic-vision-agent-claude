@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auto-Repair v2 — Code Review</title>
+<style>
+  :root{--navy:#0f2a43;--navy2:#173b5c;--teal:#1f9a94;--tealdk:#146e6a;--amber:#e0891e;
+        --red:#c0392b;--green:#1f7a3d;--slate:#33414e;--grey:#6b7782;--line:#c9d6dd;--bg:#f7fafb;--card:#fff;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Segoe UI",Calibri,system-ui,sans-serif;color:var(--slate);background:var(--bg);line-height:1.55;}
+  .wrap{max-width:960px;margin:0 auto;padding:0 20px 80px;}
+  header{background:var(--navy);color:#fff;padding:34px 20px 30px;margin-bottom:8px;border-bottom:4px solid var(--teal);}
+  header .wrap{padding-bottom:0}
+  header .kicker{color:var(--teal);font-weight:700;letter-spacing:.08em;font-size:13px;}
+  header h1{margin:.15em 0 .1em;font-size:30px;font-weight:600;}
+  header .sub{color:#dde8ec;font-size:17px;}
+  header .meta{color:#9fb2bf;font-size:12.5px;margin-top:10px;}
+  h2{color:var(--navy);font-size:22px;margin:38px 0 6px;border-bottom:2px solid var(--line);padding-bottom:5px;}
+  h3{color:var(--tealdk);font-size:16.5px;margin:22px 0 4px;}
+  p{margin:.5em 0}
+  .lead{font-size:17px;color:var(--navy2);}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 20px;margin:14px 0;}
+  .callout{border-left:6px solid var(--amber);background:#fff8ee;border-radius:0 10px 10px 0;padding:14px 18px;margin:16px 0;}
+  .callout.red{border-left-color:var(--red);background:#fdeeec;}
+  .callout.green{border-left-color:var(--green);background:#eef8f1;}
+  .callout.teal{border-left-color:var(--teal);background:#eef8f7;}
+  .callout b{color:var(--navy);}
+  figure{margin:20px 0;text-align:center;}
+  figure svg{max-width:100%;height:auto;border:1px solid var(--line);border-radius:10px;background:#fff;}
+  figcaption{color:var(--grey);font-size:13px;margin-top:8px;}
+  table{border-collapse:collapse;width:100%;margin:12px 0;font-size:14px;}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top;}
+  th{background:var(--navy);color:#fff;font-weight:600;}
+  tr:nth-child(even) td{background:#f2f6f8;}
+  code{background:#eef3f6;padding:1px 5px;border-radius:4px;font-size:.92em;color:var(--navy2);}
+  .phase{display:inline-block;font-weight:700;color:#fff;border-radius:5px;padding:1px 8px;font-size:12.5px;}
+  .p0{background:var(--teal)} .p1{background:var(--navy2)} .p2{background:var(--amber)} .p3{background:var(--tealdk)}
+  ul{margin:.4em 0 .8em;padding-left:22px} li{margin:.25em 0}
+  .small{font-size:13px;color:var(--grey)}
+  @media print{body{background:#fff}.card,figure svg{break-inside:avoid}}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div class="kicker">CODE REVIEW · AUTO-REPAIR AGENT</div>
+    <h1>Auto-Repair v2 — Fixing the right code</h1>
+    <div class="sub">Why our self-healing agent couldn't fix a simple bug — and the redesign that fixes it for every test</div>
+    <div class="meta">Kiosk-QA platform · Auto-Repair pipeline · Prepared for team code review · 20 Sep 2026</div>
+  </div>
+</header>
+<div class="wrap">
+
+<p class="lead">This is a plain-language walkthrough of a real Auto-Repair failure, what actually caused it,
+and the four changes we made. The headline: it was <b>not</b> a weak-model problem. Our agent was handing
+the model the <b>wrong code</b>, so no model could ever fix the bug. We fixed the targeting.</p>
+
+<h2>1. What went wrong (the real story)</h2>
+<p>Auto-Repair runs after a test fails: it <b>retrieves</b> the likely-buggy code, asks an AI model to
+<b>diagnose</b> a one-line fix, <b>applies</b> it, <b>builds</b>, and opens a <b>PR</b>. On test
+<code>TC-RPS-003</code> it produced a confident but useless fix, even with a strong 32-billion-parameter
+code model (Qwen) and Microsoft GraphRAG.</p>
+
+<p>We turned on a new debug dump and it told the whole story:</p>
+<ul>
+  <li>The test is <b>titled</b> <i>"Mock card <b>payment</b> with sufficient balance succeeds."</i></li>
+  <li>But it actually failed much earlier — at <b>Add to Cart</b>: the product was added with
+      <b>quantity 0</b>, which popped a <i>"Quantity Required"</i> message, so the cart never filled.</li>
+  <li>The retrieval step pulled <b>16 chunks of code and documents — all about payment / card readers.</b>
+      The actual buggy Add-to-Cart code was in <b>none</b> of them.</li>
+  <li>So the model did the only thing it could with what it was given: it tweaked the <b>payment approval</b>
+      logic. Reasonable guess, wrong bug.</li>
+</ul>
+
+<div class="callout red"><b>The one-sentence root cause:</b> retrieval anchored on the test's
+<b>title/goal</b> (payment) instead of on <b>where the test actually broke</b> (add-to-cart). A model can
+only fix code it can see — and the buggy code was never retrieved.</div>
+
+<figure>
+<svg viewBox="0 0 900 300" role="img" aria-label="Before: broken retrieval flow">
+  <defs>
+    <marker id="ar" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#6b7782"/></marker>
+  </defs>
+  <rect x="20" y="120" width="150" height="60" rx="8" fill="#173b5c"/>
+  <text x="95" y="145" fill="#fff" font-size="13" text-anchor="middle" font-weight="700">Test fails</text>
+  <text x="95" y="163" fill="#cfe0e6" font-size="11" text-anchor="middle">TC-RPS-003</text>
+
+  <rect x="230" y="105" width="200" height="90" rx="8" fill="#fdeeec" stroke="#c0392b" stroke-width="1.5"/>
+  <text x="330" y="130" fill="#c0392b" font-size="12.5" text-anchor="middle" font-weight="700">Retrieval anchored</text>
+  <text x="330" y="148" fill="#c0392b" font-size="12.5" text-anchor="middle" font-weight="700">on the TITLE</text>
+  <text x="330" y="170" fill="#8a4b44" font-size="11" text-anchor="middle">"…payment succeeds"</text>
+
+  <rect x="490" y="105" width="200" height="90" rx="8" fill="#fdeeec" stroke="#c0392b" stroke-width="1.5"/>
+  <text x="590" y="132" fill="#c0392b" font-size="12.5" text-anchor="middle" font-weight="700">16 chunks —</text>
+  <text x="590" y="150" fill="#c0392b" font-size="12.5" text-anchor="middle" font-weight="700">all PAYMENT code</text>
+  <text x="590" y="172" fill="#8a4b44" font-size="10.5" text-anchor="middle">add-to-cart bug: NOT here</text>
+
+  <rect x="750" y="120" width="130" height="60" rx="8" fill="#173b5c"/>
+  <text x="815" y="145" fill="#fff" font-size="12.5" text-anchor="middle" font-weight="700">Model</text>
+  <text x="815" y="163" fill="#f6c9c2" font-size="10.5" text-anchor="middle">wrong fix ✗</text>
+
+  <line x1="170" y1="150" x2="228" y2="150" stroke="#6b7782" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="430" y1="150" x2="488" y2="150" stroke="#6b7782" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="690" y1="150" x2="748" y2="150" stroke="#6b7782" stroke-width="2" marker-end="url(#ar)"/>
+
+  <rect x="490" y="225" width="200" height="46" rx="6" fill="#fff8ee" stroke="#e0891e"/>
+  <text x="590" y="245" fill="#a5610f" font-size="11" text-anchor="middle">Real bug lives in add-to-cart:</text>
+  <text x="590" y="261" fill="#a5610f" font-size="11" text-anchor="middle" font-weight="700">onAddToCart(product, 0)</text>
+  <line x1="590" y1="223" x2="590" y2="197" stroke="#e0891e" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+</svg>
+<figcaption>Before: the model never saw the buggy code, so a strong model still produced the wrong fix.</figcaption>
+</figure>
+
+<h2>2. Why it happened — three causes</h2>
+<div class="card">
+<p><b>1. The query described the goal, not the failure.</b> The text we search with leads with the test's
+design intent ("payment… balance… approved"). For a test that dies early, those words point retrieval at
+the wrong feature.</p>
+<p><b>2. Too much noise.</b> 16 chunks were sent — half of them generic requirements prose and unrelated
+dummy settings. That dilutes the few lines that matter and confuses the model.</p>
+<p><b>3. No sanity check on the answer.</b> The wrong fix was type-valid, so it sailed through — nothing
+asked "does this patch even touch the thing that failed?"</p>
+</div>
+
+<h2>3. What we changed — four fixes</h2>
+<p>The fixes are generic — they key off <b>how any test fails</b>, not off this one bug — so they help
+every customer and every failure type.</p>
+
+<h3><span class="phase p0">P0a</span> &nbsp;Aim retrieval at the failure point</h3>
+<p>We now build the <b>primary</b> search query from <b>where the test actually broke</b> — the failed step,
+the observed symptom, and the failing assertion ("Add to Cart… quantity 0… Quantity Required popup… expected
+cart, got products"). We still also search by the executed steps and the original goal, and blend all the
+results, so value-based bugs (e.g. a shared card balance that didn't update) still find their code. For
+TC-RPS-003 this pulls the <b>add-to-cart code</b> instead of payment code.</p>
+
+<h3><span class="phase p1">P1</span> &nbsp;Send fewer, sharper chunks</h3>
+<p>We sort failures into two kinds. A <b>value / spec</b> bug (balance, transaction, cross-kiosk) keeps the
+richer context and the design document — unchanged, so nothing that works today breaks. A plain
+<b>interaction</b> bug (wrong screen, popup, a button that did nothing) gets a <b>tight, code-heavy</b> set
+(~8 chunks, almost all code, boilerplate dropped). That removes the noise that misled the model.</p>
+
+<h3><span class="phase p0">P0b</span> &nbsp;Check the fix is on-target</h3>
+<p>After the model proposes a patch, we ask a simple question: <b>does this patch touch the same things that
+failed?</b> If the patch shares nothing with the failure symptom <i>and</i> a better-matching piece of code
+was right there in the context, we treat it as off-target and give the model <b>one nudge</b> back toward the
+symptom — keeping whichever answer is better, never getting stuck. (If nothing relevant was retrieved at all,
+we log that clearly: it's a retrieval gap, not a model mistake.)</p>
+
+<h3><span class="phase p2">P2</span> &nbsp;Optional "locate first" pass (RCA)</h3>
+<p>Optionally, a quick first step asks the model to <b>name the suspect area and keywords</b> before we search
+for the fix, which sharpens retrieval further. It's <b>off by default</b> (it adds a model call, slow on the
+local 32B) and can be switched on once the anchored retrieval is proven.</p>
+
+<figure>
+<svg viewBox="0 0 900 360" role="img" aria-label="After: the new Auto-Repair flow">
+  <defs>
+    <marker id="ar2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#6b7782"/></marker>
+  </defs>
+  <!-- top row: retrieve pipeline -->
+  <rect x="18" y="40" width="120" height="56" rx="8" fill="#173b5c"/>
+  <text x="78" y="63" fill="#fff" font-size="12.5" text-anchor="middle" font-weight="700">Test fails</text>
+  <text x="78" y="80" fill="#cfe0e6" font-size="10.5" text-anchor="middle">step + symptom</text>
+
+  <rect x="168" y="30" width="150" height="76" rx="8" fill="#eef8f7" stroke="#1f9a94" stroke-width="1.5"/>
+  <text x="243" y="52" fill="#146e6a" font-size="11.5" text-anchor="middle" font-weight="700">P0a Failure-point</text>
+  <text x="243" y="68" fill="#146e6a" font-size="11.5" text-anchor="middle" font-weight="700">retrieval lanes</text>
+  <text x="243" y="85" fill="#5a7f7c" font-size="9.5" text-anchor="middle">failure ▸ action ▸ intent</text>
+  <text x="243" y="98" fill="#a5610f" font-size="9.5" text-anchor="middle">(+P2 RCA, optional)</text>
+
+  <rect x="348" y="30" width="140" height="76" rx="8" fill="#eef2f7" stroke="#173b5c" stroke-width="1.5"/>
+  <text x="418" y="55" fill="#173b5c" font-size="11.5" text-anchor="middle" font-weight="700">P1 Bug-class</text>
+  <text x="418" y="71" fill="#173b5c" font-size="11.5" text-anchor="middle" font-weight="700">router</text>
+  <text x="418" y="90" fill="#5a6b78" font-size="9.5" text-anchor="middle">spec = rich · UI = tight</text>
+
+  <rect x="518" y="30" width="140" height="76" rx="8" fill="#eef8f7" stroke="#1f9a94" stroke-width="1.5"/>
+  <text x="588" y="55" fill="#146e6a" font-size="11.5" text-anchor="middle" font-weight="700">Re-rank +</text>
+  <text x="588" y="71" fill="#146e6a" font-size="11.5" text-anchor="middle" font-weight="700">tight context</text>
+  <text x="588" y="90" fill="#5a7f7c" font-size="9.5" text-anchor="middle">right code, less noise</text>
+
+  <rect x="688" y="30" width="130" height="76" rx="8" fill="#173b5c"/>
+  <text x="753" y="63" fill="#fff" font-size="12.5" text-anchor="middle" font-weight="700">Diagnose</text>
+  <text x="753" y="80" fill="#cfe0e6" font-size="10" text-anchor="middle">Claude / Qwen</text>
+
+  <line x1="138" y1="68" x2="166" y2="68" stroke="#6b7782" stroke-width="2" marker-end="url(#ar2)"/>
+  <line x1="318" y1="68" x2="346" y2="68" stroke="#6b7782" stroke-width="2" marker-end="url(#ar2)"/>
+  <line x1="488" y1="68" x2="516" y2="68" stroke="#6b7782" stroke-width="2" marker-end="url(#ar2)"/>
+  <line x1="658" y1="68" x2="686" y2="68" stroke="#6b7782" stroke-width="2" marker-end="url(#ar2)"/>
+
+  <!-- down to verify -->
+  <line x1="753" y1="106" x2="753" y2="150" stroke="#6b7782" stroke-width="2" marker-end="url(#ar2)"/>
+
+  <!-- bottom row: verify -> apply -> build -> pr -->
+  <rect x="640" y="150" width="180" height="70" rx="8" fill="#eef8f7" stroke="#1f9a94" stroke-width="1.5"/>
+  <text x="730" y="173" fill="#146e6a" font-size="11.5" text-anchor="middle" font-weight="700">P0b Verify on-target</text>
+  <text x="730" y="190" fill="#5a7f7c" font-size="9.5" text-anchor="middle">patch touches the symptom?</text>
+  <text x="730" y="205" fill="#a5610f" font-size="9.5" text-anchor="middle">off-target → 1 nudge, keep best</text>
+
+  <rect x="470" y="158" width="130" height="54" rx="8" fill="#173b5c"/>
+  <text x="535" y="181" fill="#fff" font-size="12" text-anchor="middle" font-weight="700">Apply patch</text>
+  <text x="535" y="198" fill="#cfe0e6" font-size="9.5" text-anchor="middle">unique-match guard</text>
+
+  <rect x="300" y="158" width="130" height="54" rx="8" fill="#173b5c"/>
+  <text x="365" y="181" fill="#fff" font-size="12" text-anchor="middle" font-weight="700">Build</text>
+  <text x="365" y="198" fill="#cfe0e6" font-size="9.5" text-anchor="middle">tsc + vite</text>
+
+  <rect x="130" y="158" width="130" height="54" rx="8" fill="#1f7a3d"/>
+  <text x="195" y="181" fill="#fff" font-size="12" text-anchor="middle" font-weight="700">PR ✓</text>
+  <text x="195" y="198" fill="#d6efdd" font-size="9.5" text-anchor="middle">single-file fix</text>
+
+  <line x1="640" y1="185" x2="602" y2="185" stroke="#6b7782" stroke-width="2" marker-end="url(#ar2)"/>
+  <line x1="470" y1="185" x2="432" y2="185" stroke="#6b7782" stroke-width="2" marker-end="url(#ar2)"/>
+  <line x1="300" y1="185" x2="262" y2="185" stroke="#6b7782" stroke-width="2" marker-end="url(#ar2)"/>
+
+  <!-- roadmap dashed -->
+  <rect x="300" y="262" width="300" height="50" rx="8" fill="#fbfdfd" stroke="#c9d6dd" stroke-dasharray="5 4"/>
+  <text x="450" y="283" fill="#6b7782" font-size="11" text-anchor="middle" font-weight="700">Roadmap: re-run the failed test as the oracle</text>
+  <text x="450" y="300" fill="#8a97a1" font-size="10" text-anchor="middle">strongest check; needs the patched POS redeployed</text>
+  <line x1="365" y1="212" x2="380" y2="260" stroke="#c9d6dd" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ar2)"/>
+</svg>
+<figcaption>After: retrieval is aimed at the failure, context is tight and correct, and the fix is checked
+for being on-target before it's applied. Green = the four new pieces sit inside the same retrieve → diagnose
+→ apply → build → PR pipeline (no structural change).</figcaption>
+</figure>
+
+<h2>4. How the four fixes back each other up</h2>
+<table>
+  <tr><th>Fix</th><th>Catches this failure mode</th><th>Default</th></tr>
+  <tr><td><span class="phase p0">P0a</span> Failure-point retrieval</td><td>The buggy code was never retrieved because the query described the goal, not the failure.</td><td>On</td></tr>
+  <tr><td><span class="phase p1">P1</span> Bug-class precision</td><td>The right code was buried under boilerplate/noise, confusing the model.</td><td>On</td></tr>
+  <tr><td><span class="phase p0">P0b</span> On-target verification</td><td>The model patched the wrong place even though a better chunk was available.</td><td>On</td></tr>
+  <tr><td><span class="phase p2">P2</span> RCA localisation</td><td>Hard-to-locate bugs where a "find it first" hint sharpens the search.</td><td>Off (opt-in)</td></tr>
+</table>
+<p class="small">Each layer is conservative: if it has nothing useful to add, it does nothing and the flow
+behaves as before. That's how we keep the changes safe.</p>
+
+<h2>5. Screenshots &amp; vision — an important limitation</h2>
+<div class="callout"><b>Screenshot / image analysis can only be done by Claude or another multimodal model.</b>
+Our local code model (<code>qwen2.5-coder</code>) is <b>text-only</b> — it cannot read images, so we do not
+send screenshots into the local code-fix path. If we want the agent to <i>look</i> at the failure screen
+(e.g. to read an on-screen error or see which control is highlighted), that step must run on <b>Claude</b>
+(or a multimodal model). The text signals we already capture — the failed step, the observed symptom, and
+the DOM assertion — are what drive the new retrieval today, and they are enough to fix this class of bug.</p>
+</div>
+
+<h2>6. Is it safe? (no regressions)</h2>
+<div class="callout green">
+<ul>
+  <li><b>Same pipeline shape.</b> The changes live inside the existing retrieve → diagnose → apply → build →
+      PR steps — no new agent, no re-wiring.</li>
+  <li><b>Value/spec bugs unchanged.</b> The richer path (design doc + generous context) is byte-for-byte the
+      same, so the working cross-kiosk demo does not regress. Only <i>interaction</i> bugs get the new tight
+      profile.</li>
+  <li><b>Additive &amp; reversible.</b> Every new behaviour is behind a setting and is a no-op when it has
+      nothing to contribute. Turn any of them off to get the old behaviour.</li>
+  <li><b>Tested.</b> 8 new unit tests reproduce the exact live failure and prove the fix. Full suite:
+      <b>128 passed</b>; the only failures are 8 pre-existing ones (missing local screenshot fixtures / no
+      API key) that fail the same way without our changes.</li>
+</ul>
+</div>
+
+<h2>7. What's next (roadmap)</h2>
+<ul>
+  <li><b>Re-run the failed test as the real oracle.</b> The strongest possible check is to re-run the failing
+      test against the patched app and confirm it now passes. We've built the on-target check as a fast
+      stand-in; the full re-run is deferred only because it needs the patched POS redeployed (an operational
+      coupling we didn't want to add in a no-regression change).</li>
+  <li><b>Richer execution logs.</b> Feed a structured trace of the run (screen transitions + the action and
+      its arguments at the failure) into the context for even sharper targeting.</li>
+  <li><b>Vision step on Claude.</b> An optional "look at the failure screenshot" step, on Claude/multimodal,
+      for bugs that are only visible on screen.</li>
+</ul>
+
+<h2>8. Files &amp; settings changed</h2>
+<table>
+  <tr><th>File</th><th>Change</th></tr>
+  <tr><td><code>repair_agent/repair_failed_test.py</code></td><td>Failure-point query + multi-lane retrieval, bug-class router, on-target verification, optional RCA, structured logging.</td></tr>
+  <tr><td><code>repair_agent/nodes/diagnose.py</code></td><td>Passes the retrieved hits to the verifier.</td></tr>
+  <tr><td><code>vision_agent/config.py</code></td><td>New settings (all with safe defaults).</td></tr>
+  <tr><td><code>tests/test_repair_retrieval.py</code></td><td>8 new unit tests for the redesign.</td></tr>
+</table>
+<table>
+  <tr><th>Setting</th><th>Default</th><th>What it does</th></tr>
+  <tr><td><code>repair_failure_anchor</code></td><td>true</td><td>Add the failure-point retrieval lane (P0a).</td></tr>
+  <tr><td><code>repair_verify_relevance</code></td><td>true</td><td>Check the patch is on-target; one nudge if not (P0b).</td></tr>
+  <tr><td><code>repair_max_context_blocks_interaction</code></td><td>8</td><td>Chunk cap for interaction bugs (P1).</td></tr>
+  <tr><td><code>repair_design_docs_interaction</code></td><td>1</td><td>Design-doc chunks for interaction bugs (P1).</td></tr>
+  <tr><td><code>repair_general_docs_interaction</code></td><td>1</td><td>General chunks for interaction bugs (P1).</td></tr>
+  <tr><td><code>repair_rca_phase</code></td><td>false</td><td>Optional "locate first" RCA pass (P2).</td></tr>
+</table>
+
+<p class="small" style="margin-top:30px">Auto-Repair v2 · Kiosk-QA platform · Confidential — for internal code review.
+Full technical history in <code>docs/PROGRESS_LOG.md</code>; still-true rules in <code>CLAUDE.md</code>.</p>
+
+</div>
+</body>
+</html>

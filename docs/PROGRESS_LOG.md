@@ -1413,3 +1413,81 @@ No-regression: `pytest tests/` = 120 passed, 5 skipped, and the SAME 8 pre-exist
 (`test_template_match` ×4 needing local reference PNGs, `test_vision_agent` screen-analysis ×4 needing an
 API key) that fail identically on clean HEAD (verified by stashing the edits). `py_compile` clean;
 `effective_local_num_ctx` / `_is_large_local_model` unit-checked (32b→12288, 14b→16384).
+
+---
+
+### 2026-09-20 — Auto-Repair v2: failure-anchored retrieval + precision context + patch verification (P0→P3)
+
+The `REPAIR_DEBUG_DUMP` added on 2026-09-18 immediately paid off: a live dump of a TC-RPS-003 repair
+(`diagnose_20260918_120259_TC-RPS-003.txt`) proved the auto-repair failures were NOT a model-capability
+problem. The test is titled *"Mock card payment with sufficient balance succeeds"* but it actually failed
+much earlier, at **add-to-cart** (`quantity 0 → "Quantity Required" popup → never reached the cart`). Yet
+**all 16 retrieved context chunks were PAYMENT / card-reader code** — the add-to-cart bug appeared in NONE
+of them. qwen-32B, handed payment code and a payment-titled failure, reasonably (but uselessly) patched the
+payment-approval predicate. **No model — not qwen, not Claude — can fix a bug whose code is not in the
+context.** Root cause: `_failure_text_for` leads with the test's DESIGN INTENT (payment), which dominates
+the embedding, while the single most diagnostic text (the `OBSERVED` symptom) was under-used
+(`_action_query` even cut off at `OBSERVED:`).
+
+A generic, phased redesign so this class of failure is fixed for ALL tests, not just TC-RPS-003. All
+changes are in `repair_agent/repair_failed_test.py` + `vision_agent/config.py` (+ one line in
+`repair_agent/nodes/diagnose.py`); the LangGraph shape (retrieve → diagnose → apply → test → build → pr)
+is UNCHANGED, so no graph regression.
+
+**P0a — Failure-anchored, multi-lane retrieval (`repair_failure_anchor`, default on).** Retrieval now runs
+several interleaved query lanes, priority-ordered: (optional RCA) → **failure-point** (the `[FAILED HERE]`
+step + `OBSERVED` symptom + failing assertions — WHERE it broke) → **action** (executed steps) → **intent**
+(the full design-intent-led failure). `_round_robin` picks one hit per lane per round so a heavier lane's
+vocabulary can't bury a lighter lane's best hit. The failure-point lane is what makes a payment-titled test
+that dies at add-to-cart retrieve ADD-TO-CART code. The intent lane is retained so the cross-kiosk VALUE
+demo still surfaces its persistence/spec code (no regression). Degrades cleanly to the old action+intent
+behaviour when anchoring is off or the failure carries no failed-step/observed text.
+
+**P0b — Symptom-relevance patch verification (`repair_verify_relevance`, default on).** After a patch is
+produced, score how many FAILURE-POINT signal tokens it touches (`_patch_relevance`) vs the best-matching
+retrieved chunk (`_hits_best_relevance`). Critically the signals come from `_failure_point_text`, NOT the
+whole failure — otherwise the design-intent's payment vocabulary leaks in and a payment patch scores
+"relevant" to an add-to-cart failure (measured: 4 vs the correct 0). Three outcomes: patch overlaps the
+symptom → trust it; 0 overlap AND nothing relevant was retrieved → logged as a RETRIEVAL miss (a nudge
+can't help — the code isn't in context); 0 overlap BUT a ≥3-overlap chunk WAS in context → the model
+picked the wrong chunk → one corrective retry nudged toward the symptom, keeping the more-relevant of the
+two (never dead-ends). This is the guard that catches the exact dump (payment patch, 0 add-to-cart overlap,
+add-to-cart chunk relevance 6 available). Conservative: only acts on a strictly-0-overlap patch when a
+strong alternative existed, so a correct-but-lexically-distant fix (a cross-kiosk endpoint) is never
+second-guessed.
+
+**P1 — Precision context by bug class (`_bug_class`, scored on the failure POINT).** A `spec` failure
+(balance / transaction / cross-kiosk / refund vocabulary) keeps the EXISTING generous profile (5 design
+docs, 2 general, 16-block cap) — byte-for-byte, so the design-bug demo does not regress. An `interaction`
+failure (wrong screen / popup / unresponsive control — a code bug where doc prose is noise) uses a tight,
+code-heavy profile: `repair_max_context_blocks_interaction` (8), `repair_design_docs_interaction` (1),
+`repair_general_docs_interaction` (1). This is what cuts the 16-chunk, half-boilerplate context (the dump
+had 5 design + 2 dummy-config chunks that said nothing) down to a focused set. Routing on the failure
+POINT (not the whole failure) is essential: the payment test's INTENT reads "balance/payment" and would
+misroute to `spec`; its failure POINT (cart/popup) correctly routes to `interaction`.
+
+**P2 — RCA localisation pass (`repair_rca_phase`, opt-in / default off).** One lightweight LLM call that
+localises the bug (`{bug_class, suspect, search_terms}`) BEFORE the fix; its search terms seed the
+top-priority retrieval lane. Off by default because it adds a model call (slow on the local 32B); enable
+once anchored retrieval is proven. Best-effort and bounded — any error/timeout returns "" and retrieval
+proceeds on the deterministic lanes (no hard dependency).
+
+**P3 — Structured retrieval logging + debug-dump linkage.** One line per repair —
+`[REPAIR] retrieval: class=… lanes=… cap=… → N chunks (code=…, design=…, other=…)` — plus the verify line
+(`patch_relevance=… best_context_relevance=…`), so "why did it retrieve THAT / is the patch on-target" is
+answerable from the console without the full dump. The full-fidelity prompt+response is still in the
+`REPAIR_DEBUG_DUMP` file. Deeper POS runtime-log ingestion and a full **re-run-the-failed-test oracle** are
+the documented next step (the strongest verification, but operationally coupled to redeploying the patched
+POS — deferred to keep this change no-regression). **Screenshot / vision analysis requires Claude or a
+multimodal model — qwen2.5-coder is text-only** and cannot read images; the code-fix path stays text.
+
+**Config added** (`vision_agent/config.py`): `repair_failure_anchor`, `repair_verify_relevance`,
+`repair_max_context_blocks_interaction`, `repair_design_docs_interaction`, `repair_general_docs_interaction`,
+`repair_rca_phase`.
+
+**No-regression:** `pytest tests/` = 128 passed (120 prior + 8 new `tests/test_repair_retrieval.py`), 5
+skipped, and the SAME 8 pre-existing failures (`test_template_match` ×4 needing local reference PNGs,
+`test_vision_agent` screen-analysis ×4 needing an API key) that fail identically on clean HEAD. The spec/
+cross-kiosk retrieval path is unchanged; only interaction-class bugs get the new tight profile, and the
+new lanes/verification are additive. Team-facing write-up with flow diagrams:
+`docs/Auto_Repair_v2_Code_Review.html`.

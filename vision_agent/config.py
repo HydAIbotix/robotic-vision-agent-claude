@@ -472,6 +472,27 @@ class Settings(BaseSettings):
     repair_debug_dump: bool = False
     repair_debug_dir: str = "./data/repair_debug"
 
+    # ── Auto-Repair v2 — failure-anchored retrieval + precision context + verification ─────────────
+    # A generic redesign so retrieval targets WHERE the test actually failed, not the test's title.
+    # Root cause it fixes (from a live TC-RPS-003 dump): the failure text leads with the test's DESIGN
+    # INTENT ("mock card PAYMENT succeeds"), so retrieval pulled 16 chunks of PAYMENT code while the real
+    # bug was an ADD-TO-CART quantity=0 popup — the buggy code was in ZERO retrieved chunks, so no model
+    # could fix it. These knobs make retrieval anchor on the FAILED step + OBSERVED symptom, tighten the
+    # context for interaction bugs, and flag off-target patches. Defaults preserve the SPEC/value-bug path
+    # (the working cross-kiosk demo) byte-for-byte; only interaction bugs get the tighter profile.
+    repair_failure_anchor: bool = True           # P0a: add a PRIMARY retrieval lane from the failed step + OBSERVED symptom
+    repair_verify_relevance: bool = True          # P0b: detect a patch that targets code unrelated to the symptom; one nudged retry
+    # P1 precision — the INTERACTION profile (a wrong-screen / popup / unresponsive-control bug: code matters,
+    # design-doc prose is mostly noise). SPEC/value failures (balance, transaction, cross-kiosk) keep the
+    # existing generous profile (5 design docs, 2 general, 16-block cap) so that demo does not regress.
+    repair_max_context_blocks_interaction: int = 8    # hard cap on chunks for an interaction bug (was a flat 16)
+    repair_design_docs_interaction: int = 1           # design-doc chunks for an interaction bug (was 5)
+    repair_general_docs_interaction: int = 1          # general (unfiltered) chunks for an interaction bug (was 2)
+    # P2: a lightweight RCA localisation pass (one extra LLM call) that names the suspect area + search
+    # terms BEFORE the fix retrieval, then a second targeted code search. OFF by default — it adds a model
+    # call (slow on the local 32B); enable with REPAIR_RCA_PHASE=true once the anchored retrieval is proven.
+    repair_rca_phase: bool = False
+
     # ── Auto-Repair RETRIEVAL backend (Chroma default; GraphRAG + Neo4j local option) ──────────
     # Picks HOW the offending code/spec is retrieved for a repair. Default reproduces the current
     # behaviour exactly; the alternative keeps ALL retrieval inside the customer's environment.

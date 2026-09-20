@@ -385,6 +385,22 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   wider candidate pool (`_POOL_MULT`×top_k) that PROMOTES ≤2 code chunks sharing the most distinctive
   tokens (identifiers/numbers/quoted values) with the failure — additive, backend-agnostic (Chroma +
   msgraphrag), a strict no-op when nothing clears `_SIGNAL_MIN`.
+- **⚠️ Retrieval anchors on the FAILURE POINT, not the test title (Auto-Repair v2).** The failure text
+  leads with the test's DESIGN INTENT; a test that dies EARLY (e.g. a *payment* test failing at
+  *add-to-cart*) would otherwise retrieve the wrong feature's code — the model never sees the bug (live
+  root cause of the TC-RPS-003 miss: 16 retrieved chunks were all payment, the add-to-cart bug in none).
+  Fixes: (1) **failure-point lane** — a PRIMARY retrieval query from the `[FAILED HERE]` step + `OBSERVED`
+  symptom + assertions (`repair_failure_anchor`); interleaved with the action + intent lanes so the
+  cross-kiosk VALUE demo still gets its persistence/spec code. (2) **Bug-class routing** (`_bug_class`,
+  scored on the failure POINT): a `spec` failure (balance/transaction/cross-kiosk) keeps the generous
+  profile (5 design docs, 16-cap — NO regression); an `interaction` failure (wrong screen/popup) uses a
+  tight code-heavy profile (`repair_*_interaction`, ~8-cap, 1 design) that drops doc boilerplate.
+  (3) **Patch verification** (`repair_verify_relevance`): score the patch's overlap with the failure-POINT
+  signals; 0 overlap while a ≥3-overlap chunk WAS in context ⇒ off-target ⇒ one nudged retry (keeps the
+  better-of, never dead-ends); 0 overlap and nothing relevant retrieved ⇒ logged as a RETRIEVAL miss (not
+  a model error). (4) **RCA localisation** (`repair_rca_phase`, opt-in) — one LLM call yields search terms
+  for a targeted lane before the fix. Screenshot/vision analysis is Claude/multimodal ONLY (qwen-coder is
+  text-only). Detail → `docs/PROGRESS_LOG.md`; team write-up → `docs/Auto_Repair_v2_Code_Review.html`.
 - **Diagnose "what did we send / get" is dumpable.** `REPAIR_DEBUG_DUMP=true` writes the EXACT prompt
   + each provider's RAW response (+ parsed patch, reject reason, timing, `ollama ps` VRAM) to
   `repair_debug_dir` per call — captures even the timed-out "(no output)" case. Off by default (no I/O).
@@ -441,6 +457,13 @@ Detailed history → [`docs/PROGRESS_LOG.md`](docs/PROGRESS_LOG.md). Design/depl
   plus an `ollama ps` offload warning on timeout; (3) **`REPAIR_DEBUG_DUMP`** writes the exact
   prompt + raw model response per diagnose. No-regression: full suite unchanged (same 8 pre-existing
   vision/template fixture failures). Detail → `docs/PROGRESS_LOG.md`.
+- **2026-09-20 · Auto-Repair v2 — failure-anchored retrieval + precision + verification (P0→P3).**
+  The `REPAIR_DEBUG_DUMP` from 09-18 proved the real bug: retrieval anchored on the test TITLE fed the
+  model the WRONG feature's code (payment, not add-to-cart), so no model could fix it. Generic redesign:
+  failure-POINT retrieval lane, bug-class context routing (spec = unchanged/no-regression; interaction =
+  tight), symptom-relevance patch verification with one nudged retry, and an opt-in RCA localisation pass.
+  8 new unit tests (`tests/test_repair_retrieval.py`) prove the fix on the exact live failure; full suite
+  128 passed + same 8 pre-existing fixture failures. Team write-up: `docs/Auto_Repair_v2_Code_Review.html`.
 
 ### Never
 

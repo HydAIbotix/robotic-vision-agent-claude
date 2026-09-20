@@ -17,6 +17,7 @@ Progress is streamed through a callback so the API/UI can render each stage live
 """
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import platform
@@ -274,6 +275,133 @@ def _promote_signal_hits(pool, failure, *, already, limit, min_score):
     return out
 
 
+# ── Auto-Repair v2 helpers: failure-anchored retrieval, bug-class routing, patch verification ────
+
+# Vocabulary that marks a failure as SPEC/value-shaped (the fix lives in persistence/business logic and
+# the DESIGN DOC matters), vs a plain INTERACTION bug (a control that didn't respond / wrong screen /
+# popup — code is what matters, doc prose is noise). Scored on the FAILURE POINT only (see _bug_class).
+_SPEC_SIGNALS = {
+    "balance", "transaction", "transactions", "purchase", "purchased", "refund", "refunded", "deduct",
+    "deducted", "persist", "persisted", "shared", "cross-kiosk", "record", "recorded", "history",
+    "topup", "top-up", "issued", "charge", "charged", "reconcile", "ledger", "receipt",
+}
+
+
+def _failure_point_text(failure: str) -> str:
+    """The most DIAGNOSTIC slice of the failure: the step marked [FAILED HERE] + the OBSERVED symptom +
+    the Failing assertions. This is WHERE and HOW the test broke — generic across every test type — as
+    opposed to the test's design INTENT (its title/description), which describes the happy path and, for a
+    test that fails early, points retrieval at the wrong feature entirely."""
+    parts: list[str] = []
+    for seg in re.split(r"[;]", failure):
+        if "[FAILED HERE]" in seg:
+            parts.append(seg.replace("[FAILED HERE]", " "))
+    m = re.search(r"OBSERVED:(.*?)(?:Failing assertions:|Fix the ROOT CAUSE|$)", failure, re.S)
+    if m:
+        parts.append(m.group(1))
+    m = re.search(r"Failing assertions:(.*?)(?:Fix the ROOT CAUSE|$)", failure, re.S)
+    if m:
+        parts.append(m.group(1))
+    return " ".join(p.strip() for p in parts if p and p.strip())
+
+
+def _failure_point_query(failure: str) -> str:
+    """Jargon-stripped retrieval query built from the failure POINT (see _failure_point_text). Empty when
+    the failure carries no failed-step / observed / assertion text, so retrieve_context skips the lane."""
+    return _retrieval_query(_failure_point_text(failure))
+
+
+def _bug_class(failure: str) -> str:
+    """Route the failure: 'spec' (a persisted/shared VALUE or documented behaviour — balance, transaction,
+    cross-kiosk — the design doc is authoritative) or 'interaction' (wrong screen / popup / a control that
+    did not respond — code is what matters, doc prose is noise). Scored on the FAILURE POINT, NOT the whole
+    failure: the design-intent header is often about a downstream feature (a payment test that dies at
+    add-to-cart still reads 'payment/balance' in its intent) and would misroute the router."""
+    text = (_failure_point_text(failure) or failure).lower()
+    hits = sum(1 for s in _SPEC_SIGNALS if s in text)
+    return "spec" if hits >= 2 else "interaction"
+
+
+def _round_robin(lanes: list) -> list:
+    """Interleave several ranked result lists, one pick per lane per round, de-duplicated. Guarantees every
+    lane is represented near the top so a heavier lane's vocabulary can't bury a lighter lane's best hit."""
+    out, seen = [], set()
+    for row in itertools.zip_longest(*lanes):
+        for d in row:
+            if d is None:
+                continue
+            k = _dkey(d)
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(d)
+    return out
+
+
+def _patch_relevance(patch, signals: set) -> int:
+    """How many failure signal-tokens the proposed patch touches (its find/replace/explanation + target
+    path). ~0 means the patch edits code unrelated to what actually failed — the tell for an off-target fix
+    (e.g. patching payment-approval logic for an add-to-cart failure)."""
+    blob = " ".join(str(x) for x in (getattr(patch, "find", ""), getattr(patch, "replace", ""),
+                                     getattr(patch, "explanation", ""), getattr(patch, "file_path", "")))
+    return _lexical_score(blob, signals)
+
+
+def _hits_best_relevance(hits: list, signals: set) -> tuple:
+    """Best failure-signal overlap among the RETRIEVED context chunks, and which chunk. Tells us whether a
+    better-matching chunk than the patch target was actually available (→ the model picked the wrong one),
+    vs. nothing relevant was retrieved at all (→ a retrieval miss, not a model mistake)."""
+    best, where = 0, ""
+    for h in hits or []:
+        sc = _lexical_score((h.get("snippet") or "") + " " + (h.get("file") or ""), signals)
+        if sc > best:
+            best = sc
+            where = f"{_short(h.get('file'))}:{h.get('start_line')}"
+    return best, where
+
+
+_RCA_PROMPT = """You are triaging a FAILED automated UI test for a React/TypeScript kiosk app. From the
+failure below, localise WHERE the bug most likely is. Focus on the FAILED step and the OBSERVED symptom,
+NOT the test's overall goal. Return ONE JSON object (no markdown):
+{{"bug_class": "code|spec", "suspect": "<screen / component / function / feature area>",
+  "search_terms": "<5-12 space-separated code identifiers, UI labels or values to grep the codebase for>"}}
+
+FAILURE:
+{failure}
+"""
+
+
+def _rca_search_terms(failure: str) -> str:
+    """P2 (opt-in, REPAIR_RCA_PHASE): one lightweight LLM call that localises the bug and returns extra
+    SEARCH TERMS to seed a targeted code lane BEFORE the fix. Best-effort and bounded — any error/timeout
+    returns '' so retrieval proceeds on the deterministic lanes (no hard dependency on the RCA call)."""
+    providers = _diagnose_providers()
+    if not providers:
+        return ""
+    label, make_llm = providers[0]   # one call on the primary provider only; keep it cheap
+    try:
+        llm = make_llm()
+    except Exception as exc:
+        print(f"  [REPAIR] RCA provider '{label}' unavailable ({exc}) — skipping localisation.")
+        return ""
+    budget = (settings.repair_local_timeout_s + 30) if label == "local" else (settings.repair_diagnose_timeout_s or 90)
+    try:
+        data = _invoke_with_deadline(
+            lambda: invoke_json(llm, [HumanMessage(content=_RCA_PROMPT.format(failure=failure[:6000]))],
+                                default=None, retries=0, label="repair/rca"),
+            budget, None,
+        )
+    except _DiagnoseTimeout:
+        print("  [REPAIR] RCA localisation timed out — proceeding without it.")
+        return ""
+    if isinstance(data, dict) and data.get("search_terms"):
+        terms = str(data.get("search_terms", ""))
+        print(f"  [REPAIR] RCA: class={data.get('bug_class','')!r} suspect={str(data.get('suspect',''))!r} "
+              f"terms={terms!r}")
+        return _retrieval_query(terms + " " + str(data.get("suspect", "")))
+    return ""
+
+
 def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
     """Semantic search over the Chroma RAG index. Returns (prompt_text, structured_hits).
 
@@ -297,38 +425,31 @@ def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
     # general hits (design doc / test cases) for product context. Code always comes first.
     rq = _retrieval_query(failure)
     code_where = {"type": {"$in": ["code_block", "code_file"]}}
-    # TWO-LANE code retrieval, interleaved. Lane 1 (intent/symptom) = the full failure — surfaces the
-    # code that PRODUCES the wrong outcome (a cross-kiosk persistence guard, a value path). Lane 2
-    # (action) = the executed steps — surfaces the code for the ACTION that failed (a credential
-    # check, an add-to-cart). A single blended query lets whichever vocabulary is heavier bury the
-    # other (observed: the design-intent "products screen" navigation words pushed the login
-    # credential code out of the retrieved set → "insufficient context"). Interleaving guarantees
-    # both lanes are represented. When there is no distinct steps line the action query collapses to
-    # the intent query, so this degrades cleanly to the previous single-lane behaviour.
+    # FAILURE-ANCHORED MULTI-LANE retrieval (P0a). Each lane is a query with a different emphasis;
+    # interleaving guarantees a heavier lane's vocabulary can't bury a lighter lane's best hit.
+    #   • failure-point (PRIMARY) — the failed step + OBSERVED symptom + assertions: WHERE it broke. This is
+    #     the fix for wrong-code retrieval: a test whose TITLE is about payment but that dies at add-to-cart
+    #     now retrieves ADD-TO-CART code, not payment code (root cause of the TC-RPS-003 miss).
+    #   • action — the executed steps: the code path under test.
+    #   • intent — the full (design-intent-led) failure: still surfaces the persistence/spec code a
+    #     cross-kiosk VALUE bug needs, so that working demo does not regress.
+    #   • rca (OPTIONAL, P2) — search terms from a lightweight RCA localisation pass, prepended when enabled.
+    # When failure-anchoring is off / yields nothing, this degrades to the previous action+intent behaviour.
     rq_action = _action_query(failure)
-    # Pull a WIDER candidate pool than we finally keep, so the lexical re-rank below can rescue a buggy
-    # chunk that vector similarity buried. Slicing the pool to top_k reproduces the previous top_k exactly
-    # (vector order is stable), so the base two-lane behaviour is unchanged.
+    fp_query = _failure_point_query(failure) if settings.repair_failure_anchor else ""
+    rca_query = _rca_search_terms(failure) if settings.repair_rca_phase else ""
+    lane_queries, _seen_q = [], set()
+    for q in (rca_query, fp_query, rq_action, rq):   # priority: RCA → failure-point → action → intent
+        q = (q or "").strip()
+        if q and q not in _seen_q:
+            _seen_q.add(q)
+            lane_queries.append(q)
+    # Pull a WIDER candidate pool per lane than we finally keep, so the lexical re-rank below can rescue a
+    # buggy chunk that vector similarity buried.
     pool_k = top_k * _POOL_MULT
-    intent_code = search(rq, k=pool_k, where=code_where)
-    if rq_action == rq:
-        interleaved = list(intent_code)
-    else:
-        action_code = search(rq_action, k=pool_k, where=code_where)
-        interleaved, _cseen = [], set()
-        for a, b in zip(intent_code, action_code):
-            for d in (a, b):
-                ck = _dkey(d)
-                if ck not in _cseen:
-                    _cseen.add(ck)
-                    interleaved.append(d)
-        # append any tail (unequal lengths) preserving order, still deduped
-        for d in list(intent_code) + list(action_code):
-            ck = _dkey(d)
-            if ck not in _cseen:
-                _cseen.add(ck)
-                interleaved.append(d)
-    # Keep the interleaved top-`top_k` (both lanes' best hits) as the base set.
+    lane_docs = [search(q, k=pool_k, where=code_where) for q in lane_queries]
+    interleaved = _round_robin(lane_docs)
+    # Keep the interleaved top-`top_k` (every lane's best hits) as the base set.
     code_docs = interleaved[:top_k]
 
     # LEXICAL RE-RANK (rescue). Pure vector similarity ranks by the failure's DOMINANT vocabulary (design
@@ -351,13 +472,27 @@ def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
                 seen.add(k)
                 merged.append(d)
         code_docs = merged[:top_k + _SIGNAL_PROMOTE]
-    # DESIGN INTENT. The design doc states the SPEC ("if the purchase succeeds … a PURCHASE transaction
-    # is recorded"), which is what tells the LLM the ROOT CAUSE — e.g. that a guard skipping the record
-    # for issued cards is the bug, not a label to relabel. It IS indexed but ranks below code in a plain
-    # search, so a code-first retrieval never surfaced it and the LLM had to guess. Pull it EXPLICITLY by
-    # type and include it up-front so the spec always reaches Claude alongside the offending code.
-    design_docs = search(rq, k=_DESIGN_DOCS, where={"type": "design_document"})
-    general_docs = search(rq, k=2)
+    # BUG-CLASS PROFILE (P1 precision). A SPEC/value failure (balance, transaction, cross-kiosk) needs the
+    # design doc + generous context → keep the EXISTING generous profile (no regression for that demo). A
+    # pure INTERACTION failure (wrong screen / popup / unresponsive control) is a code bug where doc prose
+    # is noise — tighten it. This is what cuts the 16-chunk, half-boilerplate context that confused the
+    # model on the add-to-cart bug down to a focused, code-heavy set.
+    klass = _bug_class(failure)
+    if klass == "spec":
+        n_design, n_general, ctx_cap = _DESIGN_DOCS, 2, _MAX_CONTEXT_BLOCKS
+    else:
+        n_design = settings.repair_design_docs_interaction
+        n_general = settings.repair_general_docs_interaction
+        ctx_cap = settings.repair_max_context_blocks_interaction
+        # Reserve the design/general slots so the code budget doesn't eat the whole cap.
+        code_docs = code_docs[:max(1, ctx_cap - n_design - n_general)]
+
+    # DESIGN INTENT. The design doc states the SPEC ("if the purchase succeeds … a PURCHASE transaction is
+    # recorded"), which tells the LLM the ROOT CAUSE — that a guard skipping the record is the bug, not a
+    # label to relabel. It ranks below code in a plain search, so pull it EXPLICITLY by type and include it
+    # up-front so the spec reaches the model alongside the offending code.
+    design_docs = search(rq, k=max(n_design, _DESIGN_DOCS), where={"type": "design_document"})[:n_design] if n_design > 0 else []
+    general_docs = search(rq, k=max(n_general, 1))[:n_general] if n_general > 0 else []
 
     # FILE-NEIGHBORHOOD EXPANSION. A symptom-level failure query ("card not found cross-kiosk") often
     # ranks the exact buggy function low, but ranks a SIBLING in the same small module high — and the
@@ -390,8 +525,14 @@ def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
         if key not in seen:
             seen.add(key)
             docs.append(d)
-        if len(docs) >= _MAX_CONTEXT_BLOCKS:
+        if len(docs) >= ctx_cap:
             break
+    # Structured retrieval summary (P3) — one line that makes "why did it retrieve THAT" debuggable without
+    # the full dump: bug class, how many lanes ran, and the code/design/general split actually sent.
+    _n_code = sum(1 for d in docs if d.metadata.get("type") in ("code_block", "code_file"))
+    _n_design = sum(1 for d in docs if d.metadata.get("type") == "design_document")
+    print(f"  [REPAIR] retrieval: class={klass}  lanes={len(lane_queries)}  cap={ctx_cap}  "
+          f"→ {len(docs)} chunks (code={_n_code}, design={_n_design}, other={len(docs) - _n_code - _n_design})")
 
     # Show the WHOLE retrieved chunk to the LLM, up to a generous cap. A tree-sitter code chunk is a
     # single function; the previous 1800-char cut truncated a ~2.8 KB function BEFORE its buggy line
@@ -620,7 +761,65 @@ def _dump_diagnose_debug(failure: str, prompt: str, records: list, vram: str = "
         print(f"  [REPAIR] debug dump failed: {exc}")
 
 
-def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None, on_progress=None) -> RepairPatch:
+def _verify_relevance(patch, failure, hits, label, llm, prompt, provider_timeout, cancel_check, heartbeat):
+    """P0b — is the proposed patch on-target for what actually failed? Compares the patch's symptom overlap
+    to the best-matching RETRIEVED chunk, and distinguishes the two failure modes:
+      • patch overlaps the symptom (prel>0)                 → trust it.
+      • nothing retrieved strongly matches (best<threshold) → a RETRIEVAL miss, not a model error; a nudge
+                                                               can't help (the code isn't in context) — keep
+                                                               the patch and log that retrieval is the gap.
+      • patch has 0 overlap BUT a closer chunk WAS in context → the model picked the wrong chunk; nudge it
+                                                               once toward the symptom and keep the more-
+                                                               relevant of the two (never dead-ends).
+    This is the guard that would have caught the TC-RPS-003 dump (a payment-approval patch for an
+    add-to-cart failure). Conservative by design: only acts on a 0-overlap patch when a ≥3-overlap chunk
+    was available, so a correct-but-lexically-distant fix (e.g. a cross-kiosk endpoint) is never second-guessed.
+
+    Signals come from the FAILURE POINT (the failed step + observed symptom), NOT the whole failure: the
+    design-intent header ("mock card PAYMENT succeeds") otherwise leaks payment vocabulary into the score,
+    making a payment patch look 'relevant' to an add-to-cart failure (measured: relevance 4 vs 0)."""
+    signals = _signal_tokens(_failure_point_text(failure) or failure)
+    if len(signals) < 4:
+        return patch                      # too few distinctive signals to judge — don't second-guess
+    prel = _patch_relevance(patch, signals)
+    best, where = _hits_best_relevance(hits, signals)
+    print(f"  [REPAIR] verify: patch_relevance={prel}  best_context_relevance={best} ({where or 'n/a'})")
+    if prel > 0 or best < 3:
+        if prel == 0 and best < 3:
+            print("  [REPAIR] ⚠ verify: no retrieved chunk strongly matches the failed symptom — this is "
+                  "likely a RETRIEVAL miss (buggy code not indexed/surfaced), not a model mistake.")
+        return patch
+    print(f"  [REPAIR] ⚠ verify: patch looks OFF-TARGET (0 symptom overlap) though a closer chunk was at "
+          f"{where}. One corrective retry toward the symptom.")
+    top = ", ".join(sorted(signals)[:8])
+    nudge = prompt + (
+        f"\n\nYOUR PREVIOUS PATCH TARGETED CODE UNRELATED TO THE FAILURE. The test actually failed at: "
+        f"{_failure_point_text(failure)[:400]}. Re-locate the fix in the code that handles THAT action "
+        f"(keywords: {top}); a matching chunk is near {where} in the context above. Return corrected JSON."
+    )
+    try:
+        data2 = _invoke_with_deadline(
+            lambda: invoke_json(llm, [HumanMessage(content=nudge)], default=None, retries=0,
+                                label=f"repair/{label}-verify"),
+            provider_timeout, cancel_check, on_heartbeat=heartbeat,
+        )
+    except _DiagnoseTimeout:
+        print("  [REPAIR] verify retry timed out — keeping the original patch.")
+        return patch
+    if _reject_reason(data2) or not (data2 and data2.get("find") and data2.get("replace") is not None):
+        return patch
+    cand = RepairPatch(
+        file_path=str(data2.get("file_path", "")), find=data2["find"], replace=data2["replace"],
+        explanation=data2.get("explanation", patch.explanation), source=patch.source, model=patch.model,
+    )
+    if _patch_relevance(cand, signals) > prel:
+        print("  [REPAIR] verify: corrective retry produced a more on-target patch — using it.")
+        return cand
+    return patch
+
+
+def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None, on_progress=None,
+                  hits=None) -> RepairPatch:
     """Produce one minimal find/replace patch: try the selected model, then the backup model, then
     the deterministic demo rule. `repair_llm_backend` chooses primary vs backup order. Each provider
     call is bounded by `timeout` (seconds) and interruptible via `cancel_check` so a stuck/slow model
@@ -734,10 +933,7 @@ def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None
             if data and not reason and data.get("find") and data.get("replace") is not None:
                 if debug and label == "local":
                     vram_report = vram_report or _ollama_vram_report()
-                _record(label, model_name, raw_holder, data, "", t0, "accepted")
-                who = {"local": "LOCAL Llama", "claude": "Claude"}.get(label, label)
-                print(f"  [REPAIR] DIAGNOSE ✓ patch produced by {who} ({model_name}).")
-                return RepairPatch(
+                patch = RepairPatch(
                     file_path=str(data.get("file_path", "")),
                     find=data["find"],
                     replace=data["replace"],
@@ -745,6 +941,17 @@ def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None
                     source=label,
                     model=model_name,
                 )
+                # P0b — verify the patch actually targets the failed symptom; one nudged retry if off-target
+                # (keeps the better-of, never dead-ends). No-op unless REPAIR_VERIFY_RELEVANCE is on.
+                if settings.repair_verify_relevance:
+                    patch = _verify_relevance(patch, failure, hits, label, llm, prompt,
+                                              provider_timeout, cancel_check, heartbeat)
+                _record(label, model_name, raw_holder,
+                        {"file_path": patch.file_path, "find": patch.find, "replace": patch.replace,
+                         "explanation": patch.explanation}, "", t0, "accepted")
+                who = {"local": "LOCAL Llama", "claude": "Claude"}.get(label, label)
+                print(f"  [REPAIR] DIAGNOSE ✓ patch produced by {who} ({model_name}).")
+                return patch
             _record(label, model_name, raw_holder, data, reason or "incomplete", t0, "no-usable-patch")
             print(f"  [REPAIR] DIAGNOSE provider '{label}' returned no usable patch ({reason or 'incomplete'}) — trying next.")
 
