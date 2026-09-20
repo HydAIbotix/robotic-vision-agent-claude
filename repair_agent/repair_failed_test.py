@@ -33,9 +33,13 @@ from typing import Callable, Optional
 from langchain_core.messages import HumanMessage
 
 from vision_agent.config import settings
-from vision_agent.llm import get_llm, get_local_llm, invoke_json, effective_local_num_ctx
+from vision_agent.llm import (
+    get_llm, get_local_llm, invoke_json, effective_local_num_ctx, detect_image_media_type,
+)
 from repair_agent.canceller import RepairCancelled
-from repair_agent.parse_code_and_store import CODEBASE_DIR, PERSIST_DIR, SKIP_DIRS, search
+from repair_agent.parse_code_and_store import (
+    CODEBASE_DIR, PERSIST_DIR, SKIP_DIRS, search_code, search_docs,
+)
 
 
 ProgressCb = Callable[[dict], None]
@@ -212,39 +216,56 @@ def _short(path):
     return os.path.basename(path) if path else path
 
 
+def _subtokens(text: str) -> set:
+    """Split text into lowercased sub-tokens at non-alphanumeric AND camelCase / letter-digit boundaries.
+
+    'onAddToCart' → {on, add, to, cart};  'quantity_required_popup' → {quantity, required, popup};
+    'MOCK_APPROVED' → {mock, approved};  'quantity <= 1' → {quantity, 1};  '100' → {100}.
+
+    This is the UNIT of lexical matching. A signal token counts as present only when it equals a WHOLE
+    sub-token — so 'action' never matches inside 'transaction' (the substring false positive that let an
+    off-target payment patch slip past verification), while a compound identifier like 'onAddToCart' is
+    still matched by 'cart', and '1' still does not match inside '100'. Fully generic — no per-test rules."""
+    out: set = set()
+    for raw in re.split(r"[^A-Za-z0-9]+", text or ""):
+        if not raw:
+            continue
+        for p in re.findall(r"[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]+|\d+", raw):
+            out.add(p.lower())
+    return out
+
+
 def _signal_tokens(failure: str) -> set:
-    """DISTINCTIVE tokens from the failure to lexically match against code: identifiers (camelCase or
-    ≥4 chars), small integer literals, and words inside quotes/backticks. Jargon/common words removed."""
+    """DISTINCTIVE sub-tokens from the failure to lexically match against code: identifiers (decomposed
+    into their camelCase / snake_case parts via _subtokens), small integer literals, and words inside
+    quotes/backticks. Test-harness jargon and common words are removed. Decomposing means matching happens
+    at sub-token granularity (see _subtokens), which removes substring false positives without losing the
+    ability to match a compound identifier."""
     toks: set = set()
+
+    def _emit(word: str):
+        for p in _subtokens(word):
+            if p.isdigit():
+                toks.add(p)
+            elif len(p) >= 3 and p not in _SIGNAL_STOP:
+                toks.add(p)
+
     for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", failure):
-        wl = w.lower()
-        if wl in _SIGNAL_STOP:
-            continue
-        if len(wl) < 4 and not any(c.isupper() for c in w[1:]):   # keep short camelCase (e.g. isVip), drop 'the'
-            continue
-        toks.add(wl)
+        _emit(w)
     for n in re.findall(r"(?<![\w.])\d{1,4}(?![\w.])", failure):    # small literals (a guard bound, a count)
         toks.add(n)
     for q in re.findall(r"[\"'`]([^\"'`\n]{2,40})[\"'`]", failure):  # quoted expected/observed values/labels
-        for w in re.findall(r"[A-Za-z0-9_]{3,}", q):
-            wl = w.lower()
-            if wl not in _SIGNAL_STOP:
-                toks.add(wl)
+        _emit(q)
     return toks
 
 
 def _lexical_score(text: str, signals: set) -> int:
-    """Count DISTINCT signal tokens present in `text` (word-boundary match for numbers, substring for
-    identifiers — code identifiers are compound so a substring hit is meaningful)."""
-    tl = (text or "").lower()
-    score = 0
-    for s in signals:
-        if s.isdigit():
-            if re.search(r"(?<![\w.])" + re.escape(s) + r"(?![\w.])", tl):
-                score += 1
-        elif s in tl:
-            score += 1
-    return score
+    """Count DISTINCT signal tokens present in `text` at SUB-TOKEN granularity (see _subtokens): a signal
+    counts only when it equals a WHOLE sub-token of the text. So 'action' does not match inside
+    'transaction', 'cart' still matches 'onAddToCart', and '1' does not match inside '100' — all generic,
+    no special-casing for any particular test or bug."""
+    tp = _subtokens(text)
+    return sum(1 for s in signals if s in tp)
 
 
 def _promote_signal_hits(pool, failure, *, already, limit, min_score):
@@ -360,57 +381,193 @@ def _hits_best_relevance(hits: list, signals: set) -> tuple:
     return best, where
 
 
-_RCA_PROMPT = """You are triaging a FAILED automated UI test for a React/TypeScript kiosk app. From the
-failure below, localise WHERE the bug most likely is. Focus on the FAILED step and the OBSERVED symptom,
-NOT the test's overall goal. Return ONE JSON object (no markdown):
-{{"bug_class": "code|spec", "suspect": "<screen / component / function / feature area>",
-  "search_terms": "<5-12 space-separated code identifiers, UI labels or values to grep the codebase for>"}}
+# ── Multi-modal (Claude-only) screenshot support ────────────────────────────────────────────────
+_MULTIMODAL_PROVIDERS = {"claude"}   # Claude/Opus can see images; local qwen2.5-coder is text-only.
+
+
+def _provider_is_multimodal(label: str) -> bool:
+    return label in _MULTIMODAL_PROVIDERS
+
+
+def _image_content_blocks(image_paths, limit: int = 3) -> list:
+    """Load up to `limit` screenshots as base64 data-URL image blocks for a multimodal (Claude) message.
+    Best-effort: unreadable/missing files are skipped; returns [] when there are no usable images."""
+    import base64
+    blocks: list = []
+    for p in (image_paths or []):
+        if len(blocks) >= limit:
+            break
+        try:
+            raw = Path(p).read_bytes()
+        except Exception:
+            continue
+        media = detect_image_media_type(raw)
+        b64 = base64.b64encode(raw).decode("ascii")
+        blocks.append({"type": "image_url", "image_url": {"url": f"data:{media};base64,{b64}"}})
+    return blocks
+
+
+def _message_for(prompt: str, images, label: str):
+    """Build the HumanMessage for a provider: multimodal (text + the failed steps' screenshots) for a
+    Claude/multimodal model when screenshots are enabled + available, else plain text. Local text models
+    (qwen2.5-coder) ALWAYS get plain text — they cannot see an image. This is how Claude gets the actual
+    screen for complex visual issues (wrong element, layout, a popup that didn't dismiss)."""
+    if images and settings.repair_use_screenshots and _provider_is_multimodal(label):
+        blocks = _image_content_blocks(images)
+        if blocks:
+            print(f"  [REPAIR] attaching {len(blocks)} screenshot(s) to the {label} prompt (multimodal).")
+            return HumanMessage(content=[{"type": "text", "text": prompt}, *blocks])
+    return HumanMessage(content=prompt)
+
+
+# ── RCA AGENT (separate from the code-fixing agent) ──────────────────────────────────────────────
+_RCA_PROMPT = """You are the ROOT-CAUSE ANALYSIS (RCA) agent for a FAILED automated UI test of a
+React/TypeScript point-of-sale (POS) kiosk app. You are a SEPARATE agent from the code-fixing agent.
+
+You are given the failure and the AUTHORITATIVE design/requirements documentation + the TEST-CASE
+definition. You are deliberately NOT given source code — a separate code-fixing agent handles code. Your
+job is to decide the ROOT-CAUSE CATEGORY, so we never patch code to satisfy a wrong test or a wrong spec:
+
+  - "code_bug"     : the docs + test are correct; the app's CODE fails to do what the design says. (MOST COMMON)
+  - "spec_bug"     : the design/requirements themselves are wrong, contradictory or ambiguous; fixing code
+                     cannot be correct until the spec is corrected.
+  - "test_invalid" : the TEST CASE expects behaviour that CONTRADICTS the design, or its steps/preconditions
+                     are wrong; the test is at fault, not the app.
+
+Return ONE JSON object (no markdown, no commentary):
+{{"verdict": "code_bug|spec_bug|test_invalid",
+  "confidence": "high|medium|low",
+  "rationale": "one or two sentences citing the doc/test evidence",
+  "suspect": "for code_bug: the screen / component / feature area where the code bug most likely is",
+  "search_terms": "for code_bug: 5-12 space-separated code identifiers, UI labels or values to grep for"}}
+
+Focus on the FAILED step + OBSERVED symptom, not the test's overall goal. When you are NOT clearly certain
+the spec or test is at fault, answer "code_bug" — the code-fixing agent will verify. Only answer spec_bug
+or test_invalid with "high" confidence when the docs/test PLAINLY show the fault.
 
 FAILURE:
 {failure}
+
+DESIGN / REQUIREMENTS / TEST-CASE CONTEXT (authoritative):
+{context}
 """
 
 
-def _rca_search_terms(failure: str) -> str:
-    """P2 (opt-in, REPAIR_RCA_PHASE): one lightweight LLM call that localises the bug and returns extra
-    SEARCH TERMS to seed a targeted code lane BEFORE the fix. Best-effort and bounded — any error/timeout
-    returns '' so retrieval proceeds on the deterministic lanes (no hard dependency on the RCA call)."""
+def _render_doc_context(hits, cap: int = 3500) -> tuple[str, list]:
+    """Render the retrieved docs/test-case chunks into a prompt block + structured hits for the RCA agent."""
+    blocks, structured, total = [], [], 0
+    for i, doc in enumerate(hits, start=1):
+        meta = getattr(doc, "metadata", {}) or {}
+        snippet = (getattr(doc, "page_content", "") or "")[:1200]
+        structured.append({"file": meta.get("source", ""), "type": meta.get("type", ""),
+                           "start_line": meta.get("start_line"), "end_line": meta.get("end_line"),
+                           "snippet": snippet})
+        block = "\n".join([f"Doc {i} [{meta.get('type', '')}] {_short(meta.get('source', ''))}", snippet])
+        if total + len(block) > cap and blocks:
+            break
+        blocks.append(block)
+        total += len(block)
+    return ("\n\n".join(blocks) or "(no design/requirements/test-case context retrieved)"), structured
+
+
+_RCA_VERDICTS = ("code_bug", "spec_bug", "test_invalid")
+
+
+def _rca_should_stop(verdict: str, confidence: str) -> bool:
+    """The RCA gate (pure): halt the pipeline ONLY on a HIGH-confidence spec_bug / test_invalid, and only
+    when the gate is enabled. Conservative by design — a code_bug (or any lower-confidence verdict) always
+    proceeds to the code-fixing agent, so the default Claude + Chroma result never regresses."""
+    return bool(settings.repair_rca_gate
+                and verdict in ("spec_bug", "test_invalid")
+                and (confidence or "").strip().lower() == "high")
+
+
+def run_rca(failure: str, *, images=None, cancel_check=None, on_progress=None) -> dict:
+    """The RCA AGENT — the first of the two Auto-Repair agents (separate from code-fixing).
+
+    Reads ONLY the design/requirements docs + the test-case workbook (never source code), then decides the
+    ROOT-CAUSE CATEGORY: code_bug / spec_bug / test_invalid. For a code bug it localises the suspect area +
+    search terms and hands them to the code-fixing agent. For a high-confidence spec_bug / test_invalid it
+    signals STOP (`stop=True`) so no code is patched to satisfy a wrong spec or test.
+
+    NEVER raises: any error/timeout/uncertainty degrades to a conservative `code_bug` passthrough (stop=
+    False), so the code-fixing agent still runs exactly as before — this is what preserves the Claude +
+    Chroma result. Multimodal (Claude) also receives the failed steps' screenshots when enabled."""
+    passthrough = {"verdict": "code_bug", "confidence": "low", "rationale": "", "suspect": "",
+                   "search_terms": "", "rca_query": "", "stop": False, "context": "", "hits": [],
+                   "ran": False, "provider": ""}
+    if not settings.repair_rca_phase:
+        return passthrough
+
+    try:
+        doc_hits = search_docs(_retrieval_query(failure), k=6)
+    except Exception as exc:
+        print(f"  [REPAIR] RCA doc retrieval failed ({exc}) — proceeding to the fixer (code_bug).")
+        return passthrough
+    ctx, hits = _render_doc_context(doc_hits)
+
     providers = _diagnose_providers()
     if not providers:
-        return ""
-    label, make_llm = providers[0]   # one call on the primary provider only; keep it cheap
+        return {**passthrough, "context": ctx, "hits": hits}
+    label, make_llm = providers[0]
     try:
         llm = make_llm()
     except Exception as exc:
-        print(f"  [REPAIR] RCA provider '{label}' unavailable ({exc}) — skipping localisation.")
-        return ""
+        print(f"  [REPAIR] RCA provider '{label}' unavailable ({exc}) — proceeding to the fixer.")
+        return {**passthrough, "context": ctx, "hits": hits}
+
     budget = (settings.repair_local_timeout_s + 30) if label == "local" else (settings.repair_diagnose_timeout_s or 90)
+    prompt = _RCA_PROMPT.format(failure=failure[:6000], context=ctx)
+
+    def _beat(elapsed, _b=budget):
+        print(f"  [REPAIR] RCA agent ({label}) working… {int(elapsed)}s / {int(_b)}s")
+        if on_progress:
+            on_progress(label, int(elapsed), int(_b))
+
     try:
         data = _invoke_with_deadline(
-            lambda: invoke_json(llm, [HumanMessage(content=_RCA_PROMPT.format(failure=failure[:6000]))],
-                                default=None, retries=0, label="repair/rca"),
-            budget, None,
+            lambda: invoke_json(llm, [_message_for(prompt, images, label)], default=None, retries=0,
+                                label="repair/rca"),
+            budget, cancel_check, on_heartbeat=_beat,
         )
     except _DiagnoseTimeout:
-        print("  [REPAIR] RCA localisation timed out — proceeding without it.")
-        return ""
-    if isinstance(data, dict) and data.get("search_terms"):
-        terms = str(data.get("search_terms", ""))
-        print(f"  [REPAIR] RCA: class={data.get('bug_class','')!r} suspect={str(data.get('suspect',''))!r} "
-              f"terms={terms!r}")
-        return _retrieval_query(terms + " " + str(data.get("suspect", "")))
-    return ""
+        print("  [REPAIR] RCA timed out — proceeding to the fixer (code_bug).")
+        return {**passthrough, "context": ctx, "hits": hits}
+
+    if not isinstance(data, dict) or not data.get("verdict"):
+        return {**passthrough, "context": ctx, "hits": hits}
+
+    verdict = str(data.get("verdict", "code_bug")).strip().lower()
+    if verdict not in _RCA_VERDICTS:
+        verdict = "code_bug"
+    confidence = str(data.get("confidence", "low")).strip().lower()
+    suspect = str(data.get("suspect", "")).strip()
+    terms = str(data.get("search_terms", "")).strip()
+    rationale = str(data.get("rationale", "")).strip()
+    # GATE (conservative, no-regression): only a HIGH-confidence spec/test verdict may halt the pipeline.
+    stop = _rca_should_stop(verdict, confidence)
+    rca_query = _retrieval_query(f"{terms} {suspect}") if verdict == "code_bug" else ""
+    print(f"  [REPAIR] RCA agent verdict={verdict} confidence={confidence} stop={stop} suspect={suspect!r}")
+    if rationale:
+        print(f"  [REPAIR] RCA rationale: {rationale}")
+    return {"verdict": verdict, "confidence": confidence, "rationale": rationale, "suspect": suspect,
+            "search_terms": terms, "rca_query": rca_query, "stop": stop, "context": ctx, "hits": hits,
+            "ran": True, "provider": label}
 
 
-def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
-    """Semantic search over the Chroma RAG index. Returns (prompt_text, structured_hits).
+def retrieve_context(failure: str, top_k: int = 8, rca_query: str = "") -> tuple[str, list[dict]]:
+    """CODE retrieval for the code-fixing agent. Returns (prompt_text, structured_hits).
 
-    top_k is the number of CODE chunks pulled (was 6). A real buggy chunk can sit at rank ~7–8 when
-    the failure query is dominated by symptom/navigation vocabulary (e.g. a login failure reads as
-    "wrong screen: products vs login"); a slightly wider code window keeps that chunk in the set
-    without crowding out the design-doc / general context (final cap `_MAX_CONTEXT_BLOCKS`)."""
+    In the two-agent design this pulls CODE from the efficient code-only vector RAG (search_code) and adds
+    the DESIGN doc as authoritative reference (search_docs) — the RCA agent has already judged the docs/
+    tests and, for a code bug, handed us `rca_query` (its localisation search terms) to seed a lane.
+
+    top_k is the number of CODE chunks pulled. A real buggy chunk can sit at rank ~7–8 when the failure
+    query is dominated by symptom/navigation vocabulary (e.g. a login failure reads as "wrong screen:
+    products vs login"); a slightly wider code window keeps that chunk in the set without crowding out the
+    design-doc context (final cap `_MAX_CONTEXT_BLOCKS`)."""
     # Announce the ACTIVE retrieval backend so the console makes it obvious which stack ran.
-    print(f"  [REPAIR] RETRIEVE via {retrieval_tool_label()}")
+    print(f"  [REPAIR] RETRIEVE (code) via {retrieval_tool_label()}")
     # The Chroma backend persists to PERSIST_DIR; the graph backends store elsewhere (Neo4j /
     # GraphRAG parquet workspace), so only enforce the on-disk-index precondition for Chroma.
     if settings.repair_retrieval_backend == "chroma" and not PERSIST_DIR.exists():
@@ -424,22 +581,21 @@ def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
     # no code and the LLM has nothing to patch. Pull code chunks explicitly, then top up with a few
     # general hits (design doc / test cases) for product context. Code always comes first.
     rq = _retrieval_query(failure)
-    code_where = {"type": {"$in": ["code_block", "code_file"]}}
     # FAILURE-ANCHORED MULTI-LANE retrieval (P0a). Each lane is a query with a different emphasis;
     # interleaving guarantees a heavier lane's vocabulary can't bury a lighter lane's best hit.
-    #   • failure-point (PRIMARY) — the failed step + OBSERVED symptom + assertions: WHERE it broke. This is
-    #     the fix for wrong-code retrieval: a test whose TITLE is about payment but that dies at add-to-cart
-    #     now retrieves ADD-TO-CART code, not payment code (root cause of the TC-RPS-003 miss).
+    #   • rca (PRIMARY when present) — the RCA agent's localisation search terms (its named suspect area).
+    #   • failure-point — the failed step + OBSERVED symptom + assertions: WHERE it broke. This is the fix
+    #     for wrong-code retrieval: a test whose TITLE is about payment but that dies at add-to-cart now
+    #     retrieves ADD-TO-CART code, not payment code (root cause of the TC-RPS-003 miss).
     #   • action — the executed steps: the code path under test.
     #   • intent — the full (design-intent-led) failure: still surfaces the persistence/spec code a
     #     cross-kiosk VALUE bug needs, so that working demo does not regress.
-    #   • rca (OPTIONAL, P2) — search terms from a lightweight RCA localisation pass, prepended when enabled.
-    # When failure-anchoring is off / yields nothing, this degrades to the previous action+intent behaviour.
+    # `rca_query` comes from the RCA agent (rca_node); when empty (RCA off/advisory) this degrades to the
+    # failure-point + action + intent lanes — a SUPERSET of the pre-RCA behaviour, so Claude never regresses.
     rq_action = _action_query(failure)
     fp_query = _failure_point_query(failure) if settings.repair_failure_anchor else ""
-    rca_query = _rca_search_terms(failure) if settings.repair_rca_phase else ""
     lane_queries, _seen_q = [], set()
-    for q in (rca_query, fp_query, rq_action, rq):   # priority: RCA → failure-point → action → intent
+    for q in ((rca_query or ""), fp_query, rq_action, rq):   # priority: RCA → failure-point → action → intent
         q = (q or "").strip()
         if q and q not in _seen_q:
             _seen_q.add(q)
@@ -447,7 +603,7 @@ def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
     # Pull a WIDER candidate pool per lane than we finally keep, so the lexical re-rank below can rescue a
     # buggy chunk that vector similarity buried.
     pool_k = top_k * _POOL_MULT
-    lane_docs = [search(q, k=pool_k, where=code_where) for q in lane_queries]
+    lane_docs = [search_code(q, k=pool_k) for q in lane_queries]
     interleaved = _round_robin(lane_docs)
     # Keep the interleaved top-`top_k` (every lane's best hits) as the base set.
     code_docs = interleaved[:top_k]
@@ -491,8 +647,8 @@ def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
     # recorded"), which tells the LLM the ROOT CAUSE — that a guard skipping the record is the bug, not a
     # label to relabel. It ranks below code in a plain search, so pull it EXPLICITLY by type and include it
     # up-front so the spec reaches the model alongside the offending code.
-    design_docs = search(rq, k=max(n_design, _DESIGN_DOCS), where={"type": "design_document"})[:n_design] if n_design > 0 else []
-    general_docs = search(rq, k=max(n_general, 1))[:n_general] if n_general > 0 else []
+    design_docs = search_docs(rq, k=max(n_design, _DESIGN_DOCS), where={"type": "design_document"})[:n_design] if n_design > 0 else []
+    general_docs = search_docs(rq, k=max(n_general, 1))[:n_general] if n_general > 0 else []
 
     # FILE-NEIGHBORHOOD EXPANSION. A symptom-level failure query ("card not found cross-kiosk") often
     # ranks the exact buggy function low, but ranks a SIBLING in the same small module high — and the
@@ -509,7 +665,7 @@ def retrieve_context(failure: str, top_k: int = 8) -> tuple[str, list[dict]]:
         if not src or src in probed:
             continue
         probed.add(src)
-        siblings = search(rq, k=60, where={"source": src})
+        siblings = search_code(rq, k=60, where={"source": src})
         if 0 < len(siblings) <= _SMALL_FILE_MAX_CHUNKS:
             expanded.extend(siblings)
             seen_files.add(src)
@@ -718,7 +874,89 @@ def _ollama_vram_report() -> str:
     return "; ".join(parts) if parts else "(no models loaded)"
 
 
-def _dump_diagnose_debug(failure: str, prompt: str, records: list, vram: str = "") -> None:
+def _retrieval_diag_text(failure: str, hits: Optional[list], parsed_patch: Optional[dict],
+                         rca: Optional[dict] = None) -> str:
+    """RETRIEVAL & VERIFICATION diagnostics for the debug dump — makes the ranking that decides whether the
+    RIGHT code was even retrieved VISIBLE to anyone reading only the dump file (the console prints the same
+    numbers live as `[REPAIR] retrieval:` / `[REPAIR] verify:`). Shows, in order:
+      • how the failure was routed (bug class), on the FAILURE POINT not the title;
+      • the failure-POINT slice retrieval anchored on, and its distinctive signal tokens;
+      • per-context symptom relevance — the RANKING: how many failure-point signals each retrieved chunk
+        shares. A row of low scores means the buggy code was never surfaced (a RETRIEVAL miss);
+      • the accepted patch's symptom relevance, and the ON-TARGET / OFF-TARGET / RETRIEVAL-MISS verdict —
+        the exact call the v2 verification makes.
+    Also states plainly what the (optional) RCA phase is and is NOT, so the dump never implies a docs-first
+    RCA scan that does not exist. Pure/best-effort; the caller wraps it so a diag error never loses the dump."""
+    fp = _failure_point_text(failure) or ""
+    signals = _signal_tokens(fp or failure)
+    lines = [
+        "=" * 90, "RETRIEVAL & VERIFICATION DIAGNOSTICS", "=" * 90,
+        f"bug class (routed on the FAILURE POINT, not the test title): {_bug_class(failure)}",
+        f"failure anchoring: {'on' if settings.repair_failure_anchor else 'off'}    "
+        f"patch verification: {'on' if settings.repair_verify_relevance else 'off'}",
+    ]
+    # RCA AGENT — a SEPARATE agent that reads only docs + test cases and decides code_bug / spec_bug /
+    # test_invalid BEFORE the code-fixing agent runs. Show exactly what it concluded (this is the
+    # "did the RCA scan the docs first, and what did it decide" log).
+    if rca and rca.get("ran"):
+        lines += [
+            f"RCA agent (docs+tests only, provider={rca.get('provider', '')}): "
+            f"verdict={rca.get('verdict', '')} confidence={rca.get('confidence', '')} "
+            f"stop={rca.get('stop', False)}",
+            f"  rationale: {rca.get('rationale', '') or '(none)'}",
+            f"  suspect area (handed to the code-fixing agent): {rca.get('suspect', '') or '(none)'}",
+            f"  localisation search terms: {rca.get('search_terms', '') or '(none)'}",
+        ]
+    elif settings.repair_rca_phase:
+        lines.append("RCA agent: ENABLED but did not produce a verdict (retrieval/model unavailable or "
+                     "timed out) — degraded to code_bug passthrough, so the code-fixing agent ran anyway.")
+    else:
+        lines.append("RCA agent: DISABLED (REPAIR_RCA_PHASE=false) — the pipeline went straight to the "
+                     "code-fixing agent with no spec/test-validity check.")
+    lines += [
+        "",
+        "failure POINT retrieval anchored on (WHERE/HOW it broke — the diagnostic slice, not the title):",
+        f"  {fp[:600] or '(none extracted — no [FAILED HERE]/OBSERVED/assertions found in the failure text)'}",
+        "",
+        f"failure-point signal tokens ({len(signals)}): {', '.join(sorted(signals)) or '(none)'}",
+        "",
+        "per-context symptom relevance — THE RANKING (# of failure-point signals each retrieved chunk shares;",
+        "0 across the board ⇒ the offending code was never retrieved ⇒ a RETRIEVAL miss, not a model mistake):",
+    ]
+    best, best_where = 0, ""
+    if hits:
+        for i, h in enumerate(hits, start=1):
+            sc = _lexical_score((h.get("snippet") or "") + " " + (h.get("file") or ""), signals)
+            if sc > best:
+                best, best_where = sc, f"{_short(h.get('file'))}:{h.get('start_line')}"
+            lines.append(f"  Context {i:>2}  {_short(h.get('file'))}:{h.get('start_line')}  "
+                         f"[{h.get('type')}]  relevance={sc}")
+        lines.append(f"  → best retrieved relevance: {best} ({best_where or 'n/a'})")
+    else:
+        lines.append("  (no structured hits captured)")
+    prel = None
+    if parsed_patch:
+        blob = " ".join(str(parsed_patch.get(k, "")) for k in ("find", "replace", "explanation", "file_path"))
+        prel = _lexical_score(blob, signals)
+    lines += ["", f"accepted-patch symptom relevance: {prel if prel is not None else 'n/a'}"]
+    if prel is None or len(signals) < 4:
+        lines.append("verdict: not judged (too few distinctive signals, or no patch produced).")
+    elif prel > 0:
+        lines.append("verdict: ON-TARGET — the patch touches code that matches the failed symptom.")
+    elif best < 3:
+        lines.append("verdict: ⚠ RETRIEVAL MISS — no retrieved chunk strongly matches the failed symptom, so the "
+                     "buggy code was never surfaced to the model. Fix INDEXING / the retrieval query — NOT the "
+                     "prompt or the model.")
+    else:
+        lines.append(f"verdict: ⚠ OFF-TARGET — the patch shares 0 signal tokens with the failure point, though a "
+                     f"more relevant chunk (relevance {best}) sat in context at {best_where}. The model picked the "
+                     f"wrong chunk; verification should have nudged one retry toward the symptom.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _dump_diagnose_debug(failure: str, prompt: str, records: list, vram: str = "", hits: Optional[list] = None,
+                         rca: Optional[dict] = None) -> None:
     """Write the EXACT prompt + each provider's RAW response to a per-call file (REPAIR_DEBUG_DUMP=true).
 
     This is the ground truth for "what did we send the model and what did it say" — including the empty/
@@ -730,6 +968,8 @@ def _dump_diagnose_debug(failure: str, prompt: str, records: list, vram: str = "
         tid = m.group(0) if m else "repair"
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         fp = d / f"diagnose_{ts}_{tid}.txt"
+        accepted = next((r for r in records if r.get("outcome") == "accepted"), None)
+        parsed_patch = accepted.get("parsed") if accepted else None
         lines = [
             f"# DIAGNOSE debug dump  {ts}",
             f"# test:              {tid}",
@@ -739,6 +979,14 @@ def _dump_diagnose_debug(failure: str, prompt: str, records: list, vram: str = "
             f"# GPU (ollama ps):   {vram or '(n/a)'}",
             f"# prompt size:       {len(prompt or '')} chars",
             "",
+        ]
+        # Retrieval/verification ranking — the "why did it retrieve/patch THAT" view. Wrapped so a diag
+        # error can never lose the prompt + raw-response dump that is the whole point of the file.
+        try:
+            lines += _retrieval_diag_text(failure, hits, parsed_patch, rca=rca).split("\n")
+        except Exception as exc:
+            lines += [f"(retrieval diagnostics unavailable: {exc})", ""]
+        lines += [
             "=" * 90, "PROMPT SENT TO MODEL", "=" * 90, prompt or "", "",
         ]
         for rec in records:
@@ -761,7 +1009,8 @@ def _dump_diagnose_debug(failure: str, prompt: str, records: list, vram: str = "
         print(f"  [REPAIR] debug dump failed: {exc}")
 
 
-def _verify_relevance(patch, failure, hits, label, llm, prompt, provider_timeout, cancel_check, heartbeat):
+def _verify_relevance(patch, failure, hits, label, llm, prompt, provider_timeout, cancel_check, heartbeat,
+                      images=None):
     """P0b — is the proposed patch on-target for what actually failed? Compares the patch's symptom overlap
     to the best-matching RETRIEVED chunk, and distinguishes the two failure modes:
       • patch overlaps the symptom (prel>0)                 → trust it.
@@ -799,7 +1048,7 @@ def _verify_relevance(patch, failure, hits, label, llm, prompt, provider_timeout
     )
     try:
         data2 = _invoke_with_deadline(
-            lambda: invoke_json(llm, [HumanMessage(content=nudge)], default=None, retries=0,
+            lambda: invoke_json(llm, [_message_for(nudge, images, label)], default=None, retries=0,
                                 label=f"repair/{label}-verify"),
             provider_timeout, cancel_check, on_heartbeat=heartbeat,
         )
@@ -819,12 +1068,14 @@ def _verify_relevance(patch, failure, hits, label, llm, prompt, provider_timeout
 
 
 def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None, on_progress=None,
-                  hits=None) -> RepairPatch:
+                  hits=None, images=None, rca=None) -> RepairPatch:
     """Produce one minimal find/replace patch: try the selected model, then the backup model, then
     the deterministic demo rule. `repair_llm_backend` chooses primary vs backup order. Each provider
     call is bounded by `timeout` (seconds) and interruptible via `cancel_check` so a stuck/slow model
     never freezes the repair. `on_progress(label, elapsed, budget)` is called periodically for a slow
-    (local) model so the UI can show live progress instead of a frozen 'working…'."""
+    (local) model so the UI can show live progress instead of a frozen 'working…'. `images` (the failed
+    steps' screenshots) are attached for a multimodal provider (Claude); `rca` (the RCA agent's verdict)
+    is recorded in the debug dump."""
     prompt = _DIAGNOSE_PROMPT.format(failure=failure, context=context)
 
     # Visibility into what the model actually receives — the #1 thing to check when a fix looks wrong.
@@ -890,7 +1141,7 @@ def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None
             try:
                 data = _invoke_with_deadline(
                     lambda llm=llm, r=provider_retries: invoke_json(
-                        llm, [HumanMessage(content=prompt)], default=None, retries=r,
+                        llm, [_message_for(prompt, images, label)], default=None, retries=r,
                         label=f"repair/{label}", on_raw=on_raw_cb),
                     provider_timeout, cancel_check, on_heartbeat=heartbeat,
                 )
@@ -921,7 +1172,7 @@ def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None
                 )
                 try:
                     data = _invoke_with_deadline(
-                        lambda: invoke_json(llm, [HumanMessage(content=corrective)], default=None,
+                        lambda: invoke_json(llm, [_message_for(corrective, images, label)], default=None,
                                             retries=0, label="repair/local-retry", on_raw=on_raw_cb),
                         provider_timeout, cancel_check, on_heartbeat=heartbeat,
                     )
@@ -945,7 +1196,7 @@ def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None
                 # (keeps the better-of, never dead-ends). No-op unless REPAIR_VERIFY_RELEVANCE is on.
                 if settings.repair_verify_relevance:
                     patch = _verify_relevance(patch, failure, hits, label, llm, prompt,
-                                              provider_timeout, cancel_check, heartbeat)
+                                              provider_timeout, cancel_check, heartbeat, images=images)
                 _record(label, model_name, raw_holder,
                         {"file_path": patch.file_path, "find": patch.find, "replace": patch.replace,
                          "explanation": patch.explanation}, "", t0, "accepted")
@@ -963,7 +1214,7 @@ def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None
         raise RuntimeError("No repair patch could be produced (no model returned a usable patch and no fallback matched).")
     finally:
         if debug:
-            _dump_diagnose_debug(failure, prompt, records, vram_report)
+            _dump_diagnose_debug(failure, prompt, records, vram_report, hits=hits, rca=rca)
 
 
 def _demo_fallback_patch() -> Optional[RepairPatch]:
@@ -1322,7 +1573,7 @@ def delete_pull_request(branch: str) -> dict:
 
 def run_repair(failure: str, test_id: str = "", *, apply: bool = True, auto_pr: bool = False,
                branch_suffix: str = "", progress_cb: Optional[ProgressCb] = None,
-               cancel_event=None) -> dict:
+               cancel_event=None, images: Optional[list] = None) -> dict:
     """Drive the Auto-Repair LangGraph (retrieve → diagnose → apply → test → build → pr-prep).
 
     Thin wrapper over the compiled StateGraph in repair_agent/agent.py: it registers the progress
@@ -1344,6 +1595,7 @@ def run_repair(failure: str, test_id: str = "", *, apply: bool = True, auto_pr: 
         final = graph.invoke({
             "repair_id": rid, "failure": failure, "test_id": test_id,
             "apply": apply, "auto_pr": auto_pr, "branch_suffix": branch_suffix,
+            "images": images or [],
             "stages": {},
         })
     except RepairCancelled:
@@ -1362,6 +1614,13 @@ def run_repair(failure: str, test_id: str = "", *, apply: bool = True, auto_pr: 
     }
     if not apply:
         result["dry_run"] = True
+    # Surface the RCA agent's verdict so the API/UI can show WHY a repair stopped (spec/test bug) rather
+    # than looking like a plain failure. `rca_stopped` marks the "we deliberately did not patch" outcome.
+    rca = final.get("rca") or {}
+    if rca.get("ran"):
+        result["rca"] = {k: rca.get(k) for k in ("verdict", "confidence", "rationale", "suspect", "stop")}
+    if final.get("rca_stop"):
+        result["rca_stopped"] = True
     if final.get("error"):
         result["error"] = final["error"]
     return result

@@ -488,10 +488,48 @@ class Settings(BaseSettings):
     repair_max_context_blocks_interaction: int = 8    # hard cap on chunks for an interaction bug (was a flat 16)
     repair_design_docs_interaction: int = 1           # design-doc chunks for an interaction bug (was 5)
     repair_general_docs_interaction: int = 1          # general (unfiltered) chunks for an interaction bug (was 2)
-    # P2: a lightweight RCA localisation pass (one extra LLM call) that names the suspect area + search
-    # terms BEFORE the fix retrieval, then a second targeted code search. OFF by default — it adds a model
-    # call (slow on the local 32B); enable with REPAIR_RCA_PHASE=true once the anchored retrieval is proven.
-    repair_rca_phase: bool = False
+    # ── TWO-AGENT design: a distinct RCA agent + a code-fixing agent (2026-09-21) ─────────────────
+    # The Auto-Repair pipeline is now TWO separate agents, for ALL models (Claude and local alike):
+    #   1. RCA agent (rca_node) — reads ONLY the design/requirements docs + the test-case workbook (never
+    #      source code). It decides: is the failure caused by a bug in the SPEC (design/requirements) or an
+    #      INVALID test case? If so it FLAGS that and STOPS — nothing is passed to the fixer (you don't
+    #      patch code to satisfy a wrong test). Otherwise it declares a CODE bug, localises the suspect area
+    #      + search terms, and hands them to the fixer.
+    #   2. Code-fixing agent (retrieve → diagnose) — retrieves the offending CODE from an efficient
+    #      code-only vector RAG (Chroma), seeded by the RCA's localisation, plus the design doc as
+    #      authoritative reference, then proposes the minimal patch.
+    # repair_rca_phase now defaults TRUE (the RCA agent runs). NO-REGRESSION: the gate is CONSERVATIVE —
+    # it only stops on a HIGH-confidence spec/test verdict; a code bug (the demo bugs) always passes through
+    # to the fixer, whose retrieval is a SUPERSET of the pre-RCA lanes, so Claude's fix is never degraded.
+    repair_rca_phase: bool = True
+    # Whether the RCA verdict may STOP the pipeline before the fixer. True = a high-confidence spec/test-bug
+    # verdict halts and reports (no patch). False = RCA is advisory-only (always localises + proceeds to the
+    # fixer, never blocks) — the safe fallback if a deployment sees RCA over-flagging valid tests.
+    repair_rca_gate: bool = True
+    # Enrich the failure description handed to BOTH agents with a per-step EXECUTION TRACE (action +
+    # method/screen/expected/actual + result + observation + any error/stack) and a bounded tail of the
+    # run's console/application log. Gives a text model like qwen2.5-coder far more to diagnose from than
+    # the failed assertion alone. Bounded so it never dominates the local model's context window.
+    repair_failure_detail: bool = True
+    # Attach the FAILED steps' screenshots to the model prompt when the model is MULTI-MODAL (Claude).
+    # qwen2.5-coder and other local text models are text-only, so this is auto-skipped for them (a text
+    # model can't see an image). Lets Claude diagnose complex visual issues (wrong element, layout, a popup
+    # that didn't dismiss) from the actual screen, not just the text symptom. No effect on the local path.
+    repair_use_screenshots: bool = True
+    # CODE-only retrieval RAG. The code-fixing agent always retrieves code from an efficient VECTOR index
+    # (Chroma) — msgraphrag's entity/community graph is reserved for DOCS + TEST CASES (the RCA agent).
+    #   ""        (default) → auto: use Chroma for code whenever the doc/knowledge backend is "msgraphrag"
+    #                         (so msgraphrag holds only docs/tests); otherwise use the main backend, so the
+    #                         pure-Chroma default and the graphrag/Neo4j option are byte-for-byte unchanged.
+    #   "chroma"/"graphrag" → force a specific code backend.
+    repair_code_backend: str = ""
+    # When the doc/knowledge backend is msgraphrag, index code into THIS separate Chroma code-only index
+    # (kept apart from the main repair_persist_dir so the two never collide). Gitignored generated data.
+    repair_code_persist_dir: str = "./docs/chroma_code_only_db"
+    # msgraphrag indexes ONLY documents + test cases (NOT source code): the expensive entity/community
+    # pipeline is where a graph adds value (spec-level reasoning), while pinpoint code retrieval is faster
+    # and more precise from a plain vector index. Set False to revert to msgraphrag-indexes-everything.
+    repair_msgraphrag_docs_only: bool = True
 
     # ── Auto-Repair RETRIEVAL backend (Chroma default; GraphRAG + Neo4j local option) ──────────
     # Picks HOW the offending code/spec is retrieved for a repair. Default reproduces the current

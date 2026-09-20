@@ -1,25 +1,38 @@
 """
 Auto-Repair Agent — LangGraph StateGraph (the self-healing arm of defect intelligence).
 
-Flow:
-  retrieve → diagnose → (guard) → apply → unit_test → build → prepare_pr → END
-                     └─ dry-run ─────────────────────────────────────────→ END
-                                 └─ repo blocked ──────────────────────────→ END
+TWO-AGENT flow (2026-09-21): a distinct RCA agent runs FIRST, then the code-fixing agent.
 
-Same six stages, same outputs and progress stream as the original linear pipeline — now expressed as
-pure `state -> dict` nodes with conditional routing, matching app_explorer / test_runner /
-defect_agent / vision_agent. Only DIAGNOSE calls Claude; retrieval stays Chroma + HuggingFace.
-The thin `run_repair()` wrapper in repair_failed_test.py drives this graph.
+  rca → retrieve → diagnose → (guard) → apply → unit_test → build → prepare_pr → END
+    └─ spec_bug / test_invalid (RCA stop) ────────────────────────────────────────→ END
+                   └─ dry-run ──────────────────────────────────────────────────────→ END
+                              └─ repo blocked ─────────────────────────────────────→ END
+
+  • rca      — the RCA agent: reads ONLY design/requirements docs + the test case, decides code_bug /
+               spec_bug / test_invalid. A high-confidence spec/test verdict STOPS here (no code is
+               patched to satisfy a broken spec or wrong test); a code bug localises + proceeds.
+  • retrieve — the code-fixing agent's CODE retrieval (efficient code-only vector RAG), seeded by RCA.
+  • diagnose — the code-fixing agent's ONE model call (Claude or local) → a minimal patch.
+
+Pure `state -> dict` nodes with conditional routing, matching the other four agents. Only the RCA and
+DIAGNOSE steps call a model; retrieval stays Chroma/HuggingFace (+ msgraphrag for docs). The thin
+`run_repair()` wrapper in repair_failed_test.py drives this graph.
 """
 from langgraph.graph import StateGraph, END
 
 from repair_agent.state import RepairAgentState
+from repair_agent.nodes.rca import rca_node
 from repair_agent.nodes.retrieve import retrieve_node
 from repair_agent.nodes.diagnose import diagnose_node
 from repair_agent.nodes.apply import guard_node, apply_node
 from repair_agent.nodes.unit_test import unit_test_node
 from repair_agent.nodes.build import build_node
 from repair_agent.nodes.prepare_pr import prepare_pr_node
+
+
+def _route_after_rca(state: RepairAgentState) -> str:
+    # A high-confidence spec_bug / test_invalid halts before the fixer — nothing gets patched.
+    return "end" if state.get("rca_stop") else "retrieve"
 
 
 def _route_after_diagnose(state: RepairAgentState) -> str:
@@ -35,6 +48,7 @@ def _route_after_guard(state: RepairAgentState) -> str:
 def create_repair_agent():
     g = StateGraph(RepairAgentState)
 
+    g.add_node("rca",        rca_node)
     g.add_node("retrieve",   retrieve_node)
     g.add_node("diagnose",   diagnose_node)
     g.add_node("guard",      guard_node)
@@ -43,7 +57,8 @@ def create_repair_agent():
     g.add_node("build",      build_node)
     g.add_node("prepare_pr", prepare_pr_node)
 
-    g.set_entry_point("retrieve")
+    g.set_entry_point("rca")
+    g.add_conditional_edges("rca", _route_after_rca, {"retrieve": "retrieve", "end": END})
     g.add_edge("retrieve", "diagnose")
     g.add_conditional_edges("diagnose", _route_after_diagnose, {"guard": "guard", "end": END})
     g.add_conditional_edges("guard",    _route_after_guard,    {"apply": "apply", "end": END})

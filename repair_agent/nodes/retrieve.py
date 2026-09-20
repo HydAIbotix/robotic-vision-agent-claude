@@ -15,7 +15,8 @@ def retrieve_node(state: RepairAgentState) -> dict:
     canceller.bail_if_cancelled(rid)
     tool = retrieval_tool_label()
     emit(rid, "retrieve", "running", tool=tool)
-    context, hits = retrieve_context(state["failure"])
+    # The code-fixing agent retrieves CODE, seeded by the RCA agent's localisation terms (rca_query).
+    context, hits = retrieve_context(state["failure"], rca_query=state.get("rca_query", ""))
     emit(rid, "retrieve", "done", hits=hits, tool=tool)
     stages = {**state.get("stages", {}), "retrieve": {"status": "done", "hits": hits, "tool": tool}}
     return {"context": context, "hits": hits, "stages": stages}

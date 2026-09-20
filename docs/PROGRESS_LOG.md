@@ -1491,3 +1491,92 @@ skipped, and the SAME 8 pre-existing failures (`test_template_match` ×4 needing
 cross-kiosk retrieval path is unchanged; only interaction-class bugs get the new tight profile, and the
 new lanes/verification are additive. Team-facing write-up with flow diagrams:
 `docs/Auto_Repair_v2_Code_Review.html`.
+
+
+## 2026-09-21 — Auto-Repair v3: two separate agents (RCA + code-fixing), code/doc retrieval split, generic verification fix, screenshots for Claude
+
+The v2 debug dump (`diagnose_20260920_171321_TC-RPS-003.txt`) proved the fix still failed for two concrete
+reasons: (1) **retrieval never surfaced the buggy add-to-cart code** — every retrieved chunk was payment/
+balance, so no model could fix it; and (2) the **verification guard was defeated by a lexical false
+positive** — the failure-point signal `action` (from "checkout action") is a SUBSTRING of `transaction`
+in the model's explanation, so the off-target balance patch scored relevance 1 (not 0) and was accepted
+with no corrective retry. Plus the "RCA" was never a real agent (it was an opt-in, off-by-default search-
+term helper that did NOT read the docs to rule the spec/test in or out). This milestone rebuilds it.
+
+### 1. TWO SEPARATE AGENTS (for ALL models, Claude and local)
+The pipeline is now `rca → retrieve → diagnose → apply → unit_test → build → prepare_pr` (see
+`repair_agent/agent.py`). Two distinct agents:
+- **RCA agent** (`repair_agent/nodes/rca.py` → `run_rca` in `repair_failed_test.py`) — reads ONLY the
+  design/requirements docs + the test-case workbook (never source code) and returns
+  `{verdict: code_bug|spec_bug|test_invalid, confidence, rationale, suspect, search_terms}`. A
+  HIGH-confidence `spec_bug`/`test_invalid` **STOPS** the pipeline (`rca_stop`) — we never patch code to
+  satisfy a wrong spec or an invalid test. A `code_bug` localises the suspect area + search terms and hands
+  them to the fixer.
+- **Code-fixing agent** (`retrieve → diagnose`) — retrieves CODE from the efficient code-only vector RAG,
+  seeded by the RCA's `rca_query` lane, plus the design doc as authoritative reference, then proposes the
+  minimal patch.
+`REPAIR_RCA_PHASE` now defaults **True**. NO-REGRESSION is preserved by a **conservative gate**
+(`_rca_should_stop`: stop only on HIGH-confidence spec/test) + a code-fixing retrieval that is a **superset**
+of the pre-RCA lanes — so on a code bug (every demo bug), Claude proceeds and fixes exactly as before.
+`REPAIR_RCA_GATE=false` makes RCA advisory-only (localise + always proceed).
+
+### 2. RETRIEVAL SPLIT — msgraphrag = docs/tests only; a separate efficient code RAG
+`parse_code_and_store.py` now exposes `search_code` (code-only vector RAG) and `search_docs` (docs/tests
+via the knowledge backend), plus `collect_code_documents` / `collect_doc_documents` and `build_code_index`.
+When `repair_retrieval_backend=msgraphrag` and `repair_msgraphrag_docs_only=True` (default), the
+entity/community graph is built from **docs + test cases only** (the RCA agent's knowledge base), and a
+separate **Chroma code-only index** (`repair_code_persist_dir`) serves the code-fixing agent — pinpoint
+code retrieval is faster and more precise from a vector index than from a coarse community graph. One
+"Rebuild index" refreshes both. The pure-Chroma default and the graphrag/Neo4j option are unchanged
+(`_effective_code_backend` returns the main backend there, so `search_code`/`search_docs` are just the old
+`search()` with the code/doc type filters).
+
+### 3. GENERIC lexical-score fix (not TC-RPS-003-specific)
+`_lexical_score` now matches at **sub-token granularity** (`_subtokens`): a signal counts only when it
+equals a WHOLE sub-token of the text, split at non-alphanumeric AND camelCase / letter-digit boundaries.
+So `action` no longer matches inside `transaction` (the exact defeat), while `cart` still matches
+`onAddToCart` and `1` still does not match inside `100`. `_signal_tokens` decomposes identifiers the same
+way. Fully generic — no per-test rules. New tests prove `action ⊄ transaction`, the real balance patch now
+scores 0 (was 1), and the compound-identifier / number-boundary cases still hold.
+
+### 4. RICHER failure detail for the models (all issue types)
+`api/main.py::_failure_text_for` now appends (gated by `repair_failure_detail`, default on, bounded) a
+per-step **EXECUTION TRACE** (action + method/screen/expected/actual + PASS/FAIL + observation + any
+error/stack) and a tail of the run's **console/application log**, so a text model like qwen has the full
+flow + logs to diagnose from, not just the failed assertion. Appended AFTER the "Fix the ROOT CAUSE"
+marker so the failure-point / action / intent parsers are unaffected.
+
+### 5. SCREENSHOTS for Claude (multimodal only)
+`_message_for` attaches the FAILED steps' screenshots (base64, media-type sniffed) to the RCA + diagnose +
+verify prompts **only when the provider is Claude** (`repair_use_screenshots`, default on). qwen2.5-coder
+is text-only and is always sent plain text. `api/main.py::_failure_images_for` gathers the failed steps'
+`screenshot_after`/`before` from `screenshots/<run_id>/`; threaded through `run_repair(images=…)` → state →
+the RCA and code-fixing agents. Answers the standing question: previously Claude did NOT use screenshots in
+repair; now it does for complex visual issues.
+
+### 6. Debug-dump diagnostics + RCA verdict
+`REPAIR_DEBUG_DUMP` now writes a **RETRIEVAL & VERIFICATION DIAGNOSTICS** block: the bug class, the failure-
+POINT slice retrieval anchored on, the **per-context relevance RANKING**, the accepted patch's relevance,
+the RCA agent's verdict/confidence/rationale/suspect, and the ON-TARGET / OFF-TARGET / **RETRIEVAL-MISS**
+verdict — so "why did it retrieve/patch THAT, and what did the RCA decide" is answerable from the dump file
+alone.
+
+### Frontend (`../kiosk-test-studio`, branch `studio-cloud-agnostic`)
+- **Two-agent pipeline UI** (`AutoRepair.tsx`): a new `rca` stage with an `① RCA Agent` / `② Code-Fixing
+  Agent` group header, an RCA stage-detail (verdict badge + confidence + rationale + suspect + the docs it
+  read), an `rca_stopped` result banner, and the `rca_stopped` overall badge. Client types extended
+  (`RepairRca`, stage `verdict/…`, job status `rca_stopped`).
+- **Auto-Repair window controls** (`LiveMonitor.tsx`): the popup-blocked INLINE fallback (which showed only
+  a Close button — the "only Close" the user saw) is now a floating in-app WINDOW with a title bar and real
+  **minimize / maximize / close** controls (collapse to a docked bar / fill the viewport / close), kept
+  mounted while minimized so the repair keeps streaming.
+
+### Config added (`vision_agent/config.py`)
+`repair_rca_phase` (now True), `repair_rca_gate`, `repair_use_screenshots`, `repair_failure_detail`,
+`repair_code_backend`, `repair_code_persist_dir`, `repair_msgraphrag_docs_only`.
+
+### No-regression
+`pytest tests/` = **133 passed** (128 prior + 5 new in `tests/test_repair_retrieval.py`), 5 skipped, and
+the SAME 8 pre-existing `test_template_match`/`test_vision_agent` fixture failures that fail identically on
+clean HEAD. Frontend `npm run build` clean. The default Chroma + Claude path: same code/design retrieval;
+RCA runs but a code bug always proceeds to the unchanged fixer, so the fix result is preserved.

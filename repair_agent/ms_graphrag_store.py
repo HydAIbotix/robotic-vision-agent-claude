@@ -104,10 +104,13 @@ def _write_inputs() -> dict:
 
     One file per chunk keeps the source/lines mapping intact through GraphRAG's own processing (GraphRAG
     stores each input file's name as the document title, which we join back on at search time)."""
-    from repair_agent.parse_code_and_store import collect_documents
+    from repair_agent.parse_code_and_store import collect_doc_documents, collect_documents
 
     import hashlib
-    documents = collect_documents()
+    # TWO-AGENT design: the entity/community graph is built from DOCS + TEST CASES only (the RCA agent's
+    # knowledge base). Source code is indexed separately in an efficient Chroma code index for the fixer.
+    # Set repair_msgraphrag_docs_only=False to revert to the graph indexing code as well.
+    documents = collect_doc_documents() if settings.repair_msgraphrag_docs_only else collect_documents()
     inp = _input_dir()
     # Clean slate so the input dir reflects EXACTLY the current chunks. Filenames are CONTENT hashes
     # (below), so identical content lands at the identical filename → GraphRAG's `update` recognises an

@@ -401,6 +401,23 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   a model error). (4) **RCA localisation** (`repair_rca_phase`, opt-in) — one LLM call yields search terms
   for a targeted lane before the fix. Screenshot/vision analysis is Claude/multimodal ONLY (qwen-coder is
   text-only). Detail → `docs/PROGRESS_LOG.md`; team write-up → `docs/Auto_Repair_v2_Code_Review.html`.
+- **⚠️ Auto-Repair is TWO SEPARATE AGENTS (v3, 2026-09-21), for ALL models.** Graph:
+  `rca → retrieve → diagnose → apply → unit_test → build → prepare_pr`. (1) **RCA agent**
+  (`repair_agent/nodes/rca.py`, `run_rca`) reads ONLY docs + test cases (never code) → `{verdict:
+  code_bug|spec_bug|test_invalid, confidence, rationale, suspect, search_terms}`; a HIGH-confidence
+  `spec_bug`/`test_invalid` STOPS the pipeline (`rca_stop` → job status `rca_stopped`) — never patch code to
+  satisfy a wrong spec/test. (2) **Code-fixing agent** (`retrieve → diagnose`) retrieves CODE seeded by the
+  RCA's `rca_query`. `REPAIR_RCA_PHASE` defaults **True**; NO-REGRESSION via a CONSERVATIVE gate
+  (`_rca_should_stop`: stop only on HIGH-confidence spec/test) + a code retrieval that is a SUPERSET of the
+  pre-RCA lanes, so a code bug (every demo bug) proceeds to the unchanged fixer and Claude's result is
+  preserved. `REPAIR_RCA_GATE=false` → advisory-only. **Retrieval is SPLIT** (`search_code`/`search_docs`):
+  with `msgraphrag` + `repair_msgraphrag_docs_only` (default) the graph holds only docs/tests and a separate
+  Chroma **code-only** index (`repair_code_persist_dir`, built by `build_code_index`, refreshed by the same
+  "Rebuild index") serves the fixer; pure-Chroma/graphrag are unchanged. **Lexical matching is sub-token
+  exact** (`_subtokens`): `action` no longer matches inside `transaction` (the guard-defeating false positive)
+  while `cart` still matches `onAddToCart` — generic. **Screenshots** of the failed steps go to the Claude
+  prompts (`repair_use_screenshots`, multimodal only; qwen stays text); failure text carries a per-step
+  EXECUTION TRACE + console-log tail (`repair_failure_detail`). Detail → `docs/PROGRESS_LOG.md` (2026-09-21).
 - **Diagnose "what did we send / get" is dumpable.** `REPAIR_DEBUG_DUMP=true` writes the EXACT prompt
   + each provider's RAW response (+ parsed patch, reject reason, timing, `ollama ps` VRAM) to
   `repair_debug_dir` per call — captures even the timed-out "(no output)" case. Off by default (no I/O).
@@ -464,6 +481,16 @@ Detailed history → [`docs/PROGRESS_LOG.md`](docs/PROGRESS_LOG.md). Design/depl
   tight), symptom-relevance patch verification with one nudged retry, and an opt-in RCA localisation pass.
   8 new unit tests (`tests/test_repair_retrieval.py`) prove the fix on the exact live failure; full suite
   128 passed + same 8 pre-existing fixture failures. Team write-up: `docs/Auto_Repair_v2_Code_Review.html`.
+- **2026-09-21 · Auto-Repair v3 — two separate agents (RCA + code-fixing) + retrieval split + generic fixes.**
+  The 09-20 dump proved retrieval STILL missed the buggy code (all payment chunks) AND the verify guard was
+  defeated by a lexical substring false positive (`action` ⊂ `transaction`). Redesign: (1) a real **RCA agent**
+  that reads only docs+tests and decides code_bug/spec_bug/test_invalid — a high-confidence spec/test verdict
+  STOPS before the fixer; (2) **retrieval split** — msgraphrag holds only docs/tests, code comes from a
+  separate efficient Chroma index; (3) **generic sub-token lexical matching** (kills the `action`⊂`transaction`
+  class of false positive); (4) **screenshots** attached for Claude (multimodal only); (5) richer failure
+  detail (execution trace + console log) for text models like qwen; (6) `REPAIR_RCA_PHASE` on by default with a
+  conservative gate so Claude+Chroma never regresses. Frontend: two-agent pipeline UI + Auto-Repair window
+  minimize/maximize/close. Full suite 133 passed + same 8 pre-existing failures. Detail → `docs/PROGRESS_LOG.md`.
 
 ### Never
 

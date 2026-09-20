@@ -6,7 +6,9 @@ wrong code. Pure-function tests (no Chroma/Ollama needed)."""
 from repair_agent.repair_failed_test import (
     _failure_point_text, _failure_point_query, _bug_class, _round_robin,
     _signal_tokens, _lexical_score, _patch_relevance, _hits_best_relevance, RepairPatch,
+    _subtokens, _rca_should_stop,
 )
+from vision_agent.config import settings
 
 # The real (abbreviated) TC-RPS-003 failure: a PAYMENT test that actually dies at ADD-TO-CART.
 FAILURE = (
@@ -101,3 +103,56 @@ def test_lexical_score_word_boundary_for_numbers():
     sig = {"1", "quantity"}
     assert _lexical_score("if (quantity <= 1) show popup", sig) == 2
     assert _lexical_score("const x = 100", {"1"}) == 0        # 1 must not match inside 100
+
+
+# ── generic lexical fix: sub-token matching (no substring false positives) ───────────────────────
+
+def test_subtokens_splits_camel_snake_and_digits():
+    assert _subtokens("onAddToCart") == {"on", "add", "to", "cart"}
+    assert _subtokens("quantity_required_popup") == {"quantity", "required", "popup"}
+    assert _subtokens("MOCK_APPROVED") == {"mock", "approved"}
+    assert _subtokens("quantity <= 1") == {"quantity", "1"}
+
+
+def test_lexical_score_no_substring_false_positive_generic():
+    # The live TC-RPS-003 defeat: 'action' (a failure signal from 'checkout action') scored the OFF-TARGET
+    # balance patch as relevant because it is a SUBSTRING of 'transaction'. Sub-token matching kills that
+    # generically, while STILL matching a compound identifier — no per-test special-casing.
+    sig = {"action", "cart", "quantity", "popup"}
+    assert _lexical_score("recordCardTransaction balanceAfter issuedSmartCard", sig) == 0   # 'action' ⊄ 'transaction'
+    assert _lexical_score("onAddToCart(product, quantity)", sig) == 2                       # cart + quantity
+    assert _lexical_score("show the Quantity Required popup", sig) == 2                     # quantity + popup
+
+
+def test_off_target_balance_patch_now_scores_zero_on_the_real_failure():
+    # End-to-end on the real failure point: the payment/balance patch the model actually produced must now
+    # score 0 (it did NOT before the fix — 'action' ⊂ 'transaction' gave it 1, defeating the guard).
+    fp_sig = _signal_tokens(_failure_point_text(FAILURE))
+    balance_patch = RepairPatch(
+        file_path="App.tsx",
+        find="if (balanceAfter !== undefined && !issuedSmartCard) {",
+        replace="if (balanceAfter !== undefined && issuedSmartCard) {",
+        explanation="The condition incorrectly checks for the absence of an issued smart card; deduct the balance and log the transaction.",
+    )
+    assert _patch_relevance(balance_patch, fp_sig) == 0
+
+
+# ── RCA gate: conservative, only stops on a high-confidence spec/test verdict ─────────────────────
+
+def test_rca_gate_stops_only_on_high_confidence_spec_or_test():
+    assert _rca_should_stop("spec_bug", "high") is True
+    assert _rca_should_stop("test_invalid", "high") is True
+    # A code bug NEVER stops (this is what protects the demo bugs + the Claude result from regression).
+    assert _rca_should_stop("code_bug", "high") is False
+    # Low/medium confidence never stops — when unsure, proceed to the fixer.
+    assert _rca_should_stop("spec_bug", "medium") is False
+    assert _rca_should_stop("test_invalid", "low") is False
+
+
+def test_rca_gate_disabled_never_stops():
+    prev = settings.repair_rca_gate
+    settings.repair_rca_gate = False
+    try:
+        assert _rca_should_stop("spec_bug", "high") is False
+    finally:
+        settings.repair_rca_gate = prev

@@ -15,6 +15,12 @@ class RepairAgentState(TypedDict, total=False):
     apply: bool           # False → dry run (retrieve + diagnose only)
     auto_pr: bool         # push + open the PR after a green build
     branch_suffix: str    # per-run suffix so fix branches never collide
+    images: list          # failed-step screenshot paths (attached for a multimodal model = Claude)
+
+    # ── RCA agent (runs first; separate from the code-fixing agent) ──
+    rca: dict             # {verdict, confidence, rationale, suspect, search_terms, stop, ran, provider, hits}
+    rca_query: str        # the RCA agent's localisation search terms → seeds the code-fix retrieval lane
+    rca_stop: bool        # True → a high-confidence spec_bug / test_invalid: STOP, do not patch code
 
     # ── accumulated results ──
     context: str          # retrieved code context rendered for the LLM prompt

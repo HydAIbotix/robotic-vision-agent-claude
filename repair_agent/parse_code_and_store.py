@@ -272,12 +272,12 @@ def extract_xlsx_text(file_path):
     return documents
 
 
-def collect_documents():
-    """Walk the codebase + product artifacts and return the parsed searchable chunks.
+def collect_code_documents():
+    """Parse ONLY the source code + code-adjacent text files from the codebase (no design/test artifacts).
 
-    Extracted from build_codebase_index so BOTH retrieval backends (Chroma and the GraphRAG/Neo4j
-    option) index EXACTLY the same chunks with the same chunking/skip rules — the only thing that
-    differs between backends is where the vectors are stored, never what is indexed."""
+    This is what the CODE-fixing agent's index needs. Split out from collect_documents so the two-agent
+    design can index code separately from the docs/tests: msgraphrag holds only docs+tests (the RCA agent),
+    while code goes to an efficient Chroma vector index (build_code_index)."""
     all_documents = []
 
     print(f"Scanning codebase directory: {CODEBASE_DIR}...")
@@ -301,14 +301,32 @@ def collect_documents():
                     all_documents.extend(parse_text_file(file_path))
             except Exception as e:
                 print(f"Error parsing {file_path}: {e}")
+    return all_documents
 
-    all_documents.extend(extract_docx_text(DESIGN_DOC_PATH))
+
+def collect_doc_documents():
+    """Parse ONLY the design/requirements docs + the test-case workbook (no source code).
+
+    This is what the RCA agent's knowledge base needs (design_document + test_cases chunks). When the
+    knowledge backend is msgraphrag, THESE are the only inputs the entity/community graph is built from."""
+    docs = []
+    docs.extend(extract_docx_text(DESIGN_DOC_PATH))
     if REQUIREMENTS_DOC_PATH is not None:
         # Indexed with the same "design_document" type as the design spec — both are authoritative intent
         # the code must conform to, so retrieve_context weights them as ground truth for DIAGNOSE.
-        all_documents.extend(extract_docx_text(REQUIREMENTS_DOC_PATH))
-    all_documents.extend(extract_xlsx_text(TEST_CASES_PATH))
-    return all_documents
+        docs.extend(extract_docx_text(REQUIREMENTS_DOC_PATH))
+    docs.extend(extract_xlsx_text(TEST_CASES_PATH))
+    return docs
+
+
+def collect_documents():
+    """Walk the codebase + product artifacts and return ALL parsed searchable chunks (code + docs + tests).
+
+    Used by the Chroma (default) and GraphRAG/Neo4j backends, which index everything into one store — the
+    only thing that differs between those backends is where the vectors are stored, never what is indexed.
+    (msgraphrag, in the two-agent design, indexes only collect_doc_documents(); code is a separate Chroma
+    index — see build_code_index.)"""
+    return collect_code_documents() + collect_doc_documents()
 
 
 def build_codebase_index():
@@ -322,7 +340,15 @@ def build_codebase_index():
         return graphrag_store.build_index()
     if settings.repair_retrieval_backend == "msgraphrag":
         from repair_agent import ms_graphrag_store   # lazy: only when the Microsoft GraphRAG backend is selected
-        return ms_graphrag_store.build_index()
+        n = ms_graphrag_store.build_index()
+        # TWO-AGENT split: msgraphrag holds ONLY docs+tests (the RCA agent). Code retrieval for the fixer
+        # comes from an efficient, separate Chroma code-only index — build it here so one "Rebuild index"
+        # refreshes both. (repair_msgraphrag_docs_only=False reverts to msgraphrag-indexes-everything.)
+        if settings.repair_msgraphrag_docs_only:
+            nc = build_code_index()
+            print(f"  [msgraphrag] + code-only Chroma index: {nc} code chunks at "
+                  f"{_resolve(settings.repair_code_persist_dir)} (the code-fixing agent's RAG).")
+        return n
 
     all_documents = collect_documents()
 
@@ -423,6 +449,93 @@ def search(query_text, k=4, where=None):
     if where:
         return vector_db.similarity_search(query_text, k=k, filter=where)
     return vector_db.similarity_search(query_text, k=k)
+
+
+# ── TWO-AGENT retrieval split: an efficient CODE-only vector RAG + a DOCS/TESTS knowledge backend ──
+
+_CODE_WHERE = {"type": {"$in": ["code_block", "code_file"]}}
+_DOC_WHERE = {"type": {"$in": ["design_document", "test_cases", "supporting_file"]}}
+
+
+def _effective_code_backend() -> str:
+    """Which backend serves CODE retrieval for the code-fixing agent. Default (empty setting): Chroma
+    whenever the knowledge backend is msgraphrag-docs-only (so msgraphrag stays docs/tests-only and code
+    comes from a fast vector index); otherwise the main backend, so the pure-Chroma default and the
+    graphrag/Neo4j option are byte-for-byte unchanged."""
+    if settings.repair_code_backend:
+        return settings.repair_code_backend
+    if settings.repair_retrieval_backend == "msgraphrag" and settings.repair_msgraphrag_docs_only:
+        return "chroma"
+    return settings.repair_retrieval_backend
+
+
+def _code_persist_dir() -> Path:
+    """Where the CODE-only Chroma index lives. A SEPARATE dir only when the knowledge backend is
+    msgraphrag-docs-only; otherwise the main Chroma index already holds code, so reuse it (no duplicate)."""
+    if settings.repair_retrieval_backend == "msgraphrag" and settings.repair_msgraphrag_docs_only:
+        return _resolve(settings.repair_code_persist_dir)
+    return PERSIST_DIR
+
+
+def build_code_index() -> int:
+    """Build/refresh the CODE-only Chroma index (used when the knowledge backend is msgraphrag-docs-only).
+
+    Same in-place reset + cache-clear discipline as build_codebase_index so it works while the backend is
+    running. A no-op for the pure-Chroma default (there the main index already carries code)."""
+    documents = collect_code_documents()
+    if not documents:
+        print("No code chunks found to index (code-only).")
+        return 0
+    persist = _resolve(settings.repair_code_persist_dir)
+    embedding_model = _get_embedding_model()
+    try:
+        db = Chroma(persist_directory=str(persist), embedding_function=embedding_model)
+        try:
+            db.delete_collection()
+        except Exception as e:
+            print(f"  (could not drop old code collection, continuing: {e})")
+        db = Chroma(persist_directory=str(persist), embedding_function=embedding_model)
+        db.add_documents(documents)
+    except Exception as e:
+        print(f"  In-place code-index reset failed ({e}); rebuilding from scratch.")
+        import shutil
+        if persist.exists():
+            shutil.rmtree(persist, ignore_errors=True)
+        Chroma.from_documents(documents=documents, embedding=embedding_model, persist_directory=str(persist))
+    for _clear in (
+        lambda: __import__("chromadb.api.shared_system_client", fromlist=["SharedSystemClient"]).SharedSystemClient.clear_system_cache(),
+        lambda: __import__("chromadb").api.client.SharedSystemClient.clear_system_cache(),
+    ):
+        try:
+            _clear()
+            break
+        except Exception:
+            continue
+    return len(documents)
+
+
+def search_code(query_text, k=4, where=None):
+    """CODE retrieval for the code-fixing agent — from the efficient code-only vector RAG.
+
+    `where` defaults to the code-type filter; callers pass {"source": path} for file-neighbourhood
+    expansion. Routes to the effective code backend: for the pure-Chroma/graphrag defaults this is
+    identical to search(..., code filter) (no regression); for msgraphrag-docs-only it queries the
+    separate Chroma code index instead of the entity/community graph."""
+    w = where or _CODE_WHERE
+    backend = _effective_code_backend()
+    if backend == settings.repair_retrieval_backend:
+        return search(query_text, k=k, where=w)   # same store as the knowledge backend
+    # Code backend differs from the knowledge backend (msgraphrag-docs-only → code lives in its own Chroma).
+    db = Chroma(persist_directory=str(_code_persist_dir()), embedding_function=_get_embedding_model())
+    return db.similarity_search(query_text, k=k, filter=w)
+
+
+def search_docs(query_text, k=4, where=None):
+    """DOCS/TEST-CASE retrieval for the RCA agent — from the knowledge backend (Chroma or msgraphrag).
+
+    `where` defaults to the design/requirements/test-case types; pass {"type": "design_document"} or
+    {"type": "test_cases"} to focus. Always routes through the main backend's search()."""
+    return search(query_text, k=k, where=(where or _DOC_WHERE))
 
 
 def query_codebase(query_text, k=4, quiet=False):

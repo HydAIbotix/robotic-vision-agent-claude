@@ -27,6 +27,8 @@ def diagnose_node(state: RepairAgentState) -> dict:
         cancel_check=lambda: canceller.is_cancelled(rid),
         on_progress=_progress,
         hits=state.get("hits"),   # P0b: lets DIAGNOSE verify the patch targets the failed symptom
+        images=state.get("images"),   # failed-step screenshots (attached only for a multimodal model)
+        rca=state.get("rca"),         # the RCA agent's verdict (recorded in the debug dump)
     )
     patch_dict = asdict(patch)
     # Report the tool that ACTUALLY produced the patch (source may differ from the selected primary

@@ -485,7 +485,10 @@ def _run_repair_job(repair_id: str, req: RepairRequest):
             job = _repair_jobs.setdefault(repair_id, {})
             job["result"] = result
             job["status"] = ("cancelled" if result.get("cancelled")
+                             else "rca_stopped" if result.get("rca_stopped")
                              else "succeeded" if result.get("success") else "completed")
+            if result.get("rca"):
+                job["rca"] = result["rca"]
             if result.get("error"):
                 job["error"] = result["error"]
             job["updated_at"] = datetime.utcnow().isoformat()
@@ -3306,7 +3309,72 @@ def _run_defect_agent(run_id: str, kiosk_id: str, failed_results: list):
         _broadcaster.unregister(run_id)
 
 
-def _failure_text_for(tr: dict) -> str:
+def _execution_trace(steps: list, cap_chars: int = 2200) -> str:
+    """A compact per-step EXECUTION TRACE for the repair models: each step's action + method / screen /
+    expected / actual + PASS/FAIL + observation + any error/stack. Gives a text model like qwen the full
+    'what happened, step by step' flow — not just the final failed assertion. Bounded (keeps the tail,
+    where the failure is) so it never dominates the local model's context window."""
+    lines = []
+    for n, s in enumerate(steps or [], 1):
+        ok = "PASS" if s.get("success", True) else "FAIL"
+        bits = [f"{k}={s[k]}" for k in ("method", "screen_id", "expected_screen", "actual_screen",
+                                        "expected_text") if s.get(k)]
+        head = f"{n:>2}. [{ok}] {str(s.get('step', ''))[:120]}"
+        if bits:
+            head += "  (" + ", ".join(bits) + ")"
+        lines.append(head)
+        obs = s.get("observation") or s.get("note")
+        if obs:
+            lines.append(f"      -> {str(obs)[:200]}")
+        err = s.get("error") or s.get("trace") or s.get("stack")
+        if err:
+            lines.append(f"      ERROR/STACK: {str(err)[:300]}")
+    text = "\n".join(lines)
+    if len(text) > cap_chars:
+        text = text[-cap_chars:]
+        text = "…(earlier steps omitted)\n" + text[text.find("\n") + 1:]
+    return text
+
+
+def _console_log_tail(run_id: str, limit: int = 1000) -> str:
+    """Best-effort tail of the run's captured console/application log (results/<run_id>/run_console.log,
+    else run.log) — the app/agent log output around the failure. Never raises."""
+    if not run_id:
+        return ""
+    try:
+        d = _run_results_dir(run_id)
+        for name in ("run_console.log", "run.log"):
+            p = d / name
+            if p.exists():
+                return p.read_text(encoding="utf-8", errors="ignore")[-limit:].strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _failure_images_for(tr: dict, run_id: str, limit: int = 3) -> list:
+    """Absolute paths of the FAILED steps' screenshots (after, else before) for a multimodal (Claude)
+    repair. Returns [] when none exist; the repair layer also skips them for a text-only local model."""
+    if not run_id:
+        return []
+    d = _run_screens_dir(run_id)
+    out: list = []
+    for s in (tr.get("step_results") or []):
+        if s.get("success", True):
+            continue
+        for key in ("screenshot_after", "screenshot_before"):
+            fn = s.get(key)
+            if fn:
+                p = d / Path(fn).name
+                if p.exists() and str(p) not in out:
+                    out.append(str(p))
+                    break
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _failure_text_for(tr: dict, run_id: str = "") -> str:
     """Build a plain-English failure description for the repair agent from a failed TestResult.
 
     We lead with the test's DESIGN INTENT (its description + preconditions + expected results, pulled
@@ -3382,7 +3450,23 @@ def _failure_text_for(tr: dict) -> str:
         "screens/kiosks (a balance, a transaction), correct the code that PRODUCES or PERSISTS that "
         "state, NOT code that merely displays or labels it."
     )
-    return " ".join(parts).strip()
+    text = " ".join(parts).strip()
+
+    # ENRICHMENT (repair_failure_detail): append a per-step EXECUTION TRACE and a tail of the run's
+    # console/application log so the models — especially a text-only local model like qwen — have the full
+    # flow + logs to diagnose from, not just the failed assertion. Appended AFTER the "Fix the ROOT CAUSE"
+    # marker so the failure-point / action / intent parsers (which stop at that marker) are unaffected.
+    try:
+        if settings.repair_failure_detail:
+            trace = _execution_trace(steps)
+            if trace:
+                text += "\n\nEXECUTION TRACE (per step — the flow, results and any errors):\n" + trace
+            log_tail = _console_log_tail(run_id)
+            if log_tail:
+                text += "\n\nAPPLICATION / RUN LOG (tail):\n" + log_tail
+    except Exception:
+        pass   # enrichment is best-effort; never break the repair over it
+    return text
 
 
 def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list):
@@ -3393,7 +3477,8 @@ def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list):
         return
     tr = failed_results[0]
     test_id = tr.get("test_id", "")
-    failure = _failure_text_for(tr)
+    failure = _failure_text_for(tr, run_id=run_id)
+    images = _failure_images_for(tr, run_id)   # attached only for a multimodal model (Claude)
 
     repair_id = f"repair-{uuid.uuid4().hex[:8]}"
     _repair_set(
@@ -3415,12 +3500,18 @@ def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list):
             branch_suffix=repair_id.split("-")[-1],
             progress_cb=lambda u: _repair_stage(repair_id, u),
             cancel_event=cancel_event,
+            images=images,
         )
         with _repair_lock:
             job = _repair_jobs.setdefault(repair_id, {})
             job["result"] = result
+            # The RCA agent halting on a spec/test bug is a distinct, legitimate outcome — not a plain
+            # failure. Surface it as its own status so the UI can explain WHY no code was patched.
             job["status"] = ("cancelled" if result.get("cancelled")
+                             else "rca_stopped" if result.get("rca_stopped")
                              else "succeeded" if result.get("success") else "completed")
+            if result.get("rca"):
+                job["rca"] = result["rca"]
             if result.get("error"):
                 job["error"] = result["error"]
             job["updated_at"] = datetime.utcnow().isoformat()
