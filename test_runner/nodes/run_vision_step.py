@@ -622,6 +622,30 @@ def _run_inline_vision(desc: str, captured: dict, credentials: dict, scenario: s
     return seg_steps, made_progress
 
 
+_CONF_RANK = {"low": 0, "medium": 1, "high": 2}
+
+
+def _conf_at_least(confidence: str, minimum: str) -> bool:
+    """True if `confidence` (high|medium|low) meets or exceeds `minimum`. Unknown confidence → 'low' (0);
+    unknown minimum → 'high' (strictest). Used by Option C's confidence threshold: only a gap verdict at
+    least this confident is allowed to bridge."""
+    return _CONF_RANK.get((confidence or "").strip().lower(), 0) >= _CONF_RANK.get((minimum or "high").strip().lower(), 2)
+
+
+def _last_interaction_screen(step_results: list) -> str:
+    """The app-map screen_id of the most recent INTERACTION (tap/type) step that recorded one, else "".
+
+    The unresponsive-interaction rule uses this: if the app is STILL on this screen at a wrong-screen
+    verify, the interaction the plan performed did not advance the flow (a blocked / refused / unresponsive
+    control) — a DEFECT, not a recoverable navigation gap. Only structured (app_map) taps/types record a
+    screen_id, so this is conservative — it fires only when we KNOW where the interaction happened."""
+    for sr in reversed(step_results or []):
+        step = str(sr.get("step", ""))
+        if (step.startswith("tap:") or step.startswith("type:")) and sr.get("screen_id"):
+            return str(sr.get("screen_id"))
+    return ""
+
+
 def _make_robot_status_sink(run_id: str, test_id: str):
     """Build the real-time robot STATUS sink callback for a run.
 
@@ -1012,19 +1036,39 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             # no regression. Generic/app-agnostic; the vision LLM is always Claude. Deterministic no-LLM
             # equivalents (Options A/B) are documented in CLAUDE.md for the local/air-gapped path.
             _verify_defect = False
-            if not success and _screen_only and settings.verify_wrong_screen_recovers and settings.verify_defect_judge:
-                from vision_agent.nodes.validate_pipeline import classify_wrong_screen_failure
-                judge_shot = _cap("verify_defect", i) or last_screenshot
-                _kind, _why = classify_wrong_screen_failure(judge_shot, desc, expected, actual)
-                if _kind == "defect":
-                    _verify_defect = True
-                    observation = observation or _why or f"App on {actual!r} (a genuine defect), not {expected!r}."
-                    print(f"    {i:>2}. verify  wrong screen judged a genuine DEFECT (not a nav gap): {_why} "
-                          f"→ failing fast (no Tier-3 replanning) so Auto-Repair targets the real bug")
+            if not success and _screen_only and settings.verify_wrong_screen_recovers:
+                _defect_reason = ""
+                # (2) UNRESPONSIVE-INTERACTION rule (deterministic, no LLM, cheap + authoritative). If the
+                # app is STILL on the screen where the plan's last interaction ran, that interaction did not
+                # advance the flow → a blocked/refused/unresponsive control → defect (don't let Tier-3 mask
+                # it by re-doing the action). Runs BEFORE the judge to save the LLM call when it fires.
+                if settings.verify_unresponsive_interaction_defect:
+                    _ia_screen = _last_interaction_screen(step_results)
+                    if _ia_screen and actual and _ia_screen == actual:
+                        _verify_defect = True
+                        _defect_reason = (f"the preceding interaction on {_ia_screen!r} did not advance the "
+                                          f"screen (still on {actual!r}) — an unresponsive/blocked control")
+                # (1) Vision JUDGE with a CONFIDENCE threshold. Bridge ONLY on a sufficiently-confident 'gap';
+                # a 'defect' (any confidence) or a low-confidence 'gap' fails fast (don't mask a possible bug).
+                if not _verify_defect and settings.verify_defect_judge:
+                    from vision_agent.nodes.validate_pipeline import classify_wrong_screen_failure
+                    judge_shot = _cap("verify_defect", i) or last_screenshot
+                    _kind, _conf, _why = classify_wrong_screen_failure(judge_shot, desc, expected, actual)
+                    if _kind == "defect":
+                        _verify_defect = True
+                        _defect_reason = _why or f"the app is in a defect state on {actual!r}, not {expected!r}"
+                    elif not _conf_at_least(_conf, settings.verify_bridge_min_confidence):
+                        _verify_defect = True
+                        _defect_reason = (f"the judge was only {_conf}-confident this is a recoverable "
+                                          f"navigation gap (< required {settings.verify_bridge_min_confidence}) "
+                                          f"→ not masking a possible defect")
+                if _verify_defect:
+                    observation = observation or _defect_reason or f"App on {actual!r} (a genuine defect), not {expected!r}."
+                    print(f"    {i:>2}. verify  wrong screen treated as a DEFECT — {_defect_reason} → failing "
+                          f"fast (no Tier-3 bridge) so Auto-Repair targets the real bug")
                     if run_id:
                         broadcaster.emit(run_id, {"event": "log", "run_id": run_id, "test_id": test_id,
-                            "message": f"[defect judge] wrong-screen verify is a genuine defect — {_why}; "
-                                       f"failing fast (no replanning)."})
+                            "message": f"[defect] wrong-screen verify — {_defect_reason}; failing fast (no bridge)."})
             if not success and _screen_only and not _verify_defect and settings.verify_wrong_screen_recovers:
                 print(f"    {i:>2}. verify  on the WRONG screen (expected {expected!r}, got {actual!r}) — "
                       f"bridging the off-plan gap with bounded vision, then resuming the structured plan")

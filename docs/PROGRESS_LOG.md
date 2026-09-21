@@ -1810,3 +1810,58 @@ Verified on the real on-disk `PaymentScreen` chunk: the plain 4 KB cut drops `se
 `pytest tests/` = 139 passed (1 new: `test_focus_snippet_keeps_a_deep_bug_line_that_a_head_cut_drops`) +
 same 8 pre-existing fixture failures. Additive/default-safe: only over-cap code chunks change, and only by
 KEEPING more of the relevant region.
+
+---
+
+## 2026-09-21 (UI + note) — report font legibility + "running POS = built dist, not source branch"
+
+- **Fix:** the Auto-Repair Detailed-report code/output boxes rendered with bare `monospace` and no explicit
+  text colour, so on the dark theme (`--text` on `--bg`) the step-by-step agent text could be faint/invisible.
+  All boxes (`box`, `codeBox`, the RCA/retrieve `<pre>` snippets, the diagnose diff, `DiffBlock`) now use a
+  legible monospace stack (`MONO`) + explicit `color: var(--text)` + `line-height: 1.5` and a slightly larger
+  size. Studio build clean; no logic change.
+- **Note (recurring confusion): the POS app the browser runs is the COMPILED `dist` baked into the nginx
+  image at `docker build` time** (POS `Dockerfile` is a 2-stage build → `COPY --from=build /app/dist`), NOT
+  the live source. `git status` shows the SOURCE branch; it can differ from the running image if the branch
+  was switched without `docker compose up -d --build`. To confirm what's actually running: rebuild the POS
+  from the current branch + hard-refresh, or behaviour-probe. The **quantity guard `if (quantity <= 1)`** is
+  an off-by-one: product quantity starts at 0 (Add disabled), one `+` → 1 → `1 <= 1` true → "Quantity
+  Required" popup (the bug); `+` twice → 2 → adds. In the 11:06 run the cart verify PASSED via
+  `method=tier3_bridge` — evidence the bug WAS hit and Tier-3 vision auto-recovered it (incremented/re-added
+  to reach the cart), which is why the run continued to the genuine mock-card failure instead of failing at
+  add-to-cart.
+
+---
+
+## 2026-09-21 (Option C tuning) — fail real defects fast instead of masking them with a Tier-3 bridge
+
+After the mock-card fix landed, a re-run showed the *quantity* bug no longer failed the test: the popup
+auto-dismisses to a normal `products` screen, so the Option C vision judge saw nothing wrong, called it a
+"gap", and Tier-3 bridged (re-incremented + re-added) to reach the cart. Net: a real defect was silently
+recovered instead of triggering Auto-Repair. Two levers added to push borderline wrong-screen verifies to
+fail fast — **both default ON, both configurable** (no-regression: disable/loosen to restore prior bridging).
+
+### (1) Judge confidence threshold — `verify_bridge_min_confidence` (default `high`)
+`classify_wrong_screen_failure` now returns `(category, confidence, observation)` (confidence high|medium|
+low; prompt asks for it). The caller BRIDGES only when the verdict is `gap` AND its confidence ≥
+`verify_bridge_min_confidence`. A `defect` (any confidence) OR a lower-confidence `gap` fails fast (marks
+`sr["verify_defect"]` → the outer handoff is terminal → Auto-Repair). Default-safe: on judge error / no
+image it returns `("gap","high",…)`, so an unavailable judge bridges exactly as before. `_conf_at_least`
+implements the ordering (unknown confidence → lowest; unknown threshold → strictest).
+
+### (2) Unresponsive-interaction rule — `verify_unresponsive_interaction_defect` (default True)
+Deterministic, no LLM, runs BEFORE the judge (cheap + authoritative). `_last_interaction_screen` returns the
+`screen_id` of the most recent structured tap/type; if the app is STILL on that screen at the failed
+wrong-screen verify, the interaction did not advance the flow (a blocked / refused / unresponsive control)
+→ defect, fail fast. Conservative: only structured (app_map) interactions record a `screen_id`, so it fires
+only when we know where the interaction happened; a true nav gap (the interaction advanced off its screen,
+or there was no preceding interaction) is not flagged and bridges as before.
+
+Wiring: both live in the `_screen_only` verify branch of `run_vision_step`; when neither fires, the bridge
+runs unchanged. The design tradeoff (more fail-fast = fewer silent self-heals) is called out in CLAUDE.md.
+
+### No-regression
+`pytest tests/` = 141 passed (2 new in `tests/test_verify_defect_gate.py`: `_conf_at_least`,
+`_last_interaction_screen`) + same 8 pre-existing fixture failures. Text/value assertions (`_screen_only`
+false) never enter this path, so the cross-kiosk VALUE demos are untouched; loosening either knob restores
+the prior always-bridge behaviour.

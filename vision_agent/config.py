@@ -373,6 +373,21 @@ class Settings(BaseSettings):
     # bridge and self-terminate) are documented in CLAUDE.md for the local/air-gapped path. Set False to
     # restore the pure "always bridge a wrong-screen miss" behaviour.
     verify_defect_judge: bool = True
+    # OPTION C tuning — fail a wrong-screen verify FAST (→ Auto-Repair) more readily, instead of letting a
+    # Tier-3 bridge silently MASK a real defect by re-doing an action the plan already performed. Two levers,
+    # both default ON (a deliberate choice: surface planted/real defects rather than auto-recover past them):
+    #  (1) JUDGE CONFIDENCE — only BRIDGE a wrong-screen miss when the vision judge is AT LEAST this confident
+    #      it is a recoverable navigation GAP. A lower-confidence "gap" (or any "defect") fails fast. Ordered
+    #      high > medium > low; "high" = strictest (bridge only when sure). Lower it toward "low" to bridge
+    #      more readily (closer to the pre-tuning always-bridge behaviour).
+    verify_bridge_min_confidence: str = "high"
+    #  (2) UNRESPONSIVE-INTERACTION RULE (deterministic, no LLM) — if the plan's immediately-preceding
+    #      interaction (a tap/type with a known screen_id) was performed on the SAME screen the app is STILL
+    #      showing at the failed verify, that interaction did NOT advance the flow (an unresponsive / blocked /
+    #      refused control — e.g. add-to-cart that popped a popup and stayed on 'products'). Treat that verify
+    #      as a DEFECT and fail fast, rather than bridging. Runs BEFORE the judge (cheap + authoritative — the
+    #      screen factually didn't change). Set False to disable.
+    verify_unresponsive_interaction_defect: bool = True
     # Save an annotated BEFORE screenshot (the last camera frame with a crosshair at the exact camera
     # pixel the arm will touch) and the AFTER frame (the /screen/click response image) for every real
     # tap, into the run's per-run screenshots folder with identifiable names (before_<cmd>_at_<u>-<v>.png

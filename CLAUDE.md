@@ -365,6 +365,18 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   any uncertainty/error) bridges exactly as before → **no regression** to working recoveries. Gated by
   `verify_defect_judge` (default True); runs only on the `_screen_only` path (text/value assertions were
   already terminal). Vision is always Claude, so no multimodal gate is needed.
+  - **TUNED so real defects fail fast instead of being masked (2026-09-21, both default ON).** A Tier-3
+    bridge can silently RECOVER past a real bug by re-doing the failed interaction (observed: the quantity
+    popup auto-dismissed to a normal `products` screen, so the judge saw nothing wrong and bridged). Two
+    levers now push borderline cases to fail fast: **(1) judge confidence** — the judge also returns
+    high/medium/low, and a wrong-screen miss BRIDGES only on a `gap` verdict at least `verify_bridge_min_
+    confidence` (default `high`); a lower-confidence `gap` or any `defect` fails fast. **(2) unresponsive-
+    interaction rule** (`verify_unresponsive_interaction_defect`, deterministic, no LLM, runs first): if the
+    app is STILL on the screen where the plan's last interaction (a tap/type with a `screen_id`) ran, that
+    interaction did not advance the flow → a blocked/refused control → defect. Both are configurable; lower
+    the confidence bar toward `low` (or disable the rule) to bridge more readily (closer to always-bridge).
+    Helpers `_conf_at_least` / `_last_interaction_screen`; `classify_wrong_screen_failure` now returns
+    `(category, confidence, observation)` and stays default-safe (`("gap","high",…)` on error → bridges).
   - **DEFERRED — local/no-LLM equivalents (revisit when Auto-Repair must run air-gapped).** *Option A:*
     classify the ACTUAL screen deterministically — a `*_popup` / `*_required` / `*_error` / error-banner
     state ⇒ defect (terminal); a neutral other screen ⇒ gap (bridge). *Option B:* keep the bridge but
@@ -390,6 +402,14 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   line unindexed → a wrong fix, or "Patch find-text was not found" (a branch/index mismatch),
   NOT a retrieval-logic bug. Rebuild via the Studio button / `POST /api/repair/index` (lock-proof,
   in-place — no restart needed).
+- **⚠️ The running POS the browser hits is the COMPILED `dist` baked into its nginx image at
+  `docker build` time — NOT the live source.** (POS `Dockerfile` = 2-stage: `npm run build` →
+  `COPY --from=build /app/dist`.) `git status` shows the SOURCE branch, which can DIVERGE from the running
+  image after a branch switch without `docker compose up -d --build`. To confirm what's actually running:
+  rebuild the POS from the branch + hard-refresh, or behaviour-probe. (The planted quantity bug
+  `if (quantity <= 1)` is an off-by-one: qty starts 0 → Add disabled; `+` once → 1 → popup; `+` twice → 2
+  → adds — and a wrong-screen cart verify recovering via `method=tier3_bridge` is itself evidence the bug is
+  present and Tier-3 masked it.)
 - **Repair patch-quality ceiling is MODEL choice, not config.** A 3B general model can't reliably
   root-cause a reasoning-heavy bug or emit a precise unique patch; use a code-specialised model
   (`qwen2.5-coder:14b/32b`) on a GPU, or Claude. Demo the local path on the simpler planted bugs

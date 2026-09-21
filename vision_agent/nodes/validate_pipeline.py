@@ -793,7 +793,7 @@ def verify_intent_satisfied(image_path: str, step_description: str,
 
 
 def classify_wrong_screen_failure(image_path: str, step_description: str,
-                                  expected_screen: str, actual_screen: str) -> tuple[str, str]:
+                                  expected_screen: str, actual_screen: str) -> tuple[str, str, str]:
     """OPTION C — the "gap vs defect" JUDGE for a wrong-screen verify failure.
 
     A verify that failed only because the screen id doesn't match (no text/value assertion) is
@@ -805,18 +805,20 @@ def classify_wrong_screen_failure(image_path: str, step_description: str,
         banner, a blocked/failed transition). Replanning cannot fix a real bug; the test should fail
         FAST so Auto-Repair targets the root cause.
 
-    Ask Claude ONE strict question from the screenshot. Returns ("gap" | "defect", observation).
-    DEFAULT-SAFE: returns "gap" on any uncertainty or error, so the existing bridge-and-resume behaviour
-    is preserved and only a CONFIDENT defect verdict changes routing (no regression to working
-    recoveries). Generic + app-agnostic — no per-test wording. Vision is always Claude, so this needs no
-    multimodal gating. The deterministic, no-LLM alternatives (A/B) are documented in CLAUDE.md."""
+    Ask Claude ONE strict question from the screenshot. Returns ("gap" | "defect", confidence, observation)
+    where confidence is high|medium|low. DEFAULT-SAFE: returns ("gap", "high", …) on any error / no image,
+    so if the judge is unavailable the caller bridges exactly as before (no regression). The CALLER decides
+    how to use the confidence (see `verify_bridge_min_confidence`: only a sufficiently-confident "gap"
+    bridges; a low-confidence gap or any defect fails fast). Generic + app-agnostic — no per-test wording.
+    Vision is always Claude, so this needs no multimodal gating. Deterministic no-LLM alternatives (A/B)
+    are documented in CLAUDE.md."""
     import base64, json
     from langchain_core.messages import HumanMessage
     from vision_agent.llm import get_fast_llm, detect_image_media_type
     from vision_agent.storage import get_storage
 
     if not image_path:
-        return "gap", "no screenshot for defect judge"
+        return "gap", "high", "no screenshot for defect judge"
     try:
         image_bytes = get_storage().load(image_path)
         b64 = base64.standard_b64encode(image_bytes).decode()
@@ -837,7 +839,10 @@ def classify_wrong_screen_failure(image_path: str, step_description: str,
             "Be conservative: choose \"defect\" ONLY when you can SEE a refusal, error, popup or broken "
             "state. If the screen just looks like a normal, different page and you are unsure, choose "
             "\"gap\".\n"
-            'Return ONLY JSON: { "category": "defect"|"gap", "observation": "<one sentence: what the screen shows>" }'
+            "Also rate your CONFIDENCE in the verdict as \"high\", \"medium\" or \"low\" — high only when the "
+            "screenshot clearly settles it; low when it is ambiguous or you can barely tell.\n"
+            'Return ONLY JSON: { "category": "defect"|"gap", "confidence": "high"|"medium"|"low", '
+            '"observation": "<one sentence: what the screen shows>" }'
         )
         llm = get_fast_llm()
         msg = HumanMessage(content=[
@@ -852,10 +857,13 @@ def classify_wrong_screen_failure(image_path: str, step_description: str,
         cat = str(v.get("category", "gap")).strip().lower()
         if cat not in ("defect", "gap"):
             cat = "gap"
-        return cat, str(v.get("observation", "")).strip()
+        conf = str(v.get("confidence", "medium")).strip().lower()
+        if conf not in ("high", "medium", "low"):
+            conf = "medium"
+        return cat, conf, str(v.get("observation", "")).strip()
     except Exception as e:
         print(f"  [VALIDATE] defect judge error: {e} — treating as a recoverable gap (no regression).")
-        return "gap", f"defect judge error: {e}"
+        return "gap", "high", f"defect judge error: {e}"
 
 
 def _claude_vision_validate(image_path: str, description: str, screen_before: str) -> dict:
