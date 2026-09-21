@@ -621,6 +621,50 @@ def run_rca(failure: str, *, images=None, cancel_check=None, on_progress=None) -
             "ran": True, "provider": label}
 
 
+_FOCUS_HEAD_LINES = 14   # always keep a chunk's signature + opening lines for context
+
+
+def _focus_snippet(text: str, signals: set, cap: int) -> str:
+    """Truncate an over-long CODE chunk AROUND the lines most relevant to the failure — not just its head.
+
+    A big function (e.g. a ~180-line screen component) can hold the bug far below a flat head-cut, so the
+    model sees only the opening + the symptom and GUESSES (live root cause of the TC-RPS-003 mock-card miss:
+    the buggy `setMockMode(false)` at App.tsx:2484 sat inside a retrieved chunk but ~2 KB past the 4 KB cut).
+    Keep the head (signature/opening) PLUS a contiguous window centred on the highest-signal region so the
+    offending line survives. Generic + additive: a chunk that already fits, or whose tail carries no failure
+    signal, falls back to the plain head-cut (prior behaviour → no regression)."""
+    if len(text) <= cap:
+        return text
+    lines = text.split("\n")
+    head = "\n".join(lines[:_FOCUS_HEAD_LINES])
+    rest = lines[_FOCUS_HEAD_LINES:]
+    if not rest or not signals:
+        return text[:cap]
+    scores = [len(signals & _subtokens(ln)) for ln in rest]
+    if not any(scores):
+        return text[:cap]                          # nothing relevant in the tail → plain head-cut
+    budget = max(200, cap - len(head) - 40)
+    # Slide a contiguous line window (≤ budget chars) and keep the one with the MOST total signal — this
+    # captures a dense region (e.g. an element's render block) even when the actual buggy line inside it is
+    # itself low-signal, which a single-line centre would miss.
+    llen = [len(ln) + 1 for ln in rest]
+    pfx_len, pfx_score = [0], [0]
+    for l, s in zip(llen, scores):
+        pfx_len.append(pfx_len[-1] + l)
+        pfx_score.append(pfx_score[-1] + s)
+    best_lo, best_hi, best_sum, hi = 0, 1, -1, 0
+    for lo in range(len(rest)):
+        if hi < lo:
+            hi = lo
+        while hi < len(rest) and pfx_len[hi + 1] - pfx_len[lo] <= budget:
+            hi += 1
+        seg = pfx_score[hi] - pfx_score[lo]
+        if seg > best_sum:
+            best_sum, best_lo, best_hi = seg, lo, hi
+    elision = "\n        // … unchanged code omitted …\n" if best_lo > 0 else "\n"
+    return (head + elision + "\n".join(rest[best_lo:best_hi]))[:cap]
+
+
 def retrieve_context(failure: str, top_k: int = 8, rca_query: str = "") -> tuple[str, list[dict]]:
     """CODE retrieval for the code-fixing agent. Returns (prompt_text, structured_hits).
 
@@ -765,19 +809,34 @@ def retrieve_context(failure: str, top_k: int = 8, rca_query: str = "") -> tuple
     # single function; the previous 1800-char cut truncated a ~2.8 KB function BEFORE its buggy line
     # (the guard at offset ~1910), so the LLM saw the function's opening + the symptom and guessed. The
     # cap only guards against a pathologically large chunk.
-    _SNIPPET_PROMPT = 4000
+    # Per-chunk char cap for the PROMPT. Claude's window is ~200K tokens, so cap GENEROUSLY and send whole
+    # functions — a flat cut is what hid the buggy `setMockMode(false)` deep in a ~7.5 KB screen component
+    # (TC-RPS-003 mock-card miss). The LOCAL model has a tiny fixed window, so keep it tight there and rely on
+    # relevance-centred truncation to keep the offending region. (`_focus_snippet` is a no-op when the chunk
+    # fits, so a large cap for Claude simply sends the whole chunk.)
+    _SNIPPET_PROMPT = 4000 if settings.repair_llm_backend == "local" else 14000
     _SNIPPET_HIT    = 2500
+    # Signals used to CENTRE the truncation of an over-long CODE chunk on its relevant region (so a bug deep
+    # in a big function isn't cut off): the failure-point tokens + the interacted element ids. Lowercased
+    # sub-tokens, matching `_subtokens(line)` in `_focus_snippet`.
+    focus_signals = _signal_tokens(_failure_point_text(failure)) | _subtokens(_interaction_query(failure))
     hits: list[dict] = []
     blocks: list[str] = []
     for i, doc in enumerate(docs, start=1):
         meta = doc.metadata
         is_design = meta.get("type") == "design_document"
+        # Code chunks: relevance-centred truncation keeps the buggy line even when it sits deep in a large
+        # function. Design docs are prose (read top-down) → keep the plain head-cut.
+        snippet_prompt = (doc.page_content[:_SNIPPET_PROMPT] if is_design
+                          else _focus_snippet(doc.page_content, focus_signals, _SNIPPET_PROMPT))
+        snippet_hit = (doc.page_content[:_SNIPPET_HIT] if is_design
+                       else _focus_snippet(doc.page_content, focus_signals, _SNIPPET_HIT))
         hits.append({
             "file": meta.get("source", ""),
             "type": meta.get("type", ""),
             "start_line": meta.get("start_line"),
             "end_line": meta.get("end_line"),
-            "snippet": doc.page_content[:_SNIPPET_HIT],
+            "snippet": snippet_hit,
         })
         header = ("Context %d — DESIGN SPEC (authoritative: the code MUST conform to this; use it to "
                   "judge the correct behaviour)" % i) if is_design else f"Context {i}"
@@ -787,7 +846,7 @@ def retrieve_context(failure: str, top_k: int = 8, rca_query: str = "") -> tuple
             f"Type: {meta.get('type')}",
             f"Lines: {meta.get('start_line')} - {meta.get('end_line')}",
             "Snippet:",
-            doc.page_content[:_SNIPPET_PROMPT],
+            snippet_prompt,
         ]))
 
     # FIT THE LOCAL WINDOW. A local Ollama model has a fixed context window (repair_local_num_ctx); if the

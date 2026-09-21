@@ -586,6 +586,16 @@ Detailed history → [`docs/PROGRESS_LOG.md`](docs/PROGRESS_LOG.md). Design/depl
   is told not to fabricate when the context lacks the cause; (4) Studio Detailed-report gains an **Executive
   Summary** default view (charts + KPIs, links to technical sections). 5 new tests; 138 passed + same 8
   pre-existing failures; studio build clean. Detail → `docs/PROGRESS_LOG.md`.
+- **2026-09-21 (latest+) · relevance-centred snippet truncation — the retrieved bug must reach the model.**
+  A VM re-run proved the mock-card bug (`setMockMode(false)` at `App.tsx:2484`) was IN a retrieved chunk
+  (`PaymentScreen`, 2344–2527 ≈ 7.5 KB) but the flat `page_content[:4000]` prompt cut dropped it — so Claude
+  guessed (it even self-reported `confidence: low`). Two-part generic fix, no reindex: (1) the per-chunk
+  prompt cap is backend-aware — **Claude gets 14 KB/chunk (whole functions; its window is ~200K)**, local
+  keeps 4 KB; (2) `_focus_snippet` centres an over-cap CODE chunk on the densest failure/interaction-signal
+  window (sliding max-sum) so a deep, low-signal bug line survives even on the tight local budget. Design
+  docs keep the plain head-cut. No-op when a chunk fits or its tail has no signal (no regression).
+  **Index note:** a rebuild is still required after any branch switch (the index reflects BUILD-time code),
+  but it does NOT fix truncation — that was a prompt-render bug, not staleness.
 
 ### Never
 

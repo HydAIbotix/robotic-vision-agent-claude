@@ -241,3 +241,30 @@ def test_interaction_query_anchors_on_the_tapped_elements_generic():
     # Generic: a totally different app's element ids come through too, and no-element failures yield "".
     assert "settings_gear_icon" in _interaction_query("tap: settings_gear_icon @ (10,10) [FAILED HERE]")
     assert _interaction_query("verify: something happened [FAILED HERE] OBSERVED: nothing") == ""
+
+
+# ── Relevance-centred snippet truncation: a deep bug in a big function must survive the char cap ──
+
+def test_focus_snippet_keeps_a_deep_bug_line_that_a_head_cut_drops():
+    from repair_agent.repair_failed_test import _focus_snippet
+    # A big function whose actual bug (a low-signal line) sits far past a head-cut, inside the render block
+    # of the control the test interacted with. Head-padding is irrelevant filler; the relevant region is the
+    # 'mock card' block near the end.
+    filler = "\n".join(f"    const noise{i} = compute({i});" for i in range(400))   # ~far past 4 KB
+    buggy_block = (
+        "    // Use Mock Card button\n"
+        "    <button data-testid=\"continue-to-mock-card\" onClick={() => {\n"
+        "      setMockMode(false);\n"                      # the bug (should be true) — low signal itself
+        "    }}>Use Mock Card</button>\n"
+        "    <input data-testid=\"mock-card-number\" value={mockCardNumber} />\n"
+    )
+    chunk = "function PaymentScreen() {\n" + filler + "\n" + buggy_block + "}\n"
+    signals = {"mock", "card", "number", "use", "button"}
+    head_cut = chunk[:4000]
+    focused = _focus_snippet(chunk, signals, 4000)
+    assert "setMockMode(false)" not in head_cut          # the plain cut loses the bug
+    assert "setMockMode(false)" in focused               # relevance-centred keeps it
+    assert len(focused) <= 4000
+    # Fits-under-cap and no-signal cases are strict no-ops (no regression).
+    assert _focus_snippet("small chunk", signals, 4000) == "small chunk"
+    assert _focus_snippet(chunk, set(), 4000) == chunk[:4000]

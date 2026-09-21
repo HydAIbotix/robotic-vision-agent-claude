@@ -1766,3 +1766,47 @@ Resolution Agent, Patch Agent, Code Repair Agent) — pending a pick before any 
 fixture failures. Studio `npm run build` clean. Everything is additive/default-safe: the RCA gate stays
 conservative (code_bug/unknown proceed), the interaction lane is a no-op without element ids, the diagnose
 extra fields are optional, and the Executive Summary is a new view that leaves the technical view intact.
+
+---
+
+## 2026-09-21 (latest+) — relevance-centred snippet truncation (the retrieved bug must reach the model)
+
+Follow-up after a VM re-run of TC-RPS-003 (with the latest backend deployed) still mis-diagnosed the second
+planted bug — the **disabled mock-card input**: `src/App.tsx:2484` calls `setMockMode(false)` where it must
+be `setMockMode(true)`, so tapping "Use Mock Card" never reveals the mock-card entry.
+
+### The real cause was NOT the index — it was prompt truncation
+The buggy line WAS inside a retrieved chunk (`PaymentScreen`, lines 2344–2527 ≈ 7.5 KB, retrieved as
+Context 4), but the diagnose prompt rendered each chunk as `page_content[:4000]` — a flat head-cut that
+stops ~2 KB *before* line 2484. So the model saw the function's opening + the symptom and guessed; it even
+self-reported `confidence: low` and wrote "the most defensible root cause **in the retrieved context**"
+(the anti-fabrication instruction working). Rebuilding the index would not have helped — the offending line
+never reached the model.
+
+### Fix (generic, no reindex)
+1. **Backend-aware per-chunk cap.** Claude's window is ~200K tokens, so there is no reason to cap chunks at
+   4 KB for it — that cap only protects the LOCAL model. `_SNIPPET_PROMPT` is now `4000` for
+   `repair_llm_backend == "local"` and `14000` otherwise, so Claude receives WHOLE functions and a bug
+   anywhere in a chunk is visible. (The downstream local-window fit-trim that drops whole blocks is unchanged.)
+2. **`_focus_snippet` — relevance-centred truncation.** When a CODE chunk still exceeds the cap (the local
+   path, or a pathologically large function), keep the head (signature/opening) PLUS the contiguous line
+   window with the MOST failure/interaction signal (a sliding max-sum over `_subtokens` line scores, using
+   `_signal_tokens(_failure_point_text) ∪ _subtokens(_interaction_query)`). A sliding *window* (not a single
+   centre line) captures a dense region — e.g. an element's whole render block — even when the actual buggy
+   line inside it is itself low-signal (`setMockMode(false)` scores ~1). Design docs keep the plain head-cut
+   (prose is read top-down). Strict no-op when a chunk fits or its tail carries no signal → no regression.
+
+Verified on the real on-disk `PaymentScreen` chunk: the plain 4 KB cut drops `setMockMode(false)`; the
+14 KB Claude cap sends the whole chunk; the 4 KB local focus keeps the mock-card region including the bug.
+
+### Also confirmed / advised
+- **Index rebuild is still required after a branch switch** (the index reflects code at BUILD time). The
+  user had switched the POS working tree from the repair branch back to `expanded-cloud-agnostic` without
+  rebuilding — good hygiene to rebuild, but it was NOT the cause of this miss (truncation was).
+- The diagnose model now emits `confidence`/`root_cause`; a `low` confidence with the guard is the tell that
+  the context lacked the cause — surfaced in the Executive Summary confidence rings.
+
+### No-regression
+`pytest tests/` = 139 passed (1 new: `test_focus_snippet_keeps_a_deep_bug_line_that_a_head_cut_drops`) +
+same 8 pre-existing fixture failures. Additive/default-safe: only over-cap code chunks change, and only by
+KEEPING more of the relevant region.
