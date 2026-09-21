@@ -388,6 +388,17 @@ class Settings(BaseSettings):
     #      as a DEFECT and fail fast, rather than bridging. Runs BEFORE the judge (cheap + authoritative — the
     #      screen factually didn't change). Set False to disable.
     verify_unresponsive_interaction_defect: bool = True
+    # ── HUMAN-IN-THE-LOOP REVIEW (2026-09-21) — optional Approve/Reject gates at key stages ──────────
+    # All default OFF: when off, every flow runs EXACTLY as before (zero behaviour change → no regression).
+    # When on, the Studio shows Approve/Reject at that stage; a Reject captures a free-text reason that is
+    # fed back to improve the NEXT attempt (and, for RCA, can retry in place). Toggle from the Studio
+    # Configuration page (persisted to .env). See CLAUDE.md "Human review".
+    human_review_explorer: bool = False    # gate after App Explorer finishes (blocks Test Plan until approved)
+    human_review_test_plan: bool = False   # gate after a Test Plan is generated (reason feeds a Regenerate)
+    human_review_rca: bool = False         # gate after the RCA verdict, BEFORE the code-fixing agent runs
+    # A rejected exploration's reason, passed (env EXPLORE_REVIEW_FEEDBACK) into the NEXT explore subprocess
+    # and folded into the explorer's action-suggestion prompt so it improves the output. Blank = no effect.
+    explore_review_feedback: str = ""
     # Save an annotated BEFORE screenshot (the last camera frame with a crosshair at the exact camera
     # pixel the arm will touch) and the AFTER frame (the /screen/click response image) for every real
     # tap, into the run's per-run screenshots folder with identifiable names (before_<cmd>_at_<u>-<v>.png

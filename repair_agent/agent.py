@@ -32,7 +32,8 @@ from repair_agent.nodes.prepare_pr import prepare_pr_node
 
 def _route_after_rca(state: RepairAgentState) -> str:
     # A high-confidence spec_bug / test_invalid halts before the fixer — nothing gets patched.
-    return "end" if state.get("rca_stop") else "retrieve"
+    # `awaiting_review` (opt-in human_review_rca) also halts here: pause for Approve/Reject before the fixer.
+    return "end" if (state.get("rca_stop") or state.get("awaiting_review")) else "retrieve"
 
 
 def _route_after_diagnose(state: RepairAgentState) -> str:

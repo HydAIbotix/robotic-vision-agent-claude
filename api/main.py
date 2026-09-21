@@ -475,23 +475,17 @@ def _run_repair_job(repair_id: str, req: RepairRequest):
         _repair_cancel[repair_id] = cancel_event
     _repair_set(repair_id, status="running")
     try:
+        branch_suffix = repair_id.split("-")[-1]
         result = run_repair(
             req.failure, test_id=req.test_id, apply=req.apply, auto_pr=auto_pr,
-            branch_suffix=repair_id.split("-")[-1],
+            branch_suffix=branch_suffix,
             progress_cb=lambda u: _repair_stage(repair_id, u),
             cancel_event=cancel_event,
         )
-        with _repair_lock:
-            job = _repair_jobs.setdefault(repair_id, {})
-            job["result"] = result
-            job["status"] = ("cancelled" if result.get("cancelled")
-                             else "rca_stopped" if result.get("rca_stopped")
-                             else "succeeded" if result.get("success") else "completed")
-            if result.get("rca"):
-                job["rca"] = result["rca"]
-            if result.get("error"):
-                job["error"] = result["error"]
-            job["updated_at"] = datetime.utcnow().isoformat()
+        _store_repair_result(repair_id, req.run_id or "", req.test_id, result, {
+            "failure": req.failure, "test_id": req.test_id, "images": None, "run_id": req.run_id or "",
+            "apply": req.apply, "auto_pr": auto_pr, "branch_suffix": branch_suffix,
+        })
     except Exception as e:
         print(f"  [REPAIR] job {repair_id} failed: {e}")
         _repair_fail_running_stages(repair_id, str(e))
@@ -663,6 +657,64 @@ def cancel_repair(repair_id: str):
     ev.set()
     _repair_set(repair_id, status="cancelling")
     return {"status": "cancelling", "cancelling": True}
+
+
+class RcaReviewRequest(BaseModel):
+    decision: str            # "approve" | "reject"
+    reason: str = ""         # required-ish for reject: fed back into a retry of the RCA agent
+
+
+@app.post("/api/repair/{repair_id}/rca-review")
+def review_repair_rca(repair_id: str, body: RcaReviewRequest):
+    """Human decision on a repair paused at RCA (human_review_rca). APPROVE resumes the code-fixing agent
+    with the reviewed verdict; REJECT re-runs the RCA agent with the reviewer's reason and pauses again for
+    review (the code-fixing agent is NOT called until an approve). Runs in a background thread and streams
+    into the SAME job, so the dashboard just keeps polling."""
+    decision = (body.decision or "").strip().lower()
+    if decision not in ("approve", "reject"):
+        raise HTTPException(status_code=400, detail="decision must be 'approve' or 'reject'.")
+    with _repair_lock:
+        job = _repair_jobs.get(repair_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Unknown repair job.")
+    if job.get("status") != "awaiting_rca_review":
+        raise HTTPException(status_code=400, detail="This repair is not awaiting RCA review.")
+    resume = dict(job.get("_resume") or {})
+    if not resume.get("failure"):
+        raise HTTPException(status_code=400, detail="Missing resume context for this repair.")
+    rca_full = job.get("rca_full") or {}
+    if decision == "reject" and not (body.reason or "").strip():
+        raise HTTPException(status_code=400, detail="A reason is required to reject the root cause.")
+
+    def _resume_worker():
+        run_id = resume.get("run_id", "")
+        test_id = resume.get("test_id", "")
+        cancel_event = threading.Event()
+        with _repair_lock:
+            _repair_cancel[repair_id] = cancel_event
+        _repair_set(repair_id, status="running")
+        try:
+            from repair_agent.repair_failed_test import run_repair
+            result = run_repair(
+                resume["failure"], test_id=test_id,
+                apply=resume.get("apply", True), auto_pr=resume.get("auto_pr", False),
+                branch_suffix=resume.get("branch_suffix", ""),
+                progress_cb=lambda u: _repair_stage(repair_id, u),
+                cancel_event=cancel_event, images=resume.get("images"),
+                rca_override=(rca_full if decision == "approve" else None),
+                review_feedback=("" if decision == "approve" else body.reason),
+            )
+            _store_repair_result(repair_id, run_id, test_id, result, resume)
+        except Exception as e:
+            print(f"  [REPAIR] RCA-review resume error: {e}")
+            _repair_fail_running_stages(repair_id, str(e))
+            _repair_set(repair_id, status="failed", error=str(e))
+        finally:
+            with _repair_lock:
+                _repair_cancel.pop(repair_id, None)
+
+    threading.Thread(target=_resume_worker, daemon=True).start()
+    return {"status": "resuming" if decision == "approve" else "re-running RCA"}
 
 
 # ── Test Cases ────────────────────────────────────────────────────────────────
@@ -854,9 +906,40 @@ def get_config(db: Session = Depends(get_db)):
         "repair_llm":       {"backend": settings.repair_llm_backend,          # claude | local
                              "local_model": settings.repair_local_model,
                              "local_base_url": settings.repair_local_base_url},
+        "human_review":     {"explorer": settings.human_review_explorer,      # optional Approve/Reject gates
+                             "test_plan": settings.human_review_test_plan,
+                             "rca": settings.human_review_rca},
         "kiosks":           [_kiosk_summary(k) for k in kiosks],
         "devices":          [_device_summary(d) for d in devices],
     }
+
+
+class HumanReviewRequest(BaseModel):
+    explorer: Optional[bool] = None
+    test_plan: Optional[bool] = None
+    rca: Optional[bool] = None
+
+
+@app.patch("/api/config/human-review")
+def set_human_review(req: HumanReviewRequest):
+    """Toggle the optional human-in-the-loop Approve/Reject gates (App Explorer / Test Plan / RCA). Each is
+    independent and defaults OFF (off ⇒ the flow runs exactly as before). Applied LIVE (the flows read
+    settings at call time) and persisted to .env so it survives restarts. Only the fields provided change."""
+    env: dict[str, str] = {}
+    if req.explorer is not None:
+        settings.human_review_explorer = bool(req.explorer)
+        env["HUMAN_REVIEW_EXPLORER"] = str(settings.human_review_explorer).lower()
+    if req.test_plan is not None:
+        settings.human_review_test_plan = bool(req.test_plan)
+        env["HUMAN_REVIEW_TEST_PLAN"] = str(settings.human_review_test_plan).lower()
+    if req.rca is not None:
+        settings.human_review_rca = bool(req.rca)
+        env["HUMAN_REVIEW_RCA"] = str(settings.human_review_rca).lower()
+    if env:
+        _persist_env(env)
+    return {"status": "ok", "human_review": {"explorer": settings.human_review_explorer,
+                                             "test_plan": settings.human_review_test_plan,
+                                             "rca": settings.human_review_rca}}
 
 
 class CardServiceRequest(BaseModel):
@@ -2376,6 +2459,7 @@ class TcPlanRequest(BaseModel):
     steps_raw: str
     expected_results_raw: str = ""
     force: bool = False   # True → regenerate even if cached
+    review_feedback: str = ""   # human reject reason (human_review_test_plan) → folded into the regenerate prompt
 
 
 @app.post("/api/tc-plan")
@@ -2436,6 +2520,10 @@ def get_tc_plan(req: TcPlanRequest, db: Session = Depends(get_db)):
             expected_results_raw=req.expected_results_raw,
             element_inventory=inventory,
         )
+        # Human-review reject reason (human_review_test_plan) → steer the regeneration.
+        if (req.review_feedback or "").strip():
+            prompt += ("\n\nHUMAN REVIEWER FEEDBACK on your PREVIOUS plan for this test — address it and "
+                       "improve the plan accordingly:\n" + req.review_feedback.strip())
         llm = get_llm()
         raw = llm.invoke([HumanMessage(content=prompt)]).content.strip()
         # Strip markdown fences if Claude wraps the JSON
@@ -2577,6 +2665,7 @@ def submit_verdict(run_id: str, body: VerdictOverride, db: Session = Depends(get
 class ExploreRequest(BaseModel):
     kiosk_id: str = "K-01"
     kiosk_url: str = "http://localhost:5173"
+    review_feedback: str = ""   # human reject reason (human_review_explorer) → folded into this exploration
 
 
 # In-memory job tracker: explore_id -> {status, message}
@@ -2621,7 +2710,7 @@ def start_explore(req: ExploreRequest, db: Session = Depends(get_db)):
     _explore_map_path = tenant_paths.app_map_path()
     t = threading.Thread(
         target=_run_explorer,
-        args=(explore_id, req.kiosk_url, req.kiosk_id, _explore_map_path),
+        args=(explore_id, req.kiosk_url, req.kiosk_id, _explore_map_path, req.review_feedback or ""),
         daemon=True,
     )
     t.start()
@@ -3469,6 +3558,42 @@ def _failure_text_for(tr: dict, run_id: str = "") -> str:
     return text
 
 
+def _store_repair_result(repair_id: str, run_id: str, test_id: str, result: dict, resume_ctx: dict):
+    """Fold a run_repair() result into the in-memory job + signal the UI. Handles the human-review PAUSE:
+    when the RCA verdict is awaiting Approve/Reject the job parks in 'awaiting_rca_review' with the resume
+    context, and the code-fixing agent is NOT run until a human approves (see the /rca-review endpoint)."""
+    awaiting = bool(result.get("awaiting_rca_review"))
+    with _repair_lock:
+        job = _repair_jobs.setdefault(repair_id, {})
+        job["result"] = result
+        if awaiting:
+            job["status"]   = "awaiting_rca_review"
+            job["rca"]      = result.get("rca") or job.get("rca")
+            job["rca_full"] = result.get("rca_full")
+            job["_resume"]  = resume_ctx    # failure/test_id/images/run_id/apply/auto_pr/branch_suffix
+        else:
+            job["status"] = ("cancelled" if result.get("cancelled")
+                             else "rca_stopped" if result.get("rca_stopped")
+                             else "succeeded" if result.get("success") else "completed")
+            if result.get("rca"):
+                job["rca"] = result["rca"]
+            if result.get("error"):
+                job["error"] = result["error"]
+            job.pop("_resume", None)
+        job["updated_at"] = datetime.utcnow().isoformat()
+    if not run_id:
+        return
+    if awaiting:
+        _broadcast(run_id, {"event": "repair_awaiting_review", "run_id": run_id,
+                            "repair_id": repair_id, "test_id": test_id})
+        return
+    pr = (result.get("stages") or {}).get("pr", {}) or {}
+    pr_url = (pr.get("opened") or {}).get("url", "")
+    _broadcast(run_id, {"event": "repair_done", "run_id": run_id, "repair_id": repair_id,
+                        "test_id": test_id, "success": bool(result.get("success")),
+                        "cancelled": bool(result.get("cancelled")), "pr_url": pr_url})
+
+
 def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list):
     """Background thread: auto-run the Auto-Repair agent for the FIRST failed test, streaming its
     stages into an in-memory repair job and signalling the UI (repair_started/repair_done on the
@@ -3495,31 +3620,18 @@ def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list):
         _repair_cancel[repair_id] = cancel_event
     try:
         from repair_agent.repair_failed_test import run_repair
+        branch_suffix = repair_id.split("-")[-1]
         result = run_repair(
             failure, test_id=test_id, apply=True, auto_pr=settings.repair_auto_pr,
-            branch_suffix=repair_id.split("-")[-1],
+            branch_suffix=branch_suffix,
             progress_cb=lambda u: _repair_stage(repair_id, u),
             cancel_event=cancel_event,
             images=images,
         )
-        with _repair_lock:
-            job = _repair_jobs.setdefault(repair_id, {})
-            job["result"] = result
-            # The RCA agent halting on a spec/test bug is a distinct, legitimate outcome — not a plain
-            # failure. Surface it as its own status so the UI can explain WHY no code was patched.
-            job["status"] = ("cancelled" if result.get("cancelled")
-                             else "rca_stopped" if result.get("rca_stopped")
-                             else "succeeded" if result.get("success") else "completed")
-            if result.get("rca"):
-                job["rca"] = result["rca"]
-            if result.get("error"):
-                job["error"] = result["error"]
-            job["updated_at"] = datetime.utcnow().isoformat()
-        pr = (result.get("stages") or {}).get("pr", {}) or {}
-        pr_url = (pr.get("opened") or {}).get("url", "")
-        _broadcast(run_id, {"event": "repair_done", "run_id": run_id, "repair_id": repair_id,
-                            "test_id": test_id, "success": bool(result.get("success")),
-                            "cancelled": bool(result.get("cancelled")), "pr_url": pr_url})
+        _store_repair_result(repair_id, run_id, test_id, result, {
+            "failure": failure, "test_id": test_id, "images": images, "run_id": run_id,
+            "apply": True, "auto_pr": settings.repair_auto_pr, "branch_suffix": branch_suffix,
+        })
     except Exception as e:
         print(f"  [REPAIR] Auto-repair error: {e}")
         _repair_fail_running_stages(repair_id, str(e))
@@ -3531,7 +3643,7 @@ def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list):
             _repair_cancel.pop(repair_id, None)
 
 
-def _run_explorer(explore_id: str, kiosk_url: str, kiosk_id: str = "", app_map_path: str = ""):
+def _run_explorer(explore_id: str, kiosk_url: str, kiosk_id: str = "", app_map_path: str = "", review_feedback: str = ""):
     """Background thread: run the app explorer and record success/failure.
 
     app_map_path is the tenant-scoped destination resolved in the request context; it is passed to
@@ -3556,6 +3668,8 @@ def _run_explorer(explore_id: str, kiosk_url: str, kiosk_id: str = "", app_map_p
             env["EXPLORE_APP_ID"] = kiosk_id      # tag + merge this app's screens (multi-app)
         if app_map_path:
             env["APP_MAP_PATH"] = app_map_path    # tenant-scoped destination (== MVP path when single-tenant)
+        if (review_feedback or "").strip():
+            env["EXPLORE_REVIEW_FEEDBACK"] = review_feedback.strip()   # human-review reject reason → explorer prompt
         result = subprocess.run(
             [sys.executable, "run_explorer.py"],
             stderr=subprocess.PIPE,

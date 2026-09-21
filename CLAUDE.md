@@ -629,6 +629,35 @@ Detailed history → [`docs/PROGRESS_LOG.md`](docs/PROGRESS_LOG.md). Design/depl
   **Index note:** a rebuild is still required after any branch switch (the index reflects BUILD-time code),
   but it does NOT fix truncation — that was a prompt-render bug, not staleness.
 
+### Human review, plan thumbnails & report legibility
+
+- **⚠️ HUMAN-IN-THE-LOOP review gates (2026-09-21) — 3 optional Approve/Reject checkpoints, ALL default OFF.**
+  Toggled from the Studio **Configuration → Human Review** section (`PATCH /api/config/human-review`,
+  persisted to `.env`; settings `human_review_explorer/test_plan/rca`). OFF ⇒ every flow runs byte-for-byte
+  as before (no regression). (a) **App Explorer** (`human_review_explorer`): after an explore finishes the
+  App Explorer page shows Approve/Reject; **Test Plan generation is blocked** (Studio localStorage
+  `explorer_approved`) until approved; a Reject reason is stored per-app and passed to the NEXT explore
+  (`/explore` `review_feedback` → env `EXPLORE_REVIEW_FEEDBACK` → `settings.explore_review_feedback` →
+  appended to the explorer's `SUGGEST_EXPLORABLE_ACTIONS` prompt). (b) **Test Plan**
+  (`human_review_test_plan`): Approve/Reject under a generated plan; a Reject reason is folded into the
+  **Regenerate** (`/tc-plan` `review_feedback` appended to the planning prompt, `force=true`). (c) **RCA**
+  (`human_review_rca`): the repair pipeline PAUSES after the RCA verdict, BEFORE the code-fixing agent —
+  the RCA node sets `awaiting_review` → `_route_after_rca` ends → job status `awaiting_rca_review`; the
+  Studio shows the verdict + Approve/Reject; **Approve** resumes via `POST /api/repair/{id}/rca-review`
+  (re-invokes `run_repair` with `rca_override` = the reviewed verdict, so RCA is not re-run and the fixer
+  runs); **Reject** re-runs RCA with the reason folded in (`review_feedback`) and pauses again — the
+  code-fixing agent is never called until an Approve. Resume context lives on the job (`_resume`);
+  `_store_repair_result` centralises the fold-in (auto + manual paths). Wiring never fires unless the flag
+  is on, so Claude+Chroma is unchanged by default.
+- **Test-plan step thumbnails (2026-09-21).** In the Studio Test Plan, a click/type step
+  (`isInteractionStep`) shows a thumbnail of the ANNOTATED exploration screenshot for its `screen_id`
+  (newest `screenshots/annotated/<screen>_<ts>.png`, served by `GET /api/screenshots/annotated/{file}`,
+  URL via `annotatedScreenshotUrl`); click → lightbox. Pure add — no new backend data.
+- **Report box legibility.** A native `<button>`/`<input>` RESETS text colour, so a stepper/label inside one
+  is invisible on the dark theme unless it sets `color` explicitly (this bit the Executive-Summary pipeline
+  stepper). Report code/output boxes use a legible `MONO` stack + explicit `color: var(--text)`; the report
+  window container also sets `color`. Rebuild the **studio** container to deploy a studio change.
+
 ### Never
 
 - **Never hardcode credentials anywhere** (a literal `user@example.com` in a prompt once caused a login

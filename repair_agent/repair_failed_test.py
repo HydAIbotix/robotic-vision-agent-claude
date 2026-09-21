@@ -1782,7 +1782,8 @@ def delete_pull_request(branch: str) -> dict:
 
 def run_repair(failure: str, test_id: str = "", *, apply: bool = True, auto_pr: bool = False,
                branch_suffix: str = "", progress_cb: Optional[ProgressCb] = None,
-               cancel_event=None, images: Optional[list] = None) -> dict:
+               cancel_event=None, images: Optional[list] = None,
+               rca_override: Optional[dict] = None, review_feedback: str = "") -> dict:
     """Drive the Auto-Repair LangGraph (retrieve → diagnose → apply → test → build → pr-prep).
 
     Thin wrapper over the compiled StateGraph in repair_agent/agent.py: it registers the progress
@@ -1805,6 +1806,7 @@ def run_repair(failure: str, test_id: str = "", *, apply: bool = True, auto_pr: 
             "repair_id": rid, "failure": failure, "test_id": test_id,
             "apply": apply, "auto_pr": auto_pr, "branch_suffix": branch_suffix,
             "images": images or [],
+            "rca_override": rca_override or {}, "review_feedback": review_feedback or "",
             "stages": {},
         })
     except RepairCancelled:
@@ -1830,6 +1832,11 @@ def run_repair(failure: str, test_id: str = "", *, apply: bool = True, auto_pr: 
         result["rca"] = {k: rca.get(k) for k in ("verdict", "confidence", "rationale", "suspect", "stop")}
     if final.get("rca_stop"):
         result["rca_stopped"] = True
+    # Paused for human review of the RCA verdict (human_review_rca). Carry the FULL rca dict so an
+    # Approve can resume with it as rca_override without re-running RCA.
+    if final.get("awaiting_review"):
+        result["awaiting_rca_review"] = True
+        result["rca_full"] = rca
     if final.get("error"):
         result["error"] = final["error"]
     return result

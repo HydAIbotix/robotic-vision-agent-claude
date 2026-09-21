@@ -28,14 +28,36 @@ def rca_node(state: RepairAgentState) -> dict:
         stages = {**state.get("stages", {}), "rca": {"status": "done", "verdict": "skipped"}}
         return {"rca": {"ran": False, "verdict": "skipped"}, "rca_query": "", "rca_stop": False, "stages": stages}
 
+    # HUMAN-APPROVED resume: a prior RCA verdict was approved by a human → use it verbatim and proceed to the
+    # code-fixing agent (do not re-run RCA). This is what a "resume from review" invocation carries.
+    override = state.get("rca_override") or {}
+    if override.get("ran"):
+        stages = {**state.get("stages", {}), "rca": {
+            "status": "done", "verdict": override.get("verdict"), "confidence": override.get("confidence"),
+            "rationale": override.get("rationale"), "suspect": override.get("suspect"),
+            "stop": False, "hits": override.get("hits"), "tool": diagnose_tool_label(), "approved": True,
+        }}
+        emit(rid, "rca", "done", verdict=override.get("verdict"), confidence=override.get("confidence"),
+             rationale=override.get("rationale"), suspect=override.get("suspect"), stop=False,
+             hits=override.get("hits"), approved=True, note="Human-approved root cause — proceeding to the code-fixing agent.")
+        return {"rca": override, "rca_query": override.get("rca_query", ""), "rca_stop": False,
+                "awaiting_review": False, "stages": stages}
+
     tool = diagnose_tool_label()
     emit(rid, "rca", "running", tool=tool, note="RCA agent reading design docs + test case…")
 
     def _progress(label, elapsed, budget):
         emit(rid, "rca", "running", tool=tool, note=f"RCA agent analysing… {elapsed}s / {budget}s")
 
+    # A human reject reason (from a prior review) is folded into the failure so RCA can reconsider in place.
+    failure = state["failure"]
+    feedback = (state.get("review_feedback") or "").strip()
+    if feedback:
+        failure = (f"{failure}\n\nHUMAN REVIEWER FEEDBACK on your previous root-cause verdict (address it and "
+                   f"reconsider): {feedback}")
+
     rca = run_rca(
-        state["failure"],
+        failure,
         images=state.get("images"),
         cancel_check=lambda: canceller.is_cancelled(rid),
         on_progress=_progress,
@@ -67,4 +89,13 @@ def rca_node(state: RepairAgentState) -> dict:
         out["success"] = False
         out["error"] = (f"RCA agent halted the repair: {rca.get('verdict')} "
                         f"({rca.get('confidence')} confidence). {rca.get('rationale', '')}").strip()
+    elif settings.human_review_rca:
+        # HUMAN REVIEW gate (opt-in): a non-stopping verdict PAUSES here for Approve/Reject — the
+        # code-fixing agent is NOT called until a human approves. `_route_after_rca` sends this to 'end';
+        # the API marks the job 'awaiting_rca_review' and a resume re-enters with rca_override (approve) or
+        # review_feedback (reject → retry RCA). Default OFF, so normally the pipeline flows straight through.
+        out["awaiting_review"] = True
+        emit(rid, "rca", "warn", tool=tool, verdict=rca.get("verdict"), confidence=rca.get("confidence"),
+             rationale=rca.get("rationale"), suspect=rca.get("suspect"), stop=False, hits=rca.get("hits"),
+             note="Awaiting human review of the root cause before the code-fixing agent runs.")
     return out

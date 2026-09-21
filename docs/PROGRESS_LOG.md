@@ -1908,3 +1908,44 @@ a backend-only `docker compose up -d --build app` does not rebuild the studio co
 ### No-regression
 `pytest tests/` = 141 passed + same 8 pre-existing fixture failures; studio build clean. Fix A only enriches
 the observation string (additive); Fix B/C are display-only.
+
+---
+
+## 2026-09-21 (human review + plan thumbnails + report legibility)
+
+### Report font (the recurring "invisible text")
+The Executive-Summary pipeline stepper labels were dark-on-dark: they live inside native `<button>` elements,
+which RESET text colour to a system default (so a window-level `color` can't reach them). Fixed by setting
+`color: var(--text)` on the stepper button + label (and, defensively, on the report window container). All
+code/output boxes already use the legible `MONO` stack + explicit colour.
+
+### Task 1 — Human-in-the-loop review gates (3 stages, all default OFF)
+New `Configuration → Human Review` section with three independent toggles
+(`PATCH /api/config/human-review`, persisted; `settings.human_review_explorer/test_plan/rca`, default False
+so OFF ⇒ no behaviour change ⇒ no regression):
+- **App Explorer** — after an explore finishes, the App Explorer page shows Approve/Reject. **Test Plan
+  generation is blocked** (Studio `localStorage.explorer_approved`) until approved. A Reject reason is stored
+  per-app and passed to the NEXT explore: `/explore` `review_feedback` → env `EXPLORE_REVIEW_FEEDBACK` →
+  `settings.explore_review_feedback` → appended to `SUGGEST_EXPLORABLE_ACTIONS` in `explore_screen.py`.
+- **Test Plan** — Approve/Reject under a generated plan; the Reject reason is folded into a **Regenerate**
+  (`/tc-plan` `review_feedback` appended to the planning prompt with `force=true`).
+- **RCA** — the repair pipeline PAUSES after the RCA verdict, BEFORE the code-fixing agent. Mechanism:
+  `rca_node` sets `awaiting_review` when `human_review_rca` is on and the verdict doesn't already stop →
+  `_route_after_rca` routes to END → `run_repair` surfaces `awaiting_rca_review` + the full rca →
+  `_store_repair_result` parks the job as `awaiting_rca_review` with a `_resume` context. The Studio shows the
+  verdict + Approve/Reject (`RcaReviewPanel`). **Approve** → `POST /api/repair/{id}/rca-review` re-invokes
+  `run_repair(rca_override=verdict)` in a thread streaming into the SAME job (RCA not re-run; the fixer runs).
+  **Reject** → re-invokes with `review_feedback=reason` (RCA reconsiders with the feedback and pauses again);
+  the code-fixing agent is never called until an Approve. New graph state: `rca_override`, `review_feedback`,
+  `awaiting_review`. Applies to both the auto and manual repair paths.
+
+### Task 2 — Test-plan step thumbnails
+Each click/type plan step (`isInteractionStep`) now shows a thumbnail of the ANNOTATED exploration screenshot
+for its `screen_id` (newest `screenshots/annotated/<screen>_<ts>.png`); click opens a lightbox. Uses the
+existing `GET /api/screenshots/annotated/{file}` + a new `annotatedScreenshotUrl` client helper — no new
+backend data (the explorer already produced these labelled frames, and the plan carries `screen_id`/coords).
+
+### No-regression
+Every gate is config-gated and default OFF; the RCA pause never triggers unless `human_review_rca` is on, so
+the default Claude+Chroma repair runs exactly as before. `pytest tests/` = 141 passed + same 8 pre-existing
+fixture failures; studio `npm run build` clean; `api.main` imports clean; repair graph compiles.

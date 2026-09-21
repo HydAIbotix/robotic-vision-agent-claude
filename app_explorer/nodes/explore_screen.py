@@ -693,6 +693,13 @@ def explore_screen(state: ExplorerState) -> dict:
         invalid_password=invalid.get("password", "WrongPass!"),
     )
 
+    # Human-review reject feedback (human_review_explorer) → steer WHICH actions get explored next time.
+    from vision_agent.config import settings as _settings
+    _fb = (getattr(_settings, "explore_review_feedback", "") or "").strip()
+    if _fb:
+        prompt += ("\n\nHUMAN REVIEWER FEEDBACK on the PREVIOUS exploration of this app — take it into "
+                   "account when choosing what to explore and how to describe elements:\n" + _fb)
+
     data = invoke_json(get_explorer_llm(), [HumanMessage(content=prompt)],
                        default={"explorable_actions": []}, label="suggest_actions")
 

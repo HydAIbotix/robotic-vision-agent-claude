@@ -21,6 +21,10 @@ class RepairAgentState(TypedDict, total=False):
     rca: dict             # {verdict, confidence, rationale, suspect, search_terms, stop, ran, provider, hits}
     rca_query: str        # the RCA agent's localisation search terms → seeds the code-fix retrieval lane
     rca_stop: bool        # True → a high-confidence spec_bug / test_invalid: STOP, do not patch code
+    # ── optional HUMAN-IN-THE-LOOP review of the RCA verdict (human_review_rca) ──
+    rca_override: dict     # a human-APPROVED rca verdict → skip re-running RCA and proceed to the fixer
+    review_feedback: str   # a human reject reason, folded into the RCA prompt on a retry
+    awaiting_review: bool  # True → RCA produced a verdict and is PAUSED for human Approve/Reject (no fixer yet)
 
     # ── accumulated results ──
     context: str          # retrieved code context rendered for the LLM prompt
