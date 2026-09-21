@@ -1063,7 +1063,13 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                                           f"navigation gap (< required {settings.verify_bridge_min_confidence}) "
                                           f"→ not masking a possible defect")
                 if _verify_defect:
-                    observation = observation or _defect_reason or f"App on {actual!r} (a genuine defect), not {expected!r}."
+                    # PREPEND the defect reason to the observation (don't drop it): the bare "wrong screen:
+                    # expected X got Y" is what misled the RCA agent (it read the design doc and called the
+                    # TEST invalid). The unresponsive-interaction / judge reason ("the add-to-cart interaction
+                    # did not advance — an unresponsive/blocked control") is the real symptom the RCA + fixer
+                    # need to see, so it must reach the failure text, not just the console.
+                    _base_obs = observation or f"App on {actual!r}, not {expected!r}."
+                    observation = f"{_defect_reason}. {_base_obs}".strip() if _defect_reason else _base_obs
                     print(f"    {i:>2}. verify  wrong screen treated as a DEFECT — {_defect_reason} → failing "
                           f"fast (no Tier-3 bridge) so Auto-Repair targets the real bug")
                     if run_id:

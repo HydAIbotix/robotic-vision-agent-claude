@@ -474,6 +474,18 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   (docs/code/screenshots), root-cause + fix **confidence rings**, and the fix at a glance — every chart
   links back to its **Technical details** section. Toggle switches views. Dependency-free inline SVG/CSS
   (no chart lib). "Code-Fixing Agent" naming is under review (alternatives proposed).
+  - **Root-cause tile reflects the VERIFIED OUTCOME, not a non-stopping advisory (2026-09-21).** An RCA
+    verdict is only advisory when it did NOT stop the pipeline (medium/low confidence). If a fix was applied
+    AND the build passed AND RCA did not stop (`patchVerified`), the ROOT CAUSE tile shows **Code bug** (+
+    the diagnose `root_cause`), with a muted note recording RCA's initial read — so the headline never
+    contradicts "Bug fixed & verified" (observed: RCA said `test_invalid` medium → proceeded → code fixed,
+    but the tile wrongly showed "Invalid test case"). The technical RCA section still shows RCA's actual
+    verdict. Report window sets an explicit `color: var(--text)` so all box text is legible (rebuild the
+    STUDIO container to deploy — a backend-only `up -d --build app` doesn't).
+  - **⚠️ A fail-fast defect's reason must reach the failure text.** `run_vision_step` PREPENDS the defect
+    reason (unresponsive-interaction / judge) to the verify observation instead of dropping it — the bland
+    "Wrong screen: expected X got Y" alone misled the RCA agent into `test_invalid`; the real symptom ("the
+    interaction did not advance — an unresponsive/blocked control") steers it to `code_bug`.
 - **Diagnose "what did we send / get" is dumpable — ON by default (2026-09-21).** `REPAIR_DEBUG_DUMP`
   writes the EXACT prompt + each provider's RAW response (+ parsed patch, RCA verdict, reject reason,
   timing, `ollama ps` VRAM) to `repair_debug_dir` (`./data/repair_debug`, host-mounted; container

@@ -1865,3 +1865,46 @@ runs unchanged. The design tradeoff (more fail-fast = fewer silent self-heals) i
 `_last_interaction_screen`) + same 8 pre-existing fixture failures. Text/value assertions (`_screen_only`
 false) never enter this path, so the cross-kiosk VALUE demos are untouched; loosening either knob restores
 the prior always-bridge behaviour.
+
+---
+
+## 2026-09-21 (RCA display + failure enrichment + report font) — "Invalid test case" mislabel & legibility
+
+After the quantity bug started failing fast into Auto-Repair, the repair **succeeded** (build passed, PR
+raised, "Bug fixed & verified"), but the report's ROOT CAUSE tile read **"Invalid test case"**, and the
+report boxes were still hard to read on the dark theme.
+
+### Why RCA said "test_invalid" (and why it was harmless but confusing)
+The debug dump showed `verdict=test_invalid confidence=medium stop=False`. Two causes:
+1. **The failure text RCA saw was too thin.** The unresponsive-interaction rule fails the verify FAST, and
+   its informative reason ("the add-to-cart interaction on 'products' did not advance — an unresponsive/
+   blocked control") was being **dropped**: `observation = observation or _defect_reason` kept the bland
+   pre-set "Wrong screen: expected 'cart', got 'products'" and discarded the reason. So RCA (reading the
+   design doc, which says add-to-cart stays on Products until you tap Cart/Checkout) reasonably concluded
+   the TEST wrongly expected the cart too early → `test_invalid`.
+2. It was only **medium** confidence, so the conservative gate did NOT stop (correct — no regression); the
+   code-fixing agent proceeded and fixed the real code bug.
+
+**Fix A (backend):** PREPEND the defect reason to the observation instead of dropping it, so the failure
+text handed to BOTH agents carries the real symptom ("the interaction did not advance — an unresponsive/
+blocked control. Wrong screen: expected 'cart', got 'products'"). That steers RCA toward `code_bug`.
+
+### The report contradiction — "Invalid test case" over a verified code fix
+`test_invalid` was an **advisory** (non-stopping) verdict, yet the Executive Summary showed it as the
+headline ROOT CAUSE — contradicting "Bug fixed & verified · patched App.tsx".
+
+**Fix B (frontend):** the ROOT CAUSE tile now reflects the VERIFIED OUTCOME. When a fix was applied AND the
+build passed AND RCA did NOT stop the pipeline (`patchVerified`), the tile shows **"Code bug"** (with the
+diagnose `root_cause` as the sub-line), and a small muted note records RCA's initial advisory read for
+transparency. When RCA actually stopped (high-confidence spec/test/env), its verdict stands. The technical
+RCA section still shows RCA's actual verdict verbatim (honest audit trail).
+
+### Report font legibility
+**Fix C (frontend):** the Detailed-report window container now sets an explicit `color: var(--text)`, so
+every descendant inherits a visible light colour regardless of inherited context (belt-and-suspenders on top
+of the per-box `MONO` + `color` fix). NOTE: the studio must be REBUILT/redeployed for the font fix to show —
+a backend-only `docker compose up -d --build app` does not rebuild the studio container.
+
+### No-regression
+`pytest tests/` = 141 passed + same 8 pre-existing fixture failures; studio build clean. Fix A only enriches
+the observation string (additive); Fix B/C are display-only.
