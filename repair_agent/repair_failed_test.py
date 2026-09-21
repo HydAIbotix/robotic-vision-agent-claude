@@ -53,17 +53,22 @@ class RepairPatch:
     explanation: str
     source: str = "claude"   # which provider produced it: claude | local | demo-fallback
     model: str = ""          # the concrete model name (for UI/telemetry)
+    confidence: str = ""     # the model's self-reported confidence the context held the real cause (high|medium|low)
+    root_cause: str = ""     # the model's one-line statement of the underlying cause (not the symptom)
 
 
-_DIAGNOSE_PROMPT = """You are a senior software repair agent fixing a FAILED automated test for a
-React/TypeScript kiosk app. Use ONLY the retrieved code context to locate the real bug.
+_DIAGNOSE_PROMPT = """You are a senior software repair agent fixing a FAILED automated test for the
+application under test (it may be any kind of app — do not assume a specific domain). Use ONLY the retrieved
+code context to locate the real bug.
 
 Return a SINGLE JSON object (no markdown, no commentary) with exactly these keys:
 {{
   "file_path": "path to the file to edit (absolute, or repo-relative as shown in the context)",
   "find": "exact text currently in that file — copy it verbatim, must be unique in the file",
   "replace": "the corrected replacement text",
-  "explanation": "one sentence describing the fix"
+  "explanation": "one sentence describing the fix",
+  "confidence": "high|medium|low — how sure you are the retrieved context ACTUALLY contains the root cause",
+  "root_cause": "one sentence naming the underlying cause (not the symptom)"
 }}
 
 Rules:
@@ -79,9 +84,12 @@ Rules:
 - Fix the ROOT CAUSE, not the symptom. If the failure is a wrong/missing VALUE, LABEL or on-screen
   TEXT, do NOT make it pass by hardcoding or relabeling a string to match the expected text. Find and
   fix the code that PRODUCES or PERSISTS that value/state — a wrong guard/condition that skips a write,
-  a wrong endpoint, a dropped update — even when it lives in a different function or file than where the
-  text is displayed. Relabeling the displayed text (e.g. changing a transaction "type" from one label
-  to another) is almost never the correct fix.
+  a wrong endpoint, a dropped update, a disabled/removed control — even when it lives in a different
+  function or file than where the text is displayed. Relabeling displayed text is almost never correct.
+- HONESTY over guessing. Base the fix on EVIDENCE in the retrieved context. If the context does NOT
+  contain code that plausibly produces this exact failure, say so: set "confidence":"low" and pick the
+  single closest candidate you can justify — do NOT fabricate a change to unrelated code just to return
+  something. A precise, evidence-backed fix with "high" confidence is worth far more than a plausible guess.
 
 FAILED TEST / DEFECT:
 {failure}
@@ -170,6 +178,40 @@ def _action_query(failure: str) -> str:
     parts = summary + " " + steps + " " + (fa.group(1) if fa else "")
     aq = _retrieval_query(parts)
     return aq if (steps.strip() and aq.strip()) else _retrieval_query(failure)
+
+
+# Test-harness element ids that are NOT app code (screen/route names, harness sentinels) — dropped from the
+# interaction lane so it anchors on real widget identifiers, not navigation vocabulary.
+_INTERACTION_STOPWORDS = {"failed_here", "in_order", "root_cause"}
+
+
+def _interaction_query(failure: str) -> str:
+    """A retrieval lane anchored on the UI ELEMENTS the test interacted with around the failure — the
+    element / test-ids (e.g. `pay_with_mock_card_button`, `mock_card_number_input`) and button LABELS of
+    its tap/type steps. Those identifiers map DIRECTLY to the code that renders or handles the control, so
+    they localise an INTERACTION bug (a disabled / renamed / removed control, a broken handler) that the
+    symptom prose ("no transition occurred") never surfaces. Generic across apps — it reads whatever
+    element identifiers the executed steps carry; returns "" (lane skipped) when there are none."""
+    tokens: list[str] = []
+    seen: set[str] = set()
+
+    def _add(tok: str):
+        t = tok.strip()
+        low = t.lower()
+        if t and low not in seen and low not in _INTERACTION_STOPWORDS:
+            seen.add(low)
+            tokens.append(t)
+
+    # snake_case / kebab-case element & test-ids: 2+ segments (add-to-cart, pay_with_mock_card_button).
+    for m in re.findall(r"\b[a-zA-Z][a-zA-Z0-9]*(?:[_-][a-zA-Z0-9]+)+\b", failure):
+        _add(m)
+    # element ids named in a type step: "type: … (mock_card_number_input)".
+    for m in re.findall(r"\(([a-zA-Z][\w-]+)\)", failure):
+        _add(m)
+    # human button/label targets of a tap: "tap: Use Mock Card @ (…)", "tap: Sign In @".
+    for m in re.findall(r"tap:\s*([A-Za-z][A-Za-z0-9 /]{1,40}?)\s*(?:@|\()", failure):
+        _add(m)
+    return " ".join(tokens)
 
 
 # File-neighborhood expansion tuning: when a SMALL support module is implicated, show Claude the whole
@@ -428,29 +470,43 @@ def _message_for(prompt: str, images, label: str):
 
 
 # ── RCA AGENT (separate from the code-fixing agent) ──────────────────────────────────────────────
-_RCA_PROMPT = """You are the ROOT-CAUSE ANALYSIS (RCA) agent for a FAILED automated UI test of a
-React/TypeScript point-of-sale (POS) kiosk app. You are a SEPARATE agent from the code-fixing agent.
+_RCA_PROMPT = """You are the ROOT-CAUSE ANALYSIS (RCA) agent for a FAILED automated UI test of a software
+application. You are a SEPARATE agent from the code-fixing agent, and you work for ANY kind of app (web,
+kiosk, mobile-web, dashboard, etc.) — do not assume a specific domain.
 
-You are given the failure and the AUTHORITATIVE design/requirements documentation + the TEST-CASE
-definition. You are deliberately NOT given source code — a separate code-fixing agent handles code. Your
-job is to decide the ROOT-CAUSE CATEGORY, so we never patch code to satisfy a wrong test or a wrong spec:
+You are given the failure (symptom, execution trace, logs, screenshots when available) and the
+AUTHORITATIVE design/requirements documentation + the TEST-CASE definition. You are deliberately NOT given
+source code — a separate code-fixing agent handles code. Your job is to CLASSIFY the ROOT CAUSE so we route
+the failure correctly and never patch code to satisfy a wrong test, a wrong spec, or an environment problem:
 
-  - "code_bug"     : the docs + test are correct; the app's CODE fails to do what the design says. (MOST COMMON)
-  - "spec_bug"     : the design/requirements themselves are wrong, contradictory or ambiguous; fixing code
-                     cannot be correct until the spec is corrected.
-  - "test_invalid" : the TEST CASE expects behaviour that CONTRADICTS the design, or its steps/preconditions
-                     are wrong; the test is at fault, not the app.
+  - "code_bug"     : the docs + test are correct and the environment is healthy; the app's CODE fails to do
+                     what the design says (a wrong condition/guard, a broken/disabled/removed control, a
+                     dropped write, a wrong value/endpoint). This is the MOST COMMON and the ONLY category
+                     that goes to the code-fixing agent.
+  - "spec_bug"     : the design/requirements themselves are wrong, contradictory, or ambiguous; fixing code
+                     cannot be correct until the spec is corrected. (a requirement bug)
+  - "test_invalid" : the TEST CASE expects behaviour that CONTRADICTS the design, targets a wrong element,
+                     or its steps/preconditions/data are wrong; the test is at fault, not the app.
+  - "environment"  : the failure is INFRASTRUCTURE / ENVIRONMENT, not the app logic — a page that never
+                     loaded, a blank/spinner screen, a network / API / service error or timeout, a 5xx, a
+                     missing dependency, a mis-configuration or deploy problem, auth/session expiry. Code
+                     patches will NOT help; the environment must be fixed and the test re-run.
+  - "unknown"      : the evidence is insufficient to decide. Prefer "code_bug" over "unknown" when the app
+                     plausibly misbehaved (the code-fixing agent will verify), and "unknown" only when you
+                     genuinely cannot tell from the symptom + docs.
 
 Return ONE JSON object (no markdown, no commentary):
-{{"verdict": "code_bug|spec_bug|test_invalid",
+{{"verdict": "code_bug|spec_bug|test_invalid|environment|unknown",
   "confidence": "high|medium|low",
-  "rationale": "one or two sentences citing the doc/test evidence",
-  "suspect": "for code_bug: the screen / component / feature area where the code bug most likely is",
-  "search_terms": "for code_bug: 5-12 space-separated code identifiers, UI labels or values to grep for"}}
+  "rationale": "one or two sentences citing the strongest evidence (doc/test/symptom/log)",
+  "suspect": "for code_bug: the screen / component / feature area where the code bug most likely is (empty otherwise)",
+  "search_terms": "for code_bug: 5-12 space-separated code identifiers, element/test-ids, UI labels or values to grep for (empty otherwise)"}}
 
-Focus on the FAILED step + OBSERVED symptom, not the test's overall goal. When you are NOT clearly certain
-the spec or test is at fault, answer "code_bug" — the code-fixing agent will verify. Only answer spec_bug
-or test_invalid with "high" confidence when the docs/test PLAINLY show the fault.
+Judge from the FAILED step + OBSERVED symptom + logs, not the test's overall goal. Be CONSERVATIVE about
+stopping the pipeline: only answer spec_bug, test_invalid or environment with "high" confidence when the
+evidence PLAINLY shows it (e.g. an explicit network/HTTP error or blank page for environment; a documented
+contradiction for spec/test). When unsure, answer "code_bug" so the code-fixing agent can verify against
+the actual source.
 
 FAILURE:
 {failure}
@@ -477,7 +533,10 @@ def _render_doc_context(hits, cap: int = 3500) -> tuple[str, list]:
     return ("\n\n".join(blocks) or "(no design/requirements/test-case context retrieved)"), structured
 
 
-_RCA_VERDICTS = ("code_bug", "spec_bug", "test_invalid")
+_RCA_VERDICTS = ("code_bug", "spec_bug", "test_invalid", "environment", "unknown")
+# Verdicts that HALT the pipeline before the code-fixing agent (a high-confidence one is not a code bug, so
+# patching app code would be wrong). code_bug + unknown proceed to the fixer (unknown = let it verify).
+_RCA_STOP_VERDICTS = ("spec_bug", "test_invalid", "environment")
 
 
 def _rca_should_stop(verdict: str, confidence: str) -> bool:
@@ -485,7 +544,7 @@ def _rca_should_stop(verdict: str, confidence: str) -> bool:
     when the gate is enabled. Conservative by design — a code_bug (or any lower-confidence verdict) always
     proceeds to the code-fixing agent, so the default Claude + Chroma result never regresses."""
     return bool(settings.repair_rca_gate
-                and verdict in ("spec_bug", "test_invalid")
+                and verdict in _RCA_STOP_VERDICTS
                 and (confidence or "").strip().lower() == "high")
 
 
@@ -601,8 +660,13 @@ def retrieve_context(failure: str, top_k: int = 8, rca_query: str = "") -> tuple
     # failure-point + action + intent lanes — a SUPERSET of the pre-RCA behaviour, so Claude never regresses.
     rq_action = _action_query(failure)
     fp_query = _failure_point_query(failure) if settings.repair_failure_anchor else ""
+    # INTERACTION-ELEMENT lane: the element/test-ids + button labels the test tapped/typed around the
+    # failure — the strongest localiser for an interaction bug (disabled/renamed/removed control, broken
+    # handler). Additive; "" when the steps carry no element ids, so it degrades to the prior lane set.
+    el_query = _interaction_query(failure) if settings.repair_interaction_anchor else ""
     lane_queries, _seen_q = [], set()
-    for q in ((rca_query or ""), fp_query, rq_action, rq):   # priority: RCA → failure-point → action → intent
+    # priority: RCA → failure-point → interaction-element → action → intent
+    for q in ((rca_query or ""), fp_query, el_query, rq_action, rq):
         q = (q or "").strip()
         if q and q not in _seen_q:
             _seen_q.add(q)
@@ -1198,6 +1262,8 @@ def propose_patch(failure: str, context: str, *, timeout=None, cancel_check=None
                     explanation=data.get("explanation", f"{label}-proposed repair."),
                     source=label,
                     model=model_name,
+                    confidence=str(data.get("confidence", "")).strip().lower(),
+                    root_cause=str(data.get("root_cause", "")).strip(),
                 )
                 # P0b — verify the patch actually targets the failed symptom; one nudged retry if off-target
                 # (keeps the better-of, never dead-ends). No-op unless REPAIR_VERIFY_RELEVANCE is on.

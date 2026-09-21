@@ -495,6 +495,13 @@ class Settings(BaseSettings):
     # (the working cross-kiosk demo) byte-for-byte; only interaction bugs get the tighter profile.
     repair_failure_anchor: bool = True           # P0a: add a PRIMARY retrieval lane from the failed step + OBSERVED symptom
     repair_verify_relevance: bool = True          # P0b: detect a patch that targets code unrelated to the symptom; one nudged retry
+    # INTERACTION-ELEMENT retrieval lane. Anchors a retrieval lane on the UI ELEMENTS the test interacted
+    # with around the failure — element/test-ids (pay_with_mock_card_button, mock_card_number_input) and
+    # button labels of the tap/type steps. These map DIRECTLY to the code that renders/handles the control,
+    # so they localise an INTERACTION bug (a disabled/renamed/removed control, a broken handler) that
+    # symptom prose ("no transition occurred") alone does not surface. Additive + generic (any app's element
+    # ids); a strict no-op when the steps carry no element identifiers. Set False to drop the lane.
+    repair_interaction_anchor: bool = True
     # P1 precision — the INTERACTION profile (a wrong-screen / popup / unresponsive-control bug: code matters,
     # design-doc prose is mostly noise). SPEC/value failures (balance, transaction, cross-kiosk) keep the
     # existing generous profile (5 design docs, 2 general, 16-block cap) so that demo does not regress.

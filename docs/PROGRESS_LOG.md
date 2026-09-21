@@ -1701,3 +1701,68 @@ failure still routes `spec` from its own OBSERVED/assertion text (`SPEC_FAILURE`
 `test_template_match`/`test_vision_agent` fixture failures. Both fixes are additive + default-safe (the
 resilient apply only runs when the exact find is absent; the failure-point change only removes appended
 boilerplate).
+
+---
+
+## 2026-09-21 (latest) — generic RCA/fixer across bug types + interaction-element retrieval + Executive Summary
+
+A VM re-run of TC-RPS-003 confirmed the apply fix (the add-to-cart bug was patched and a PR raised), but
+exposed a SECOND planted bug in the same flow — a **disabled mock-card input** so tapping "Use Mock Card"
+never completed payment. Auto-Repair triggered but **mis-diagnosed** it: the actual buggy control was never
+retrieved, so Claude produced a plausible-but-wrong fix (adding `'APPROVED'` to an `alreadyResolved` guard).
+Per the user's direction this was addressed GENERICALLY (not a point-fix), to make RCA + code-fixing robust
+across bug types (coding, design/requirement, environmental, invalid test) and across customer apps.
+
+### 1. Generic, app-agnostic RCA with a 5-category taxonomy
+`_RCA_PROMPT` no longer assumes a POS/kiosk domain ("the application under test"). The verdict taxonomy
+(`_RCA_VERDICTS`) now spans:
+- **code_bug** — the app code is at fault (→ the ONLY category handed to the code-fixing agent).
+- **spec_bug** — a requirements/design bug (STOP).
+- **test_invalid** — the test contradicts the design / targets the wrong thing (STOP).
+- **environment** — infrastructure/environment: page never loaded, blank/spinner, network / API / service
+  error or timeout, 5xx, missing dependency, mis-config, deploy problem, auth/session expiry (STOP — a code
+  patch can't fix infra; fix the environment and re-run).
+- **unknown** — insufficient evidence (→ proceed to the fixer to verify against source).
+
+`_RCA_STOP_VERDICTS = {spec_bug, test_invalid, environment}` halt the pipeline only at **HIGH** confidence
+(`_rca_should_stop`) — conservative, so `code_bug`/`unknown` never regress the default path. The RCA node's
+human-readable notes were extended for the new verdicts, and the Studio verdict badges too.
+
+### 2. Interaction-element retrieval lane
+The live miss: retrieval got payment/reader code but never the disabled input's own JSX/handler, so no model
+could fix it. New generic lane `_interaction_query(failure)` extracts the **element / test-ids and button
+labels the test interacted with** around the failure (snake/kebab ids like `pay_with_mock_card_button`,
+`mock_card_number_input`; ids named in a `type: … (element_id)` step; `tap: <Label> @` labels). Those map
+DIRECTLY to the code that renders/handles the control — the strongest localiser for an interaction bug (a
+disabled/renamed/removed control, a broken handler). Wired into `retrieve_context` as a lane with priority
+**RCA → failure-point → interaction-element → action → intent**; additive + interleaved + de-duped, a strict
+no-op when the steps carry no element ids (`repair_interaction_anchor`, default on). Generic across any app's
+element identifiers — no per-test wording.
+
+### 3. Diagnose: confidence + anti-fabrication
+`_DIAGNOSE_PROMPT` is app-agnostic and now asks the model for two extra fields — `confidence`
+(high|medium|low that the retrieved context ACTUALLY contains the cause) and `root_cause` — and explicitly
+instructs it to prefer an evidence-backed high-confidence fix over fabricating a change to unrelated code
+when the context lacks the real cause. Surfaced on `RepairPatch` (`confidence`, `root_cause`) → the
+`diagnose` stage patch → the report. (The existing symptom-relevance guard + one nudged retry remain.)
+
+### 4. Executive Summary report view (Studio)
+The 📋 Detailed-report window now opens on a leadership-facing **Executive summary** (default), with a
+**Technical details** toggle (the prior view, unchanged):
+- **Outcome hero** (fixed & verified / stopped — <verdict> / could not complete), **KPI tiles** (root cause,
+  files changed, lines changed, build), a colour-coded **pipeline stepper**, an **"evidence examined" bar
+  chart** (docs read / code sections / screenshots), **confidence rings** (root-cause + fix), and **the fix
+  at a glance**.
+- Every chart carries a **"View technical details →"** link that switches to the technical view and scrolls
+  to the matching section (anchors `sec-rca`/`sec-retrieve`/`sec-diagnose`/`sec-apply`/`sec-test`/`sec-build`/
+  `sec-pr`). Dependency-free inline SVG/CSS — no chart library.
+
+Naming: "Code-Fixing Agent" alternatives were proposed to the user (e.g. Remediation Agent, Fix Agent,
+Resolution Agent, Patch Agent, Code Repair Agent) — pending a pick before any rename.
+
+### No-regression
+`pytest tests/` = **138 passed** (133 + 5 new across the two latest sessions in
+`tests/test_repair_retrieval.py`), 5 skipped, same 8 pre-existing `test_template_match`/`test_vision_agent`
+fixture failures. Studio `npm run build` clean. Everything is additive/default-safe: the RCA gate stays
+conservative (code_bug/unknown proceed), the interaction lane is a no-op without element ids, the diagnose
+extra fields are optional, and the Executive Summary is a new view that leaves the technical view intact.

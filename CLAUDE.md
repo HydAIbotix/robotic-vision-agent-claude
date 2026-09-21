@@ -433,6 +433,27 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   while `cart` still matches `onAddToCart` — generic. **Screenshots** of the failed steps go to the Claude
   prompts (`repair_use_screenshots`, multimodal only; qwen stays text); failure text carries a per-step
   EXECUTION TRACE + console-log tail (`repair_failure_detail`). Detail → `docs/PROGRESS_LOG.md` (2026-09-21).
+- **⚠️ RCA + fixer are GENERIC across bug types & apps (2026-09-21 later).** The prompts no longer assume a
+  POS/kiosk domain ("the application under test") and the RCA taxonomy spans FIVE categories, so different
+  failures route correctly: `code_bug` (→ fixer, the only one that patches code), `spec_bug` (requirements
+  bug — STOP), `test_invalid` (STOP), `environment` (page-not-loading / network / API / timeout / config /
+  deploy — STOP; a code patch can't fix infra), `unknown` (→ fixer to verify). `_RCA_STOP_VERDICTS`
+  {spec_bug, test_invalid, environment} halt only at HIGH confidence (conservative — code_bug/unknown never
+  regress). The diagnose prompt now asks for `confidence` + `root_cause` and is told to prefer an
+  evidence-backed HIGH-confidence fix over fabricating a change when the retrieved context lacks the cause
+  (surfaced on `RepairPatch`/`diagnose.inputs`, shown in the report). **Interaction-element retrieval lane**
+  (`repair_interaction_anchor`, `_interaction_query`): anchors a lane on the element/test-ids + button
+  labels the test tapped/typed around the failure (e.g. `mock_card_number_input`, `pay_with_mock_card_button`,
+  `Use Mock Card`) — the strongest localiser for a disabled/renamed/removed control or broken handler that
+  symptom prose misses. Additive + generic; empty → lane skipped (no regression). Live gap it closes: the
+  disabled mock-card input was never retrieved, so Claude invented a plausible-but-wrong `alreadyResolved`
+  fix. Detail → `docs/PROGRESS_LOG.md`.
+- **Auto-Repair report has an EXECUTIVE SUMMARY (default) + technical view (2026-09-21 later).** The 📋
+  Detailed-report window opens on a leadership-facing **Executive summary** — outcome hero, KPI tiles (root
+  cause, files/lines changed, build), a colour-coded pipeline stepper, an "evidence examined" bar chart
+  (docs/code/screenshots), root-cause + fix **confidence rings**, and the fix at a glance — every chart
+  links back to its **Technical details** section. Toggle switches views. Dependency-free inline SVG/CSS
+  (no chart lib). "Code-Fixing Agent" naming is under review (alternatives proposed).
 - **Diagnose "what did we send / get" is dumpable — ON by default (2026-09-21).** `REPAIR_DEBUG_DUMP`
   writes the EXACT prompt + each provider's RAW response (+ parsed patch, RCA verdict, reject reason,
   timing, `ollama ps` VRAM) to `repair_debug_dir` (`./data/repair_debug`, host-mounted; container
@@ -555,6 +576,16 @@ Detailed history → [`docs/PROGRESS_LOG.md`](docs/PROGRESS_LOG.md). Design/depl
   the ROOT CAUSE… balance/transaction…" guidance so `_bug_class` + the lexical signals read the real
   symptom (the add-to-cart bug was mis-routing to the `spec` profile — harmless here, but wrong). 3 new
   tests; 136 passed + same 8 pre-existing failures. Detail → `docs/PROGRESS_LOG.md`.
+- **2026-09-21 (latest) · generic RCA/fixer + interaction-element retrieval + Executive Summary report.**
+  A VM re-run fixed the add-to-cart bug (PR raised) but mis-diagnosed a SECOND planted bug (a disabled
+  mock-card input): its buggy control was never retrieved, so Claude invented a plausible-but-wrong fix.
+  Generic (not point-fix) response: (1) app-agnostic RCA prompt + 5-category taxonomy (code/spec/test/
+  **environment**/unknown) so infra/network/page-load + requirement/invalid-test failures route correctly
+  and never get a code patch; (2) an **interaction-element retrieval lane** (`_interaction_query`) anchored
+  on the element/test-ids the test tapped/typed; (3) diagnose prompt asks for `confidence`+`root_cause` and
+  is told not to fabricate when the context lacks the cause; (4) Studio Detailed-report gains an **Executive
+  Summary** default view (charts + KPIs, links to technical sections). 5 new tests; 138 passed + same 8
+  pre-existing failures; studio build clean. Detail → `docs/PROGRESS_LOG.md`.
 
 ### Never
 

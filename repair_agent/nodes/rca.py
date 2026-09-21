@@ -46,6 +46,9 @@ def rca_node(state: RepairAgentState) -> dict:
         "code_bug": f"Code bug — localised to {rca.get('suspect') or 'the app code'}; handing to the code-fixing agent.",
         "spec_bug": "Spec/requirements bug — STOPPING (fixing code cannot satisfy a broken spec).",
         "test_invalid": "Test case is invalid — STOPPING (the test contradicts the design).",
+        "environment": "Environment/infrastructure issue (network, page load, service, config) — STOPPING "
+                       "(a code patch cannot fix it; fix the environment and re-run).",
+        "unknown": "Root cause is unclear from the evidence — proceeding to the code-fixing agent to verify against the source.",
         "skipped": "RCA agent produced no verdict — proceeding to the code-fixing agent.",
     }.get(rca.get("verdict", "code_bug"), "Proceeding to the code-fixing agent.")
 

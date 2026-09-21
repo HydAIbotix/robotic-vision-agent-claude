@@ -210,3 +210,34 @@ def test_bug_class_ignores_appended_root_cause_guidance_boilerplate():
     assert _bug_class(failure_with_boilerplate) == "interaction"
     # A genuine spec failure whose OBSERVED/assertions (not the boilerplate) carry the spec vocab still routes spec.
     assert _bug_class(SPEC_FAILURE) == "spec"
+
+
+# ── Generic RCA taxonomy (code/spec/test/environment/unknown) + interaction-element retrieval lane ──
+
+def test_rca_gate_covers_environment_and_never_stops_on_unknown():
+    from repair_agent.repair_failed_test import _rca_should_stop, _RCA_VERDICTS, _RCA_STOP_VERDICTS
+    assert set(_RCA_VERDICTS) == {"code_bug", "spec_bug", "test_invalid", "environment", "unknown"}
+    # environment is a stop verdict (a code patch can't fix a network/page-load/infra failure)…
+    assert _rca_should_stop("environment", "high") is True
+    assert _rca_should_stop("environment", "medium") is False     # only HIGH confidence halts (conservative)
+    # …while unknown ALWAYS proceeds to the fixer (let it verify against the source) — no regression.
+    assert _rca_should_stop("unknown", "high") is False
+    assert _rca_should_stop("code_bug", "high") is False
+    assert "environment" in _RCA_STOP_VERDICTS and "code_bug" not in _RCA_STOP_VERDICTS
+
+
+def test_interaction_query_anchors_on_the_tapped_elements_generic():
+    from repair_agent.repair_failed_test import _interaction_query
+    failure = (
+        "tap: pay_with_mock_card_button @ (766,818) ; type: 0005322931 (mock_card_number_input) ; "
+        "tap: Use Mock Card @ (765,705) ; verify: order result [FAILED HERE] "
+        "OBSERVED: the screen still shows the Use Mock Card button; Path: card_reader_payment -> payment"
+    )
+    q = _interaction_query(failure)
+    # The exact element/test-ids + label the test interacted with — the strongest code localiser.
+    for must in ("pay_with_mock_card_button", "mock_card_number_input", "Use Mock Card"):
+        assert must in q
+    assert "failed_here" not in q.lower()          # harness sentinel dropped
+    # Generic: a totally different app's element ids come through too, and no-element failures yield "".
+    assert "settings_gear_icon" in _interaction_query("tap: settings_gear_icon @ (10,10) [FAILED HERE]")
+    assert _interaction_query("verify: something happened [FAILED HERE] OBSERVED: nothing") == ""
