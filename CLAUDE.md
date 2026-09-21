@@ -448,6 +448,24 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   new `diagnose` stage field `inputs` (`{failure, context, screenshots[basenames]}`, added in
   `repair_agent/nodes/diagnose.py`); screenshots load from the run via `run_id` (`runScreenshotUrl`). Pure
   add — reads only data already on the job, no new endpoints.
+- **⚠️ APPLY is resilient to the RAG chunk ≠ on-disk-text gap (2026-09-21).** Tree-sitter indexes an INNER
+  node, so a chunk stores `addToCart = (…) => {` while the file has `  const addToCart = (…) => {`. The
+  model faithfully copies the chunk, so its byte-exact `find` isn't on disk → the old apply died with a
+  misleading "index is stale — rebuild" (retrieval + diagnose were both CORRECT; this was the live
+  TC-RPS-003 blocker AFTER the fix was found). `apply_patch` now falls back to `_resilient_replace`: a
+  WHOLE-LINE match tolerating per-line indentation + a dropped leading declaration keyword
+  (`const`/`let`/`export`/`async`/…), requiring a UNIQUE block AND equal find/replace line counts, then
+  rebuilding the block from the REAL file lines so only the changed fragment moves. Refuses (returns None →
+  the same error, improved wording) on any ambiguity — never edits the wrong line. `_locate_file` uses the
+  same tolerance for its file-search fallback. Generic; no reindex needed.
+- **⚠️ `_bug_class`/signal tokens read the SYMPTOM, not our appended guidance (2026-09-21).**
+  `_failure_text_for` appends a "Fix the ROOT CAUSE… persisted or shared across screens/kiosks (a balance, a
+  transaction)…" instruction tail. `_failure_point_text` now truncates the `[FAILED HERE]` segment at
+  `OBSERVED:`/`Failing assertions:`/`Fix the ROOT CAUSE` (OBSERVED + assertions are captured separately), so
+  that boilerplate no longer leaks in. Without it, an interaction bug (add-to-cart popup) was scoring the
+  boilerplate's spec-vocab and mis-routing to the `spec` context profile (harmless here — retrieval still
+  found the bug — but wrong, and it polluted the lexical re-rank signals). A genuine spec failure still
+  routes `spec` from its own OBSERVED/assertion text.
 - **GPU on GCE (msgraphrag / local models):** `g2-standard-8` = 1× NVIDIA L4 24GB; needs the
   NVIDIA driver (570 for kernel 6.8) + nvidia-container-toolkit, and **Secure Boot OFF** on Shielded
   VMs (blocks the unsigned module). `docker-compose.gpu.yml` reserves the GPU for `ollama`
@@ -528,6 +546,15 @@ Detailed history → [`docs/PROGRESS_LOG.md`](docs/PROGRESS_LOG.md). Design/depl
   customer-facing 📋 walkthrough of every repair step incl. exactly what was sent to Claude (failure text,
   screenshots, retrieved code/doc context) and the patch returned; backend adds `diagnose.inputs`. Full
   suite 133 passed + same 8 pre-existing failures; studio build clean. Detail → `docs/PROGRESS_LOG.md`.
+- **2026-09-21 (later still) · apply resilience + failure-point boilerplate hygiene.** A VM TC-RPS-003
+  re-run had CORRECT retrieval + diagnose (Claude found the `quantity <= 1` guard and the right fix) but
+  the patch failed to apply: the Tree-sitter chunk stored `addToCart = …` while the file has `const
+  addToCart = …`, so the byte-exact `find` wasn't on disk. Fix: `_resilient_replace` — a whole-line,
+  indentation- + declaration-keyword-tolerant apply (unique block + equal line counts required) that
+  rebuilds from the real file lines; no reindex. Also: `_failure_point_text` now strips the appended "Fix
+  the ROOT CAUSE… balance/transaction…" guidance so `_bug_class` + the lexical signals read the real
+  symptom (the add-to-cart bug was mis-routing to the `spec` profile — harmless here, but wrong). 3 new
+  tests; 136 passed + same 8 pre-existing failures. Detail → `docs/PROGRESS_LOG.md`.
 
 ### Never
 

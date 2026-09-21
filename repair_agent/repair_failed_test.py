@@ -316,7 +316,14 @@ def _failure_point_text(failure: str) -> str:
     parts: list[str] = []
     for seg in re.split(r"[;]", failure):
         if "[FAILED HERE]" in seg:
-            parts.append(seg.replace("[FAILED HERE]", " "))
+            # Keep ONLY the failed STEP text. The failed step is the last thing before the (semicolon-free)
+            # OBSERVED / Failing-assertions / "Fix the ROOT CAUSE…" tail, so this segment otherwise swallows
+            # all of it — including the appended guidance boilerplate ("…persisted or shared across
+            # screens/kiosks (a balance, a transaction)…"), whose spec-vocab then mis-routes _bug_class to
+            # 'spec' and pollutes the lexical signal tokens. OBSERVED + assertions are captured verbatim
+            # below, so drop them here; the boilerplate is dropped entirely. Generic — no per-test wording.
+            step = re.split(r"OBSERVED:|Failing assertions:|Fix the ROOT CAUSE", seg)[0]
+            parts.append(step.replace("[FAILED HERE]", " "))
     m = re.search(r"OBSERVED:(.*?)(?:Failing assertions:|Fix the ROOT CAUSE|$)", failure, re.S)
     if m:
         parts.append(m.group(1))
@@ -1273,6 +1280,64 @@ def _find_preview(find: str, limit: int = 400) -> str:
     return f if len(f) <= limit else f[:limit] + "\n… (truncated)"
 
 
+# Declaration keywords a Tree-sitter chunk DROPS when it captures an inner node — the RAG index stores
+# `addToCart = (…) => {` while the file on disk has `const addToCart = (…) => {`. A file line can therefore
+# carry one of these as an EXTRA leading prefix over the model's copied find-line. (Root cause of a live
+# "Patch find-text was not found" on TC-RPS-003 where retrieval + diagnose were both correct.)
+_DECL_PREFIX_RE = re.compile(
+    r"^(export\s+)?(default\s+)?(public\s+|private\s+|protected\s+|static\s+|readonly\s+|abstract\s+|async\s+)*"
+    r"(const\s+|let\s+|var\s+|function\s*\*?\s+)?$"
+)
+
+
+def _find_line_matches(file_core: str, find_core: str) -> bool:
+    """A file line loosely matches a find line if their STRIPPED forms are equal, or the file line's
+    stripped form is the find line's with only a leading DECLARATION-KEYWORD prefix (const/let/export/
+    async/…) — exactly the class of difference the RAG index introduces. Nothing looser (no arbitrary
+    suffix match), so it can never latch onto an unrelated line."""
+    fs, ns = file_core.strip(), find_core.strip()
+    if fs == ns:
+        return True
+    if ns and fs.endswith(ns):
+        return bool(_DECL_PREFIX_RE.match(fs[: len(fs) - len(ns)]))
+    return False
+
+
+def _resilient_replace(text: str, find: str, replace: str) -> Optional[str]:
+    """Apply a find/replace whose `find` is NOT byte-exact on disk because the RAG index stored a
+    Tree-sitter node (dropped leading `const `/indentation) instead of the verbatim source lines.
+
+    GENERIC + SAFE: matches WHOLE lines tolerating per-line indentation and a dropped declaration keyword,
+    requires a UNIQUE block match AND equal find/replace line counts, and rebuilds the on-disk block from
+    the REAL file lines (keeping their indentation + any `const` prefix) with only the changed fragment
+    moved. Returns the new file text, or None when it cannot apply unambiguously (caller then errors as
+    before). Never a per-test special case."""
+    find_lines = find.splitlines()
+    repl_lines = replace.splitlines()
+    if not find_lines or len(find_lines) != len(repl_lines):
+        return None
+    file_lines = text.splitlines(keepends=True)
+    n = len(find_lines)
+    matches = [r for r in range(0, len(file_lines) - n + 1)
+               if all(_find_line_matches(file_lines[r + i].rstrip("\r\n"), find_lines[i]) for i in range(n))]
+    if len(matches) != 1:
+        return None
+    r = matches[0]
+    new_window: list[str] = []
+    for i in range(n):
+        core = file_lines[r + i].rstrip("\r\n")
+        nl = file_lines[r + i][len(core):]
+        fs, rs = find_lines[i].strip(), repl_lines[i].strip()
+        if fs == rs:
+            new_window.append(file_lines[r + i])          # unchanged line — keep the on-disk text verbatim
+            continue
+        idx = core.rfind(fs)
+        if idx == -1:
+            return None                                   # can't safely reconstruct this changed line
+        new_window.append(core[:idx] + rs + core[idx + len(fs):] + nl)
+    return "".join(file_lines[:r]) + "".join(new_window) + "".join(file_lines[r + n:])
+
+
 def _locate_file(patch: RepairPatch) -> Path:
     """Resolve the patch target to a real in-codebase file, tolerating odd paths from the LLM."""
     codebase = CODEBASE_DIR.resolve()
@@ -1285,18 +1350,27 @@ def _locate_file(patch: RepairPatch) -> Path:
         if cand.exists() and codebase in cand.resolve().parents:
             return cand.resolve()
 
-    # Otherwise, find the unique file that actually contains the find-text.
-    matches = []
-    for dirpath, dirnames, filenames in os.walk(codebase):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
-        for fn in filenames:
-            if Path(fn).suffix.lower() in {".ts", ".tsx", ".js", ".jsx", ".css"}:
-                fp = Path(dirpath) / fn
-                try:
-                    if patch.find in fp.read_text(encoding="utf-8"):
-                        matches.append(fp)
-                except Exception:
-                    pass
+    # Otherwise, find the unique file that actually contains the find-text. Try an EXACT substring first;
+    # if nothing matches exactly, retry with the whitespace/declaration-keyword-tolerant matcher (the RAG
+    # chunk may have dropped a leading `const `/indent so the find isn't byte-exact) — same resolution,
+    # just resilient to that formatting gap.
+    def _scan(predicate) -> list:
+        found = []
+        for dirpath, dirnames, filenames in os.walk(codebase):
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+            for fn in filenames:
+                if Path(fn).suffix.lower() in {".ts", ".tsx", ".js", ".jsx", ".css"}:
+                    fp = Path(dirpath) / fn
+                    try:
+                        if predicate(fp.read_text(encoding="utf-8")):
+                            found.append(fp)
+                    except Exception:
+                        pass
+        return found
+
+    matches = _scan(lambda t: patch.find in t)
+    if not matches:
+        matches = _scan(lambda t: _resilient_replace(t, patch.find, patch.replace) is not None)
     if len(matches) == 1:
         return matches[0].resolve()
     if not matches:
@@ -1321,10 +1395,20 @@ def apply_patch(patch: RepairPatch) -> Path:
     count = text.count(patch.find)
     rel = target.relative_to(codebase) if codebase in target.parents else target.name
     if count == 0:
+        # The exact find-text isn't on disk. Most common cause is NOT a stale index but that the RAG chunk
+        # stored a Tree-sitter node without its leading `const `/indentation, so the model copied text that
+        # doesn't match byte-for-byte. Try the whitespace/declaration-keyword-tolerant apply before failing.
+        patched = _resilient_replace(text, patch.find, patch.replace)
+        if patched is not None and patched != text:
+            target.write_text(patched, encoding="utf-8")
+            print(f"  [REPAIR] APPLY: exact find-text not on disk — applied via whitespace/declaration-prefix"
+                  f"-tolerant match (the RAG chunk dropped a leading 'const'/indent). Patched {rel}.")
+            return target
         raise RuntimeError(
-            f"Patch find-text was not found in {rel} (it may be stale — the RAG index can lag the on-disk "
-            f"code). Rebuild the index against the current branch.\n"
-            f"--- find-text the model proposed ---\n{_find_preview(patch.find)}\n--- end ---"
+            f"Patch find-text was not found in {rel}. The 'find' snippet does not match the file even after "
+            f"whitespace/declaration-keyword-tolerant matching — either the RAG index lags the on-disk code "
+            f"(rebuild it against the current branch), or the 'find' spans a non-contiguous / reformatted "
+            f"region.\n--- find-text the model proposed ---\n{_find_preview(patch.find)}\n--- end ---"
         )
     if count > 1:
         locs = ", ".join(map(str, _match_lines(text, patch.find)))

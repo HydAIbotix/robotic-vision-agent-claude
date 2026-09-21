@@ -6,7 +6,7 @@ wrong code. Pure-function tests (no Chroma/Ollama needed)."""
 from repair_agent.repair_failed_test import (
     _failure_point_text, _failure_point_query, _bug_class, _round_robin,
     _signal_tokens, _lexical_score, _patch_relevance, _hits_best_relevance, RepairPatch,
-    _subtokens, _rca_should_stop,
+    _subtokens, _rca_should_stop, _resilient_replace,
 )
 from vision_agent.config import settings
 
@@ -156,3 +156,57 @@ def test_rca_gate_disabled_never_stops():
         assert _rca_should_stop("spec_bug", "high") is False
     finally:
         settings.repair_rca_gate = prev
+
+
+# ── Apply resilience: RAG chunk dropped a leading `const `/indent (find not byte-exact on disk) ───
+
+def test_resilient_replace_applies_when_index_dropped_const_prefix():
+    # The live TC-RPS-003 apply failure: retrieval + diagnose were CORRECT, but the Tree-sitter chunk
+    # stored `addToCart = (…) => {` while the file has `const addToCart = (…) => {`, so the model's
+    # byte-exact find was not on disk. The tolerant apply must preserve `const` and change only `<=`→`<`.
+    on_disk = ("function App() {\n"
+               "  const addToCart = (product: Product, quantity: number) => {\n"
+               "    if (quantity <= 1) {\n"
+               "      return;\n"
+               "    }\n"
+               "  };\n}\n")
+    find = "  addToCart = (product: Product, quantity: number) => {\n    if (quantity <= 1) {"
+    replace = "  addToCart = (product: Product, quantity: number) => {\n    if (quantity < 1) {"
+    out = _resilient_replace(on_disk, find, replace)
+    assert out is not None
+    assert "const addToCart" in out                 # the dropped keyword is preserved
+    assert "if (quantity < 1) {" in out and "quantity <= 1" not in out   # only the fragment moved
+    assert out.count("return;") == 1                # nothing else touched
+
+
+def test_resilient_replace_is_safe_on_mismatch_and_ambiguity():
+    on_disk = "  const a = 1;\n  const b = 2;\n  const a = 1;\n"   # `const a = 1;` appears twice
+    # unequal find/replace line counts → refuse
+    assert _resilient_replace(on_disk, "a\nb", "c") is None
+    # find not present at all → refuse (no false latch)
+    assert _resilient_replace(on_disk, "  const zzz = 9;", "  const zzz = 8;") is None
+    # ambiguous (matches two lines) → refuse rather than edit the wrong one
+    assert _resilient_replace(on_disk, "a = 1;", "a = 2;") is None
+
+
+def test_bug_class_ignores_appended_root_cause_guidance_boilerplate():
+    # The live misroute: `_failure_text_for` appends a "Fix the ROOT CAUSE… persisted or shared across
+    # screens/kiosks (a balance, a transaction)…" guidance tail. That boilerplate — not the real symptom —
+    # pushed _bug_class to 'spec'. The failure POINT must exclude it so an add-to-cart interaction bug
+    # routes 'interaction'. Generic: the boilerplate is dropped for EVERY test.
+    failure_with_boilerplate = (
+        "TC-RPS-003 failed. [P1] Mock card payment with sufficient balance succeeds on RPS. "
+        "Steps attempted (in order): tap: Sign In ; tap: Add to Cart ; "
+        "verify: Cart screen is shown after adding the item [FAILED HERE] "
+        "OBSERVED: Wrong screen: expected cart, got products [dom] "
+        "Failing assertions: Wrong screen: expected cart, got products [dom] "
+        "Fix the ROOT CAUSE of why the expected behaviour did not happen. If the expected outcome is a "
+        "value that should have been persisted or shared across screens/kiosks (a balance, a transaction), "
+        "correct the code that PRODUCES or PERSISTS that state, NOT code that merely displays or labels it."
+    )
+    fp = _failure_point_text(failure_with_boilerplate).lower()
+    assert "balance" not in fp and "transaction" not in fp and "persisted" not in fp
+    assert "cart" in fp and "products" in fp
+    assert _bug_class(failure_with_boilerplate) == "interaction"
+    # A genuine spec failure whose OBSERVED/assertions (not the boilerplate) carry the spec vocab still routes spec.
+    assert _bug_class(SPEC_FAILURE) == "spec"

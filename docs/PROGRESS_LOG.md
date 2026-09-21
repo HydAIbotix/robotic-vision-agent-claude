@@ -1646,3 +1646,58 @@ data already on the job — no new endpoints. **Frontend:** `client.ts` `RepairS
 fixture failures (identical on clean HEAD). Studio `npm run build` clean. Option C is a strict superset of
 the prior verify routing (default-safe to "gap"); the debug-dump flag only adds I/O; the Detailed Report is
 an additive read-only view. The default Claude + Chroma repair result is unchanged.
+
+---
+
+## 2026-09-21 (later still) — apply resilience (RAG chunk ≠ on-disk text) + failure-point boilerplate hygiene
+
+A VM re-run of TC-RPS-003 showed **retrieval and diagnose both CORRECT** — Claude found the add-to-cart
+guard (`App.tsx:966`) and proposed the right fix (`if (quantity <= 1)` → `if (quantity < 1)`) — but the
+patch **failed to apply**: `Patch find-text was not found in src/App.tsx`.
+
+### 1. Apply resilience — the real blocker
+**Root cause (NOT a stale index).** The Tree-sitter indexer captures an INNER node, so the chunk stored
+`addToCart = (product…) => {` while the file on disk has `  const addToCart = (product…) => {`. The model
+faithfully copies the snippet it was shown, so its byte-exact `find` (`  addToCart = …`) does not exist on
+disk → the single `str.replace` found 0 occurrences. The old error message blamed a stale index and told
+the user to rebuild — misleading, since the index was current and retrieval/diagnose were right.
+
+**Fix (generic, no reindex).** `apply_patch` now falls back to `_resilient_replace(text, find, replace)`
+when the exact find is absent:
+- WHOLE-LINE match tolerating (a) per-line indentation and (b) a dropped leading **declaration keyword**
+  (`const`/`let`/`var`/`export`/`default`/`async`/`function`/access modifiers) — exactly the class of
+  difference the RAG index introduces (`_find_line_matches` + `_DECL_PREFIX_RE`). Nothing looser, so it
+  cannot latch onto an unrelated line.
+- Requires a **UNIQUE** block match AND **equal find/replace line counts**; otherwise returns None and the
+  caller raises (improved wording — no longer blames staleness alone).
+- Rebuilds the block from the **REAL** file lines (keeping their indentation + any `const` prefix), moving
+  only the changed fragment (`core.rfind(fs)` splice). So the on-disk `const` is preserved and only
+  `<= 1`→`< 1` changes.
+`_locate_file`'s file-search fallback uses the same tolerance (exact substring first, then resilient). No
+index rebuild needed; the existing index applies cleanly now.
+
+### 2. `_bug_class` / signal tokens read the SYMPTOM, not our appended guidance
+**Observed.** The debug dump said `bug class … : spec` for what is a code/interaction bug. `_failure_text_for`
+appends a guidance tail — "Fix the ROOT CAUSE… if the expected outcome is a value that should have been
+persisted or shared across screens/kiosks (a balance, a transaction)…". Because the failed step, OBSERVED,
+assertions and that tail are all in one semicolon-free trailing segment, `_failure_point_text`'s
+`[FAILED HERE]` branch swallowed the **boilerplate** too, whose spec-vocab (balance/transaction/persisted/
+shared) then scored ≥2 `_SPEC_SIGNALS` → `spec`, and polluted the lexical re-rank signal tokens.
+
+**Fix.** `_failure_point_text` truncates the `[FAILED HERE]` segment at `OBSERVED:` / `Failing assertions:`
+/ `Fix the ROOT CAUSE` (OBSERVED + assertions are already captured verbatim by their own regexes). The
+boilerplate is dropped for **every** test. The add-to-cart failure now routes `interaction`; a genuine spec
+failure still routes `spec` from its own OBSERVED/assertion text (`SPEC_FAILURE` test unchanged).
+
+> Note: the `spec` misroute was **harmless** on this run — the generous spec profile still surfaced the
+> add-to-cart chunk (Context 1, relevance 3) and Claude fixed it. But it was wrong and worth fixing
+> generically; the real blocker was the apply mismatch (#1).
+
+### No-regression
+`pytest tests/` = **136 passed** (133 + 3 new in `tests/test_repair_retrieval.py`:
+`test_resilient_replace_applies_when_index_dropped_const_prefix`,
+`test_resilient_replace_is_safe_on_mismatch_and_ambiguity`,
+`test_bug_class_ignores_appended_root_cause_guidance_boilerplate`), 5 skipped, same 8 pre-existing
+`test_template_match`/`test_vision_agent` fixture failures. Both fixes are additive + default-safe (the
+resilient apply only runs when the exact find is absent; the failure-point change only removes appended
+boilerplate).
