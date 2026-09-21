@@ -356,6 +356,21 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   stops at the objective. Text/value mismatches on the RIGHT screen (e.g. TC-VPS-009 `'PURCHASE'`)
   stay TERMINAL. Tier-3 shares the plan's exact input values (`_plan_input_values`) so a recovered
   field uses e.g. the issued card `0005322931`, never an invented placeholder like `1234`.
+- **⚠️ Wrong-screen verify = GAP-vs-DEFECT judge (Option C, Claude vision, 2026-09-21).** A screen-only
+  verify miss is AMBIGUOUS: a recoverable missing-nav GAP (bridge + resume) vs a genuine app DEFECT (the
+  app refused/errored — e.g. TC-RPS-003's add-to-cart popping a "Quantity Required" dialog). Before
+  bridging, `run_vision_step` asks Claude ONE strict question (`classify_wrong_screen_failure` in
+  `vision_agent/nodes/validate_pipeline.py`): a confident **defect** verdict fails the test FAST (marks
+  `sr["verify_defect"]` → the outer handoff is terminal) so Auto-Repair targets the real bug; **gap** (or
+  any uncertainty/error) bridges exactly as before → **no regression** to working recoveries. Gated by
+  `verify_defect_judge` (default True); runs only on the `_screen_only` path (text/value assertions were
+  already terminal). Vision is always Claude, so no multimodal gate is needed.
+  - **DEFERRED — local/no-LLM equivalents (revisit when Auto-Repair must run air-gapped).** *Option A:*
+    classify the ACTUAL screen deterministically — a `*_popup` / `*_required` / `*_error` / error-banner
+    state ⇒ defect (terminal); a neutral other screen ⇒ gap (bridge). *Option B:* keep the bridge but
+    BOUND it and self-terminate — if Tier-3 can't reach the expected screen within its bounded segment,
+    fail terminally instead of limping forward. A+B together give a no-LLM defect gate for the local path;
+    add them behind the same `verify_defect_judge`-style flag when that scenario arrives.
 - **Single VM = in-process execution.** `TASK_QUEUE_BACKEND=inline` + `EVENT_BUS_BACKEND=memory`
   (byte-identical to the local MVP). The Redis API/worker split + pub-sub is ONLY for multi-replica
   K8s scale-out (`deploy/k8s/`); on ONE box a missing `SERVICE_ROLE=worker` leaves runs stuck at
@@ -418,9 +433,21 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   while `cart` still matches `onAddToCart` — generic. **Screenshots** of the failed steps go to the Claude
   prompts (`repair_use_screenshots`, multimodal only; qwen stays text); failure text carries a per-step
   EXECUTION TRACE + console-log tail (`repair_failure_detail`). Detail → `docs/PROGRESS_LOG.md` (2026-09-21).
-- **Diagnose "what did we send / get" is dumpable.** `REPAIR_DEBUG_DUMP=true` writes the EXACT prompt
-  + each provider's RAW response (+ parsed patch, reject reason, timing, `ollama ps` VRAM) to
-  `repair_debug_dir` per call — captures even the timed-out "(no output)" case. Off by default (no I/O).
+- **Diagnose "what did we send / get" is dumpable — ON by default (2026-09-21).** `REPAIR_DEBUG_DUMP`
+  writes the EXACT prompt + each provider's RAW response (+ parsed patch, RCA verdict, reject reason,
+  timing, `ollama ps` VRAM) to `repair_debug_dir` (`./data/repair_debug`, host-mounted; container
+  `/app/data/repair_debug`) per DIAGNOSE call — captures even the timed-out "(no output)" case, and fires
+  on the DEFAULT Claude + Chroma path too (the dump loop covers every provider incl. `claude`). Now
+  **defaults True** (`repair_debug_dump`, compose `REPAIR_DEBUG_DUMP:-true`) so a report always lands;
+  set `REPAIR_DEBUG_DUMP=false` to silence the I/O.
+- **Auto-Repair "Detailed report" window (customer-facing, 2026-09-21).** The Studio Auto-Repair card has
+  a **📋 Detailed report** button opening a floating window (minimize/maximize/close) that walks every
+  step: what the RCA agent read + concluded, the retrieved code chunks, and — the centrepiece — EXACTLY
+  what was sent to Claude to diagnose (the failure description, the failed-step **screenshots**, and the
+  retrieved code+doc context) and the patch it returned, then apply/test/build/PR. Backend feeds it via a
+  new `diagnose` stage field `inputs` (`{failure, context, screenshots[basenames]}`, added in
+  `repair_agent/nodes/diagnose.py`); screenshots load from the run via `run_id` (`runScreenshotUrl`). Pure
+  add — reads only data already on the job, no new endpoints.
 - **GPU on GCE (msgraphrag / local models):** `g2-standard-8` = 1× NVIDIA L4 24GB; needs the
   NVIDIA driver (570 for kernel 6.8) + nvidia-container-toolkit, and **Secure Boot OFF** on Shielded
   VMs (blocks the unsigned module). `docker-compose.gpu.yml` reserves the GPU for `ollama`
@@ -491,6 +518,16 @@ Detailed history → [`docs/PROGRESS_LOG.md`](docs/PROGRESS_LOG.md). Design/depl
   detail (execution trace + console log) for text models like qwen; (6) `REPAIR_RCA_PHASE` on by default with a
   conservative gate so Claude+Chroma never regresses. Frontend: two-agent pipeline UI + Auto-Repair window
   minimize/maximize/close. Full suite 133 passed + same 8 pre-existing failures. Detail → `docs/PROGRESS_LOG.md`.
+- **2026-09-21 (later) · gap-vs-defect judge + debug-dump-on + Detailed Report window.** Three follow-ups:
+  (1) **Option C** — a Claude-vision judge (`classify_wrong_screen_failure`) decides whether a wrong-screen
+  verify is a recoverable nav GAP or a genuine app DEFECT; a confident defect fails FAST (no Tier-3
+  replanning) so Auto-Repair fires on the real bug (e.g. TC-RPS-003's Quantity-Required popup), while gaps
+  bridge exactly as before (`verify_defect_judge`, default on; A/B no-LLM equivalents documented for the
+  local path). (2) **`REPAIR_DEBUG_DUMP` now defaults True** so the debug report always lands — the default
+  Claude+Chroma path wasn't writing one because the flag was off. (3) **Detailed Report window** — a
+  customer-facing 📋 walkthrough of every repair step incl. exactly what was sent to Claude (failure text,
+  screenshots, retrieved code/doc context) and the patch returned; backend adds `diagnose.inputs`. Full
+  suite 133 passed + same 8 pre-existing failures; studio build clean. Detail → `docs/PROGRESS_LOG.md`.
 
 ### Never
 

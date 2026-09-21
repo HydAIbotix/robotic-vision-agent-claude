@@ -1004,7 +1004,28 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             # through, the entire remainder.) A text/value mismatch on the RIGHT screen is a genuine
             # assertion → NOT bridged (falls through to the terminal/handoff path unchanged).
             _screen_only = bool(expected and actual and actual != expected and not expected_text)
-            if not success and _screen_only and settings.verify_wrong_screen_recovers:
+            # ── OPTION C: gap-vs-defect JUDGE (Claude vision) ──────────────────────────────────────
+            # Before bridging a wrong-screen verify, ask Claude whether this is a recoverable navigation
+            # GAP (bridge, as below) or a genuine app DEFECT (the app refused/errored — e.g. a "Quantity
+            # Required" popup instead of adding to cart). A confident DEFECT fails the test FAST (no Tier-3
+            # replanning) so Auto-Repair targets the real bug; anything else bridges exactly as before →
+            # no regression. Generic/app-agnostic; the vision LLM is always Claude. Deterministic no-LLM
+            # equivalents (Options A/B) are documented in CLAUDE.md for the local/air-gapped path.
+            _verify_defect = False
+            if not success and _screen_only and settings.verify_wrong_screen_recovers and settings.verify_defect_judge:
+                from vision_agent.nodes.validate_pipeline import classify_wrong_screen_failure
+                judge_shot = _cap("verify_defect", i) or last_screenshot
+                _kind, _why = classify_wrong_screen_failure(judge_shot, desc, expected, actual)
+                if _kind == "defect":
+                    _verify_defect = True
+                    observation = observation or _why or f"App on {actual!r} (a genuine defect), not {expected!r}."
+                    print(f"    {i:>2}. verify  wrong screen judged a genuine DEFECT (not a nav gap): {_why} "
+                          f"→ failing fast (no Tier-3 replanning) so Auto-Repair targets the real bug")
+                    if run_id:
+                        broadcaster.emit(run_id, {"event": "log", "run_id": run_id, "test_id": test_id,
+                            "message": f"[defect judge] wrong-screen verify is a genuine defect — {_why}; "
+                                       f"failing fast (no replanning)."})
+            if not success and _screen_only and not _verify_defect and settings.verify_wrong_screen_recovers:
                 print(f"    {i:>2}. verify  on the WRONG screen (expected {expected!r}, got {actual!r}) — "
                       f"bridging the off-plan gap with bounded vision, then resuming the structured plan")
                 if run_id:
@@ -1064,6 +1085,10 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                 # The plan step ultimately PASSED, but only after Tier-3 bridged an off-plan gap —
                 # flag it so the UI can badge the run as Tier-3-recovered.
                 sr["recovered_by_tier3"] = True
+            if _verify_defect:
+                # Option C judged this a genuine app defect (not a nav gap) → the outer handoff must fail
+                # FAST (no Tier-3 replanning) so Auto-Repair targets the real bug.
+                sr["verify_defect"] = True
             step_results.append(sr)
             if run_id: broadcaster.emit(run_id, {
                 "event": "step_result", "run_id": run_id, "test_id": test_id,
@@ -1870,9 +1895,15 @@ def run_vision_step(state: TestRunnerState) -> dict:
                 and last_sr.get("actual_screen") != last_sr.get("expected_screen")
                 and not last_sr.get("expected_text")
             )
-            _verify_terminal = is_verify_fail and not (
-                _screen_only_miss and settings.verify_wrong_screen_recovers
+            # Option C: a wrong-screen verify the vision judge flagged as a genuine DEFECT is terminal —
+            # even though it is a screen-only miss — so we fail fast instead of replanning a real bug.
+            _judged_defect = bool(last_sr.get("verify_defect"))
+            _verify_terminal = is_verify_fail and (
+                _judged_defect or not (_screen_only_miss and settings.verify_wrong_screen_recovers)
             )
+            if _judged_defect:
+                print(f"  [RUN] → verify landed on the wrong screen and the vision judge ruled it a genuine "
+                      f"DEFECT (not a missing-nav gap) → failing fast, Auto-Repair will target the root cause.")
             if is_verify_fail and not _verify_terminal:
                 print(f"  [RUN] → verify landed on the WRONG screen "
                       f"(expected {last_sr.get('expected_screen')!r}, got {last_sr.get('actual_screen')!r}); "

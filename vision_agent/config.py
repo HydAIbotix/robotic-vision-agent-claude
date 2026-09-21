@@ -361,6 +361,18 @@ class Settings(BaseSettings):
     # Tier-3 can't fix by navigating). This is what makes Claude-planning + Tier-3 robust without any
     # app-specific step-injection. Set False to make every verify failure terminal.
     verify_wrong_screen_recovers: bool = True
+    # OPTION C — the "gap vs defect" JUDGE (Claude vision). A wrong-screen verify is AMBIGUOUS: it can be
+    # a recoverable missing-navigation GAP in the plan (bridge with Tier-3, above) OR a genuine app DEFECT
+    # (the app refused/errored — e.g. an add-to-cart that popped a "Quantity Required" dialog instead of
+    # advancing to the cart). Only a look at the screen can tell them apart. When True (default) and a
+    # wrong-screen verify would otherwise be bridged, we ask Claude ONE strict question: is this a nav gap
+    # or a real defect? A confident DEFECT verdict fails the test FAST (no Tier-3 replanning) so Auto-Repair
+    # targets the real bug; anything else (gap, or unsure) bridges exactly as before → NO regression. This
+    # uses the vision LLM (always Claude), so it is on the Claude path only. The deterministic, no-LLM
+    # equivalents (Option A: classify the actual screen as a blocking/error state; Option B: bound the
+    # bridge and self-terminate) are documented in CLAUDE.md for the local/air-gapped path. Set False to
+    # restore the pure "always bridge a wrong-screen miss" behaviour.
+    verify_defect_judge: bool = True
     # Save an annotated BEFORE screenshot (the last camera frame with a crosshair at the exact camera
     # pixel the arm will touch) and the AFTER frame (the /screen/click response image) for every real
     # tap, into the run's per-run screenshots folder with identifiable names (before_<cmd>_at_<u>-<v>.png
@@ -467,9 +479,10 @@ class Settings(BaseSettings):
     repair_local_timeout_s: int = 600
     # DEBUG DUMP: when true, every DIAGNOSE call writes a plain-text file to repair_debug_dir capturing the
     # EXACT prompt sent to the model AND the model's raw response (+ parsed patch, reject reason, timing and
-    # a GPU VRAM report) — the ground truth for "what did we send QWEN and what did it say" when a fix looks
-    # wrong or the model stalls. Off by default (no I/O in normal runs); enable with REPAIR_DEBUG_DUMP=true.
-    repair_debug_dump: bool = False
+    # a GPU VRAM report) — the ground truth for "what did we send the model and what did it say" when a fix
+    # looks wrong or the model stalls. Defaults ON so every repair (including the default Claude + Chroma
+    # path) leaves a debug report at repair_debug_dir; set REPAIR_DEBUG_DUMP=false to silence the I/O.
+    repair_debug_dump: bool = True
     repair_debug_dir: str = "./data/repair_debug"
 
     # ── Auto-Repair v2 — failure-anchored retrieval + precision context + verification ─────────────

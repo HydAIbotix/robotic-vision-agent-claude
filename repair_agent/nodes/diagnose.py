@@ -2,6 +2,7 @@
 
 Delegates to `propose_patch` (which also carries the deterministic demo fallback).
 """
+import os
 from dataclasses import asdict
 
 from vision_agent.config import settings
@@ -38,6 +39,16 @@ def diagnose_node(state: RepairAgentState) -> dict:
         "claude": f"Claude · {patch_dict.get('model', '')}",
         "demo-fallback": "demo fallback rule",
     }.get(patch_dict.get("source", ""), tool)
-    emit(rid, "diagnose", "done", patch=patch_dict, tool=done_tool)
-    stages = {**state.get("stages", {}), "diagnose": {"status": "done", "patch": patch_dict, "tool": done_tool}}
+    # Record EXACTLY what the diagnose model received, for the customer-facing Detailed Report: the
+    # failure description, the retrieved code context, and the failed-step screenshots (basenames — the
+    # UI loads them from the run via run_id). Screenshots are attached to the prompt only for a multimodal
+    # model (Claude); a text model (qwen) gets the text only, and the report shows that.
+    inputs = {
+        "failure": state.get("failure", ""),
+        "context": state.get("context", ""),
+        "screenshots": [os.path.basename(p) for p in (state.get("images") or [])],
+    }
+    emit(rid, "diagnose", "done", patch=patch_dict, tool=done_tool, inputs=inputs)
+    stages = {**state.get("stages", {}),
+              "diagnose": {"status": "done", "patch": patch_dict, "tool": done_tool, "inputs": inputs}}
     return {"patch": patch_dict, "stages": stages}

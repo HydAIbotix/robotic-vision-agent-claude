@@ -792,6 +792,72 @@ def verify_intent_satisfied(image_path: str, step_description: str,
         return False, f"intent check error: {e}"
 
 
+def classify_wrong_screen_failure(image_path: str, step_description: str,
+                                  expected_screen: str, actual_screen: str) -> tuple[str, str]:
+    """OPTION C — the "gap vs defect" JUDGE for a wrong-screen verify failure.
+
+    A verify that failed only because the screen id doesn't match (no text/value assertion) is
+    AMBIGUOUS. It can be:
+      • a recoverable missing-navigation GAP — the plan simply skipped a nav step and the app is fine
+        (e.g. the run reset to 'login' but the plan's first step expected 'products'); Tier-3 vision can
+        bridge it and resume; OR
+      • a genuine app DEFECT — the app REFUSED or ERRORED the action (a validation popup, an error
+        banner, a blocked/failed transition). Replanning cannot fix a real bug; the test should fail
+        FAST so Auto-Repair targets the root cause.
+
+    Ask Claude ONE strict question from the screenshot. Returns ("gap" | "defect", observation).
+    DEFAULT-SAFE: returns "gap" on any uncertainty or error, so the existing bridge-and-resume behaviour
+    is preserved and only a CONFIDENT defect verdict changes routing (no regression to working
+    recoveries). Generic + app-agnostic — no per-test wording. Vision is always Claude, so this needs no
+    multimodal gating. The deterministic, no-LLM alternatives (A/B) are documented in CLAUDE.md."""
+    import base64, json
+    from langchain_core.messages import HumanMessage
+    from vision_agent.llm import get_fast_llm, detect_image_media_type
+    from vision_agent.storage import get_storage
+
+    if not image_path:
+        return "gap", "no screenshot for defect judge"
+    try:
+        image_bytes = get_storage().load(image_path)
+        b64 = base64.standard_b64encode(image_bytes).decode()
+        media_type = detect_image_media_type(image_bytes)
+        prompt = (
+            "A test step tried to reach an expected screen but the app is on a DIFFERENT screen. Decide, "
+            "STRICTLY from the screenshot, WHY.\n"
+            f"The step's intended outcome: {step_description}\n"
+            f"Expected screen: '{expected_screen}'. The app appears to be on: '{actual_screen or 'unknown'}'.\n\n"
+            "Answer with ONE of two categories:\n"
+            "  • \"defect\" — the app REFUSED or FAILED the action: a validation/error popup or dialog is "
+            "shown, an error/warning banner is visible, a required-field or blocking message appears, the "
+            "action was rejected, or the app is clearly in a wrong/broken state that a user could NOT fix "
+            "by navigating. This is a genuine bug.\n"
+            "  • \"gap\" — the app looks HEALTHY and functional; it is simply on an earlier/other normal "
+            "screen (e.g. a list, a home/login screen, a normal step along the way). Navigating forward "
+            "would plausibly reach the expected screen. No error or refusal is visible.\n\n"
+            "Be conservative: choose \"defect\" ONLY when you can SEE a refusal, error, popup or broken "
+            "state. If the screen just looks like a normal, different page and you are unsure, choose "
+            "\"gap\".\n"
+            'Return ONLY JSON: { "category": "defect"|"gap", "observation": "<one sentence: what the screen shows>" }'
+        )
+        llm = get_fast_llm()
+        msg = HumanMessage(content=[
+            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64},
+             "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": prompt},
+        ])
+        raw = llm.invoke([msg]).content.strip()
+        if "```" in raw:
+            raw = raw.split("```")[1].lstrip("json").strip()
+        v = json.loads(raw)
+        cat = str(v.get("category", "gap")).strip().lower()
+        if cat not in ("defect", "gap"):
+            cat = "gap"
+        return cat, str(v.get("observation", "")).strip()
+    except Exception as e:
+        print(f"  [VALIDATE] defect judge error: {e} — treating as a recoverable gap (no regression).")
+        return "gap", f"defect judge error: {e}"
+
+
 def _claude_vision_validate(image_path: str, description: str, screen_before: str) -> dict:
     """Node 3 fallback — full VALIDATE_STEP call via Claude Opus."""
     import base64, json

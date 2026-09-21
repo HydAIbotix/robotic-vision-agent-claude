@@ -1580,3 +1580,69 @@ alone.
 the SAME 8 pre-existing `test_template_match`/`test_vision_agent` fixture failures that fail identically on
 clean HEAD. Frontend `npm run build` clean. The default Chroma + Claude path: same code/design retrieval;
 RCA runs but a code bug always proceeds to the unchanged fixer, so the fix result is preserved.
+
+---
+
+## 2026-09-21 (later) — gap-vs-defect verify judge (Option C), debug-dump-on-by-default, Detailed Report window
+
+Three follow-ups on top of the v3 two-agent redesign, after the user observed: (a) the product-quantity
+popup bug went through Tier-3 replanning instead of failing fast into Auto-Repair; (b) no debug report was
+written on the default Claude + Chroma path; (c) a customer-facing elaborate report of the repair was
+wanted.
+
+### 1. Option C — the "gap vs defect" verify judge (Claude vision)
+**Problem.** A wrong-screen `verify` failure is ambiguous. `run_vision_step` routed *every* screen-only
+miss (`expected != actual`, no text assertion) as a recoverable "missing-navigation gap" → Tier-3
+bridge-and-resume. TC-RPS-003's real defect (add-to-cart popped a **Quantity Required** dialog and never
+reached the cart) looks structurally identical to a benign nav gap, so it was replanned instead of failing
+fast into Auto-Repair.
+
+**Fix (generic, app-agnostic).** Before bridging, ask Claude ONE strict question from the screenshot —
+`classify_wrong_screen_failure(image, step, expected, actual)` in `vision_agent/nodes/validate_pipeline.py`
+— returns `("gap"|"defect", observation)`:
+- **defect** → the app REFUSED/ERRORED (popup, error banner, blocked/broken state). Fail FAST: mark
+  `sr["verify_defect"]`, and the outer handoff treats it as terminal (`_verify_terminal`), so Auto-Repair
+  fires on the real bug instead of replanning.
+- **gap** (or any uncertainty/error) → bridge exactly as before. **Default-safe**: the judge returns
+  `"gap"` on any parse error/exception, so working recoveries never regress.
+
+Gated by `verify_defect_judge` (default True). Runs only on the `_screen_only` path — text/value
+assertions on the right screen were already terminal, and `verify_defect` never fires for them. Vision is
+always Claude in this system, so no multimodal gate is needed. The judge reuses one `get_fast_llm()` vision
+call (same pattern as `verify_intent_satisfied`).
+
+**Deferred (documented in CLAUDE.md) — no-LLM equivalents for a future air-gapped/local path:**
+- *Option A* — classify the ACTUAL screen deterministically: a `*_popup` / `*_required` / `*_error` /
+  error-banner state ⇒ defect (terminal); a neutral other screen ⇒ gap (bridge).
+- *Option B* — keep the bridge but BOUND it and self-terminate: if Tier-3 can't reach the expected screen
+  within its bounded segment, fail terminally rather than limp forward.
+- A+B together give a no-LLM defect gate; wire them behind the same flag when the local scenario arrives.
+
+### 2. `REPAIR_DEBUG_DUMP` on by default
+The dump loop already covered every diagnose provider (incl. `claude`), but `repair_debug_dump` defaulted
+`False`, so the default Claude + Chroma path wrote nothing to `./data/repair_debug`. Now `repair_debug_dump
+= True` (config) and `REPAIR_DEBUG_DUMP:-true` (compose); set `REPAIR_DEBUG_DUMP=false` to silence the I/O.
+Every repair now leaves a report capturing the exact prompt + raw response + parsed patch + RCA verdict.
+
+### 3. Auto-Repair "Detailed report" window (customer-facing)
+A **📋 Detailed report** button on each Auto-Repair card opens a floating window (minimize / maximize /
+close) that walks the whole repair for a non-engineer audience:
+- **① RCA agent** — verdict + confidence + rationale + suspect, and the docs/test-cases it read (full
+  snippets, no source code).
+- **② Code-fixing agent** — the retrieved code chunks; then the **Diagnose** centrepiece: *exactly what was
+  sent to Claude* — (1) the failure description, (2) the failed-step **screenshots** (rendered inline,
+  loaded from the run via `run_id`), (3) the retrieved code + doc context — followed by *Claude's answer*
+  (the minimal find/replace patch); then apply / unit-test / build (command + output) and the PR branch +
+  diff.
+
+**Backend:** `repair_agent/nodes/diagnose.py` now records `diagnose.inputs =
+{failure, context, screenshots[basenames]}` on the stage (and emits it), so the report is a pure render of
+data already on the job — no new endpoints. **Frontend:** `client.ts` `RepairStage.inputs`;
+`AutoRepair.tsx` gains `DetailedReportWindow` + section renderers, using the existing
+`runScreenshotUrl(run_id, name)` helper for screenshots.
+
+### No-regression
+`pytest tests/` = **133 passed**, 5 skipped, same 8 pre-existing `test_template_match`/`test_vision_agent`
+fixture failures (identical on clean HEAD). Studio `npm run build` clean. Option C is a strict superset of
+the prior verify routing (default-safe to "gap"); the debug-dump flag only adds I/O; the Detailed Report is
+an additive read-only view. The default Claude + Chroma repair result is unchanged.
