@@ -2045,3 +2045,20 @@ Four fixes reported after rebuilding the studio container. Pure frontend; no bac
 
 No-regression: Execution unchanged; annotated-screenshot data + required inputs preserved; `npm run build`
 clean. Rebuild the **studio** container to deploy.
+
+---
+
+## 2026-09-23 (fixes 2) · Test Intake — disable Generate when done + Execution deep-link to review
+
+Two small UX fixes. Pure frontend; no backend change.
+
+1. **Disable "Generate Test Plans" once every plan exists.** New `allGenerated` flag (every case has a
+   cached/loaded plan) disables the button and updates the guidance to point at Review plans / the
+   Reject-plans regenerate flow. Fixes the case where returning from review to the setup screen left
+   Generate enabled and clicking it just re-entered review.
+2. **Execution → "← Back to Review Plan".** In review mode the Execution page's button is renamed and now
+   deep-links straight into the review screen: it sets a one-shot `intake_open_review` localStorage flag
+   that `TestIntake` consumes on load (an effect fires once plans have loaded) to switch to the review phase.
+   Legacy (no reviews) keeps the old "Edit in Test Intake" → setup behaviour.
+
+No-regression: `npm run build` clean; Execution otherwise unchanged. Rebuild the **studio** container to deploy.

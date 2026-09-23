@@ -686,7 +686,10 @@ Detailed history → [`docs/PROGRESS_LOG.md`](docs/PROGRESS_LOG.md). Design/depl
     demand:** the left plan steps no longer show thumbnails; each step is a clickable row (📷 marks steps that
     have a screenshot) and clicking one shows that single step's full annotated image on the RIGHT (click to
     zoom). (3) **Rejected plans is now its own screen** (`phase === 'rejected'` → `RejectedView`), not a modal
-    overlay on top of the review page.
+    overlay on top of the review page. (4) Once **every** case has a plan (`allGenerated`) the **Generate Test
+    Plans** button is disabled (regeneration is the Reject-plans flow); "Review plans →" is the way forward.
+    (5) The Execution page's back button reads **← Back to Review Plan** and deep-links into the review screen
+    via a one-shot `intake_open_review` localStorage flag that `TestIntake` consumes on load.
 
 ### Never
 
