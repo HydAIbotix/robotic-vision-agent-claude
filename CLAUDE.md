@@ -679,6 +679,14 @@ Detailed history → [`docs/PROGRESS_LOG.md`](docs/PROGRESS_LOG.md). Design/depl
   empty. Gate preserved: `human_review_explorer` blocks generation until the exploration is approved.
   **No-regression:** with NO reviews yet, Execution is byte-for-byte the old `selected_tcs` behaviour. Studio
   build clean. Rebuild the **studio** container to deploy.
+  - **Fixes (2026-09-23, same day):** (1) **Reset now clears the review state.** `ResetButton` (Layout.tsx)
+    also removes `tc_reviews` + `exec_excluded` from localStorage — previously a Reset left stale
+    approved/rejected statuses that a same-id re-upload inherited (the phantom "1 approved so far"). Belt-and-
+    braces: Test Intake prunes `tc_reviews` to the CURRENT test-case ids on load. (2) **Per-step screenshot on
+    demand:** the left plan steps no longer show thumbnails; each step is a clickable row (📷 marks steps that
+    have a screenshot) and clicking one shows that single step's full annotated image on the RIGHT (click to
+    zoom). (3) **Rejected plans is now its own screen** (`phase === 'rejected'` → `RejectedView`), not a modal
+    overlay on top of the review page.
 
 ### Never
 

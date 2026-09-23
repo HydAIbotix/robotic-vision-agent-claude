@@ -2020,3 +2020,28 @@ screenshots, required inputs) is preserved.
 
 `human_review_explorer` still gates generation (blocks until the exploration is approved). `npm run build`
 clean. Rebuild the **studio** container to deploy.
+
+---
+
+## 2026-09-23 (fixes) · Test Intake review flow — reset/state + screenshot UX fixes (studio-only)
+
+Four fixes reported after rebuilding the studio container. Pure frontend; no backend change.
+
+1. **Reset didn't clear the plan-review state (bug 1 & 2).** `ResetButton` (`components/Layout.tsx`) cleared
+   `tc_plan_*` / `tc_config_*` / `selected_tcs` but NOT `tc_reviews` or `exec_excluded`, so after a Reset the
+   previously approved/rejected statuses lingered and a same-id re-upload inherited them (phantom
+   "1 approved so far", and cases showing "approved" though never approved). Now Reset also removes
+   `tc_reviews` + `exec_excluded`. Defence in depth: `TestIntake` prunes `tc_reviews` to the CURRENT
+   test-case ids on load (an effect keyed on `cases`), so a stale status can never apply to a missing id.
+2. **Per-step screenshot on the review side (bug 3).** Removed the little thumbnail from every left-hand plan
+   step. Each step is now a clickable, selectable row (a 📷 marks steps that have an annotated screenshot);
+   clicking a step shows THAT step's full annotated image on the RIGHT, under the Approve/Reject box (click
+   the image to enlarge). The right side no longer renders every step's screenshot. `selStep` state +
+   an effect defaults the selection to the first step that has a screenshot whenever the plan changes.
+3. **Rejected plans is a separate screen (bug 4).** The rejected-plans table moved from a modal overlay to
+   its own phase (`phase === 'rejected'` → `RejectedView`) with a "← Back to review" button, so it is no
+   longer shown on top of the review window. Regeneration progress renders on that screen; finishing returns
+   to the review screen at the first regenerated plan.
+
+No-regression: Execution unchanged; annotated-screenshot data + required inputs preserved; `npm run build`
+clean. Rebuild the **studio** container to deploy.
