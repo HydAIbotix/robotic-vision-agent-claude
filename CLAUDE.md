@@ -657,23 +657,28 @@ Detailed history → [`docs/PROGRESS_LOG.md`](docs/PROGRESS_LOG.md). Design/depl
   is invisible on the dark theme unless it sets `color` explicitly (this bit the Executive-Summary pipeline
   stepper). Report code/output boxes use a legible `MONO` stack + explicit `color: var(--text)`; the report
   window container also sets `color`. Rebuild the **studio** container to deploy a studio change.
-- **⚠️ Bulk plan generation + Approve/Reject review + approval-gated Execution (2026-09-23, studio-only).**
-  Test Intake now has THREE phases (`phase` in `TestIntake.tsx`): `list` (the classic per-TC table/detail,
-  UNCHANGED — no regression), `generating` (a bulk progress bar), and `review`. A **⚙ Generate Test Plans**
-  button (shown once cases exist) generates a Claude plan for EVERY case sequentially with live progress
-  (reuses cached plans; only missing ones hit `/tc-plan`), then enters `review`: one plan at a time on the
-  LEFT (via `PlanStep`, so annotated thumbnails / required inputs / edit / regenerate all still work) with
-  the raw test case below it, and a **Review** panel on the RIGHT (Approve / Reject+reason). **Reject
-  regenerates THAT plan** via `/tc-plan` with `review_feedback=<reason>` (→ Claude) and returns it to
-  `pending`. A `Pager` (First ‹ Prev · numbered · Next › End, status-dotted) sits under each plan; a top bar
-  has **Approve All** / **Reject All** (Reject All regenerates ALL plans with one reason). Approval status is
-  browser-local in `tc_reviews` (`{status:'pending'|'approved'|'rejected', reason?}`, client helpers
-  `getTcReviews`/`setTcReview`/`getApprovedTcs`); approving keeps `selected_tcs` in sync (approved set, in
-  case order) so it drives Execution. **Execution now runs ONLY approved cases**: when any review exists
-  (`reviewMode`), the pool is the approved set and each row gets an include/exclude checkbox (excludes kept in
-  `exec_excluded`, never changing approval); `runIds = approved − excluded`, Start is disabled when empty (so
-  it can never fall through to "run all"). **No-regression:** with NO reviews yet, Execution is byte-for-byte
-  the old `selected_tcs` behaviour. Studio build clean. Rebuild the **studio** container to deploy.
+- **⚠️ Bulk plan generation + Approve/Reject review + approval-gated Execution (2026-09-23, studio-only;
+  revised same day).** Test Intake has TWO phases (`phase` in `TestIntake.tsx`): `setup` and `review`. The
+  OLD per-test selection table + click-a-test-to-generate + inline edit flow is **REMOVED**. `setup` = import
+  `.xlsx` + a **⚙ Generate Test Plans (N)** button that generates a Claude plan for EVERY case sequentially
+  with progress shown **inline on the same page** (reuses valid cached plans; only missing ones hit
+  `/tc-plan`). Then `review`: one plan at a time — LEFT shows the plan (`PlanStep`, annotated thumbnails +
+  required inputs preserved) with the raw test case below and a status-dotted `Pager`
+  (`« First ‹ Prev · 1 2 … N · Next › End »`) ONLY at the bottom; RIGHT is the **Review** panel (Approve /
+  Reject+reason) with, **under it, the annotated screenshot of every interaction step inline** (coords in each
+  caption) so coordinates are verifiable without clicking. There are NO Edit/Regenerate buttons in review.
+  **Reject only QUEUES** the case (`status:'rejected'` + reason) — it does NOT regenerate then and there. A
+  top-bar **🗂 Rejected plans (N)** button opens a floating `RejectedWindow` (table of rejected cases + their
+  reasons, select-all / individual) whose **Regenerate** batch-re-plans the chosen cases via `/tc-plan` with
+  each case's `review_feedback=<reason>` and returns them to `pending`. **Approve All** / **Reject All** (the
+  latter queues ALL as rejected with one reason). Approval status is browser-local in `tc_reviews`
+  (`{status:'pending'|'approved'|'rejected', reason?}`; helpers `getTcReviews`/`setTcReview`/`getApprovedTcs`);
+  approving keeps `selected_tcs` in sync (approved set, case order). **Execution runs ONLY approved cases**:
+  when any review exists (`reviewMode`) the pool is the approved set with a per-row include/exclude checkbox
+  (excludes in `exec_excluded`, never altering approval); `runIds = approved − excluded`, Start disabled when
+  empty. Gate preserved: `human_review_explorer` blocks generation until the exploration is approved.
+  **No-regression:** with NO reviews yet, Execution is byte-for-byte the old `selected_tcs` behaviour. Studio
+  build clean. Rebuild the **studio** container to deploy.
 
 ### Never
 

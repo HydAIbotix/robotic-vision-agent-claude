@@ -1990,3 +1990,33 @@ Execution page falls back to its old `selected_tcs` behaviour whenever no review
 `npm run build` clean (tsc + vite). The list phase and all existing plan functionality (thumbnails, required
 inputs, edit, regenerate, human-review gates) are preserved; Execution is unchanged until the review flow is
 used. Rebuild the **studio** container to deploy (a backend-only rebuild does not rebuild the SPA).
+
+---
+
+## 2026-09-23 (revised) · Test Intake review flow overhaul (studio-only)
+
+Follow-up UX changes to the bulk-generate/review flow shipped earlier the same day. Pure frontend
+(`kiosk-test-studio`); no backend change. No-regression: Execution still falls back to the old
+`selected_tcs` behaviour whenever no review has been recorded, and all plan functionality (annotated
+screenshots, required inputs) is preserved.
+
+1. **Removed the per-test selection table + detail panel.** The old "click a test case to generate its
+   plan" flow and the selectable list/checkboxes/search/selection-banner are gone. Test Intake now has two
+   phases: `setup` (import + Generate) and `review`.
+2. **Progress shown inline on the same page.** Clicking **⚙ Generate Test Plans (N)** renders the progress
+   bar (`done/total`, current id, Cancel) inside the setup card — no separate/blank screen.
+3. **Reject now QUEUES instead of regenerating.** Reject (and Reject All) set `status:'rejected'` + reason
+   without calling Claude. A new **🗂 Rejected plans (N)** button opens a floating `RejectedWindow`: a table
+   of rejected cases + reasons with select-all / individual checkboxes and a **Regenerate selected** action
+   that batch-re-plans them (`/tc-plan` `force` + each case's `review_feedback`), showing its own progress,
+   and returns them to `pending`.
+4. **Per-step annotated screenshots on the review side.** Under the Approve/Reject box, every interaction
+   step's annotated exploration screenshot is rendered inline (with `screen_id · element_id · (px,py)` in the
+   caption) so coordinates are verifiable without clicking each thumbnail.
+5. **Removed the top pager** — the numbered `Pager` now appears only at the bottom of the plan (Prev/Next
+   also remain in the review panel).
+6. **Removed the Edit / Regenerate buttons** from the review view (regeneration is now the batch
+   Rejected-plans flow). The left plan is read-only.
+
+`human_review_explorer` still gates generation (blocks until the exploration is approved). `npm run build`
+clean. Rebuild the **studio** container to deploy.
