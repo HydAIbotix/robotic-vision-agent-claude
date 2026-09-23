@@ -657,6 +657,23 @@ Detailed history → [`docs/PROGRESS_LOG.md`](docs/PROGRESS_LOG.md). Design/depl
   is invisible on the dark theme unless it sets `color` explicitly (this bit the Executive-Summary pipeline
   stepper). Report code/output boxes use a legible `MONO` stack + explicit `color: var(--text)`; the report
   window container also sets `color`. Rebuild the **studio** container to deploy a studio change.
+- **⚠️ Bulk plan generation + Approve/Reject review + approval-gated Execution (2026-09-23, studio-only).**
+  Test Intake now has THREE phases (`phase` in `TestIntake.tsx`): `list` (the classic per-TC table/detail,
+  UNCHANGED — no regression), `generating` (a bulk progress bar), and `review`. A **⚙ Generate Test Plans**
+  button (shown once cases exist) generates a Claude plan for EVERY case sequentially with live progress
+  (reuses cached plans; only missing ones hit `/tc-plan`), then enters `review`: one plan at a time on the
+  LEFT (via `PlanStep`, so annotated thumbnails / required inputs / edit / regenerate all still work) with
+  the raw test case below it, and a **Review** panel on the RIGHT (Approve / Reject+reason). **Reject
+  regenerates THAT plan** via `/tc-plan` with `review_feedback=<reason>` (→ Claude) and returns it to
+  `pending`. A `Pager` (First ‹ Prev · numbered · Next › End, status-dotted) sits under each plan; a top bar
+  has **Approve All** / **Reject All** (Reject All regenerates ALL plans with one reason). Approval status is
+  browser-local in `tc_reviews` (`{status:'pending'|'approved'|'rejected', reason?}`, client helpers
+  `getTcReviews`/`setTcReview`/`getApprovedTcs`); approving keeps `selected_tcs` in sync (approved set, in
+  case order) so it drives Execution. **Execution now runs ONLY approved cases**: when any review exists
+  (`reviewMode`), the pool is the approved set and each row gets an include/exclude checkbox (excludes kept in
+  `exec_excluded`, never changing approval); `runIds = approved − excluded`, Start is disabled when empty (so
+  it can never fall through to "run all"). **No-regression:** with NO reviews yet, Execution is byte-for-byte
+  the old `selected_tcs` behaviour. Studio build clean. Rebuild the **studio** container to deploy.
 
 ### Never
 

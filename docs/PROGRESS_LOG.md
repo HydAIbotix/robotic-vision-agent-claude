@@ -1949,3 +1949,44 @@ backend data (the explorer already produced these labelled frames, and the plan 
 Every gate is config-gated and default OFF; the RCA pause never triggers unless `human_review_rca` is on, so
 the default Claude+Chroma repair runs exactly as before. `pytest tests/` = 141 passed + same 8 pre-existing
 fixture failures; studio `npm run build` clean; `api.main` imports clean; repair graph compiles.
+
+---
+
+## 2026-09-23 · Bulk plan generation + Approve/Reject review + approval-gated Execution (studio-only)
+
+A Test-Intake UX change so plans are generated for the whole suite up front, reviewed one at a time with
+Approve/Reject, and only APPROVED plans are runnable. Pure frontend (`kiosk-test-studio`); no backend change
+(reuses `/tc-plan` with `review_feedback`). No-regression: the classic list/detail view is untouched and the
+Execution page falls back to its old `selected_tcs` behaviour whenever no review has been recorded yet.
+
+### Test Intake — three phases (`TestIntake.tsx`)
+- **list** — the original test-case table + detail panel + per-TC "Generate Plan" flow, UNCHANGED. A new
+  **⚙ Generate Test Plans (N)** action card appears once cases exist (plus a **Review plans →** shortcut when
+  cached plans already exist).
+- **generating** — clicking Generate runs Claude for EVERY case sequentially with a live progress bar
+  (`done / total`, current test id, Cancel). Reuses a valid cached plan; only missing/stale ones call
+  `/tc-plan`. On finish → `review`.
+- **review** — ONE plan at a time:
+  - LEFT: the generated plan (rendered by the same `PlanStep`, so annotated-screenshot thumbnails, required
+    inputs, Edit and Regenerate all still work), with the raw test case (description / raw steps / expected
+    results) BELOW it. A status-dotted `Pager` (`« First ‹ Prev · 1 2 … N · Next › End »`) under the plan.
+  - RIGHT: a **Review** panel — Approve, or Reject → reason textarea → regenerates THAT plan via `/tc-plan`
+    with `review_feedback=<reason>` and returns it to `pending` for re-review. Prev/Next buttons too.
+  - TOP bar: **Approve All** / **Reject All** (Reject All takes one reason and regenerates every plan with it),
+    a running `{approved} approved · {pending} pending of {total}` count, Back-to-list, and Proceed-to-Execution.
+
+### Approval store + Execution gating
+- New browser-local `tc_reviews` map (`{test_id: {status:'pending'|'approved'|'rejected', reason?}}`) with
+  client helpers `getTcReviews` / `saveTcReviews` / `getTcReview` / `setTcReview` / `getApprovedTcs`. Approving
+  syncs `selected_tcs` (approved set, in test-case order) via the existing `checked` effect, so Execution reads
+  it with no new wiring.
+- **`Execution.tsx`** — `reviewMode` = any review exists. When on: the pool is the APPROVED set, each run-order
+  row gets an include/exclude checkbox (excludes stored in `exec_excluded`, pruned to approved, and never
+  altering approval), `runIds = approved − excluded`, and Start is disabled when `runIds` is empty (so an empty
+  run can never fall through to the backend's "run all"). Drag-reorder, backend selector, preview, and start
+  are otherwise unchanged. When OFF (no reviews yet): byte-for-byte the previous `selected_tcs` behaviour.
+
+### No-regression
+`npm run build` clean (tsc + vite). The list phase and all existing plan functionality (thumbnails, required
+inputs, edit, regenerate, human-review gates) are preserved; Execution is unchanged until the review flow is
+used. Rebuild the **studio** container to deploy (a backend-only rebuild does not rebuild the SPA).
