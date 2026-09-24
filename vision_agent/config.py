@@ -450,6 +450,16 @@ class Settings(BaseSettings):
     # required). Both default ON per the demo; set to False to keep repair fully manual.
     auto_repair_on_failure: bool = True
     repair_auto_pr: bool = True
+    # After a green build, RE-RUN the failed test to VERIFY the fix before raising the PR — the PR is
+    # opened ONLY if the retest passes (the user-requested "fix → retest → PR" loop). The retest is a
+    # REAL run (a new TestRun visible in Results/history + the run summary), streamed live into an
+    # overlay window that closes when it finishes. When True, the auto path prepares the PR during the
+    # pipeline and opens it here after a passing retest; a failing/unrunnable retest leaves the branch
+    # PREPARED (open it manually from the repair card) and never auto-raises. When False, behaviour is
+    # byte-for-byte the pre-2026-09-24 flow (PR auto-opens right after the build). NOTE: the retest can
+    # only PASS if the RUNNING app serves the fixed code (a dev server on the codebase, or a rebuild of
+    # the app image from the fix branch) — otherwise it re-observes the same bug and the PR stays gated.
+    repair_retest_before_pr: bool = True
     repair_pr_remote: str = "origin"
     # GitHub token (repo scope) used to (a) authenticate `git push` of the fix branch and (b) CREATE
     # the PR via the GitHub REST API when `gh` isn't installed (the container has no gh). Blank →

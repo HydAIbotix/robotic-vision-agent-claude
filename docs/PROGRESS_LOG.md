@@ -2062,3 +2062,47 @@ Two small UX fixes. Pure frontend; no backend change.
    Legacy (no reviews) keeps the old "Edit in Test Intake" → setup behaviour.
 
 No-regression: `npm run build` clean; Execution otherwise unchanged. Rebuild the **studio** container to deploy.
+
+---
+
+## 2026-09-24 · Auto-Repair — retest the fix, then raise the PR (with a live retest overlay)
+
+After a repair applies a fix and the build passes, the agent now **re-runs the failed test to verify the
+fix** and raises the PR **only when the retest passes**. Backend + studio.
+
+**Backend (`api/main.py`, `vision_agent/config.py`).**
+- New setting `repair_retest_before_pr` (default **True**). When on, the auto path runs the pipeline with
+  `auto_pr` **suppressed** (the PR is only PREPARED in the `prepare_pr` node), then `_run_auto_repair` calls
+  the new `_retest_and_maybe_open_pr(...)`:
+  1. mints a **real** `TestRun` (`filter_tc=<test_id>`, `is_repair_retest=True`) and runs it synchronously
+     via `_execute_run` — so it appears in Results / the run summary / history like any other run;
+  2. streams a `repair_retest_started` / `repair_retest_done` pair on the ORIGINAL run's WS and adds a
+     live `retest` stage to the repair job;
+  3. reads the per-test verdict from the DB; on **pass** opens the PR here (respecting `repair_auto_pr`),
+     on **fail/unrunnable** leaves the branch prepared (manual open) and annotates the `pr` stage.
+- New `RunRequest.is_repair_retest` flag. `_execute_run` now gates BOTH the Defect agent and Auto-Repair on
+  `run.failed > 0 and not req.is_repair_retest`, so a verification re-run can never recurse into another
+  repair or file duplicate defects.
+- The human-review (`human_review_rca`) resume path is unchanged: its resume context keeps the REAL
+  `repair_auto_pr`, so an approved resume behaves exactly as before (build → open PR, no retest gate).
+- **No-regression:** with `repair_retest_before_pr=False` the flow is byte-for-byte the old
+  build → auto-open-PR path (`_retest_and_maybe_open_pr` is never called). Retest is skipped when the repair
+  stopped early (RCA stop, dry-run, cancel, no green build, or awaiting review).
+
+**Studio (`AutoRepair.tsx`, `client.ts`).**
+- New pipeline stage **🔁 Re-test the fix** shown ONLY when a retest actually ran (`visibleStages` drops the
+  row otherwise, so the disabled path reads exactly as before — no phantom pending step).
+- **Retest overlay** (`RetestOverlayHost` / `RetestOverlay`): while the retest runs, a floating overlay
+  window streams the retest run's live WS feed on top of the repair view, then **auto-closes** on
+  completion — revealing the updated auto-repair status (PR raised on a pass). Works both in the standalone
+  repair window (browser tab) and the inline repair window in Live Monitor.
+- The success banner + Executive-Summary hero now distinguish **Fixed & verified** (retest passed → PR
+  raised) from **Built, retest still failing** (PR gated; open manually). Technical report gains a
+  `sec-retest` block; `RepairStage` type extended with `run_id/passed/outcome/total/retest_blocked/retest_note`.
+- **Prerequisite:** the retest can only PASS if the RUNNING app serves the fixed code (a dev server on the
+  codebase, or a rebuild of the app image from the fix branch); otherwise it re-observes the bug and the PR
+  stays gated. Disable `repair_retest_before_pr` for environments that can't serve the fix.
+
+**Verification:** 5 new tests (`tests/test_repair_retest.py`) lock the gating (no-op without a green build /
+prepared PR / test id; the flag defaults). Full suite 146 passed + the same 8 pre-existing vision/template
+fixture failures; studio `npm run build` clean. Restart the backend + rebuild the **studio** container to deploy.

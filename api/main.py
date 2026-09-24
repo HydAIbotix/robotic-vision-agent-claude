@@ -155,6 +155,10 @@ class RunRequest(BaseModel):
         "valid":   {"email": "tester@kiosk.local", "password": "Password123"},
         "invalid": {"email": "baduser", "password": "wrongpass"},
     }
+    # Internal flag: this run is an Auto-Repair VERIFICATION re-run (fix → retest → PR). It executes
+    # exactly like a normal run and IS recorded/broadcast so Results + the run summary reflect it, but
+    # it must NOT itself re-trigger the Auto-Repair or Defect agents (that would recurse / duplicate).
+    is_repair_retest: bool = False
 
 
 @app.get("/api/runs")
@@ -3299,8 +3303,11 @@ def _execute_run(run_id: str, req: RunRequest, tenant_id: str = ""):
         _broadcast(run_id, {"event": "run_completed", "run_id": run_id,
                              "total": run.total, "passed": run.passed, "failed": run.failed})
 
-        # Trigger defect intelligence sub-agent for any failed TCs
-        if run.failed > 0:
+        # Trigger defect intelligence + Auto-Repair for any failed TCs. SKIP both when this run is an
+        # Auto-Repair verification re-run (req.is_repair_retest): re-triggering would recurse (retest →
+        # repair → retest …) and file duplicate defects for the same failure. The retest's pass/fail is
+        # read back by the repair thread that launched it.
+        if run.failed > 0 and not req.is_repair_retest:
             failed_results = [
                 tr for tr in test_results
                 if tr.get("outcome") != "passed"
@@ -3310,12 +3317,15 @@ def _execute_run(run_id: str, req: RunRequest, tenant_id: str = ""):
                 args=(run_id, req.kiosk_id, failed_results),
                 daemon=True,
             ).start()
-            # Auto-run the self-healing Auto-Repair agent (fix → test → build → raise PR) and pop it
-            # into a new window in the UI. Fires on the FIRST failed test only, once per run.
+            # Auto-run the self-healing Auto-Repair agent (fix → retest → build → raise PR) and pop it
+            # into a new window in the UI. Fires on the FIRST failed test only, once per run. Credentials
+            # + tenant are captured HERE (request context) so the verification retest can reproduce the
+            # run in the right tenant with the same login.
             if settings.auto_repair_on_failure:
                 threading.Thread(
                     target=_run_auto_repair,
                     args=(run_id, req.kiosk_id, failed_results),
+                    kwargs={"credentials": req.credentials, "tenant_id": tenant_id},
                     daemon=True,
                 ).start()
 
@@ -3594,10 +3604,97 @@ def _store_repair_result(repair_id: str, run_id: str, test_id: str, result: dict
                         "cancelled": bool(result.get("cancelled")), "pr_url": pr_url})
 
 
-def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list):
+def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result: dict,
+                              credentials: Optional[dict], kiosk_id: str, tenant_id: str = ""):
+    """VERIFY the fix, then raise the PR only if it passes (repair_retest_before_pr).
+
+    After a green build with a PREPARED (not-yet-opened) PR, re-run JUST the failed test as a REAL run
+    (a new TestRun → visible in Results/history + the run summary), streamed live to the UI. On PASS the
+    prepared PR is pushed/opened here (respecting repair_auto_pr); on FAIL/unrunnable the branch stays
+    prepared for a manual open. Mutates `result["stages"]` so the stored job reflects the retest + PR.
+    Never raises — a retest that can't run must not lose the fix. Runs synchronously in the repair thread.
+    """
+    stages = result.get("stages") or {}
+    build_ok = bool((stages.get("build") or {}).get("ok"))
+    pr = dict(stages.get("pr") or {})
+    # Only verify when the fixer actually produced a green build + a prepared branch (else nothing to test).
+    if not test_id or not build_ok or not pr.get("prepared"):
+        return
+
+    now = datetime.now()
+    retest_run_id = f"run-{_next_run_number()}-{now.strftime('%H%M%S-%d%m')}"
+    db = next(get_db())
+    try:
+        db.add(models.TestRun(
+            run_id=retest_run_id, kiosk_id=kiosk_id or "", robot_id="R-01", filter_tc=test_id,
+            mode=settings.robot_backend, status="pending", created_at=datetime.utcnow(),
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    _repair_stage(repair_id, {"stage": "retest", "status": "running", "run_id": retest_run_id,
+                              "note": f"Re-running {test_id} to verify the fix…"})
+    _broadcast(run_id, {"event": "repair_retest_started", "run_id": run_id, "repair_id": repair_id,
+                        "test_id": test_id, "retest_run_id": retest_run_id})
+
+    req = RunRequest(
+        kiosk_id=kiosk_id or "", filter_tc=test_id, mode=settings.robot_backend,
+        credentials=credentials or RunRequest().credentials, is_repair_retest=True,
+    )
+    _active_runs[retest_run_id] = {"req": req}
+    print(f"  [REPAIR] Verifying fix for {test_id} → retest run {retest_run_id}")
+    try:
+        _execute_run(retest_run_id, req, tenant_id)   # blocks until the retest completes
+    except Exception as e:
+        print(f"  [REPAIR] retest run error: {e}")
+
+    # Read the retest verdict from the DB (the per-test result is authoritative).
+    outcome, total = "failed", 0
+    db = next(get_db())
+    try:
+        rrun = db.query(models.TestRun).filter_by(run_id=retest_run_id).first()
+        tr = db.query(models.TestResult).filter_by(run_id=retest_run_id, test_id=test_id).first()
+        if tr and tr.outcome:
+            outcome = tr.outcome
+        elif rrun and rrun.total and rrun.failed == 0:
+            outcome = "passed"
+        total = rrun.total if rrun else 0
+    finally:
+        db.close()
+    passed = outcome == "passed"
+
+    retest_stage = {"stage": "retest", "status": "done" if passed else "failed",
+                    "run_id": retest_run_id, "passed": passed, "outcome": outcome, "total": total,
+                    "note": f"{test_id} {'passed' if passed else 'still failing'} on retest"}
+    _repair_stage(repair_id, retest_stage)
+    result.setdefault("stages", {})["retest"] = retest_stage
+    _broadcast(run_id, {"event": "repair_retest_done", "run_id": run_id, "repair_id": repair_id,
+                        "test_id": test_id, "retest_run_id": retest_run_id, "passed": passed})
+
+    if passed and settings.repair_auto_pr and not (pr.get("opened") or {}).get("opened"):
+        # Verified → raise the PR now (the same push/open the pipeline would have done directly).
+        from repair_agent.repair_failed_test import open_pull_request
+        pr["opened"] = open_pull_request(pr["branch"], pr["base"], pr["title"], pr["body"])
+        _repair_stage(repair_id, {"stage": "pr", **pr})
+        result["stages"]["pr"] = pr
+    elif not passed:
+        # Leave the branch prepared (manual open still available); record WHY it wasn't auto-raised.
+        pr["retest_blocked"] = True
+        pr["retest_note"] = ("Retest did not pass — the PR was not raised automatically. Verify the fix "
+                             "is served by the running app (dev server / rebuild), then open the PR manually.")
+        _repair_stage(repair_id, {"stage": "pr", **pr})
+        result["stages"]["pr"] = pr
+
+
+def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list,
+                     credentials: Optional[dict] = None, tenant_id: str = ""):
     """Background thread: auto-run the Auto-Repair agent for the FIRST failed test, streaming its
     stages into an in-memory repair job and signalling the UI (repair_started/repair_done on the
-    run WS) so it can pop the repair into a new window."""
+    run WS) so it can pop the repair into a new window.
+
+    When repair_retest_before_pr is on, the PR is only PREPARED in the pipeline (auto_pr suppressed)
+    and then opened here after a passing verification retest — see _retest_and_maybe_open_pr."""
     if not failed_results:
         return
     tr = failed_results[0]
@@ -3621,13 +3718,23 @@ def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list):
     try:
         from repair_agent.repair_failed_test import run_repair
         branch_suffix = repair_id.split("-")[-1]
+        retest = settings.repair_retest_before_pr
+        # When retesting, defer PR opening until the fix is verified → the pipeline PREPARES only.
+        pipeline_auto_pr = settings.repair_auto_pr and not retest
         result = run_repair(
-            failure, test_id=test_id, apply=True, auto_pr=settings.repair_auto_pr,
+            failure, test_id=test_id, apply=True, auto_pr=pipeline_auto_pr,
             branch_suffix=branch_suffix,
             progress_cb=lambda u: _repair_stage(repair_id, u),
             cancel_event=cancel_event,
             images=images,
         )
+        # Verify the fix with a real retest, then open the PR on pass (no-op if the repair stopped early,
+        # was cancelled, or produced no green build). Skipped entirely when retest is disabled.
+        if retest and not cancel_event.is_set() and not result.get("awaiting_rca_review"):
+            _retest_and_maybe_open_pr(repair_id, run_id, test_id, result, credentials, kiosk_id, tenant_id)
+        # The resume context (human_review_rca path only) keeps the REAL auto_pr so an approved resume
+        # behaves as it did before the retest feature: build → open PR. The retest gate applies to the
+        # straight-through auto path handled just above, not to the paused-for-review resume.
         _store_repair_result(repair_id, run_id, test_id, result, {
             "failure": failure, "test_id": test_id, "images": images, "run_id": run_id,
             "apply": True, "auto_pr": settings.repair_auto_pr, "branch_suffix": branch_suffix,

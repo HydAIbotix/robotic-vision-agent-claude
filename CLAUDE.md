@@ -501,6 +501,21 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   new `diagnose` stage field `inputs` (`{failure, context, screenshots[basenames]}`, added in
   `repair_agent/nodes/diagnose.py`); screenshots load from the run via `run_id` (`runScreenshotUrl`). Pure
   add — reads only data already on the job, no new endpoints.
+- **⚠️ Auto-Repair RE-TESTS the fix before raising the PR (2026-09-24, `repair_retest_before_pr`, default
+  True).** After a green build the auto path runs the pipeline with `auto_pr` SUPPRESSED (the `prepare_pr`
+  node only PREPARES the branch/commit), then `_run_auto_repair` → `_retest_and_maybe_open_pr` mints a REAL
+  `TestRun` (`filter_tc=<test_id>`, `RunRequest.is_repair_retest=True`) and runs it synchronously via
+  `_execute_run` — so the verification re-run shows in Results / the run summary / history. The PR is opened
+  (respecting `repair_auto_pr`) ONLY if the retest PASSES; a fail/unrunnable retest leaves the branch prepared
+  for a manual open and annotates the `pr` stage (`retest_blocked`). `_execute_run` gates BOTH the Defect
+  agent and Auto-Repair on `not req.is_repair_retest` so a retest can never recurse or file duplicate defects.
+  A live `repair_retest_started`/`repair_retest_done` pair streams on the original run's WS, and the studio
+  pops a **retest overlay** (live feed) that auto-closes on completion, revealing the updated repair status.
+  **No-regression:** `repair_retest_before_pr=False` ⇒ byte-for-byte the old build→auto-open-PR flow; retest
+  is skipped on RCA-stop / dry-run / cancel / no-green-build / awaiting-review; the `human_review_rca` resume
+  path keeps the real `repair_auto_pr` and is unchanged. **Prerequisite:** the retest only PASSES if the
+  RUNNING app serves the fixed code (dev server on the codebase, or a rebuild of the app image from the fix
+  branch) — else it re-observes the bug and the PR stays gated. Detail → `docs/PROGRESS_LOG.md` (2026-09-24).
 - **⚠️ APPLY is resilient to the RAG chunk ≠ on-disk-text gap (2026-09-21).** Tree-sitter indexes an INNER
   node, so a chunk stores `addToCart = (…) => {` while the file has `  const addToCart = (…) => {`. The
   model faithfully copies the chunk, so its byte-exact `find` isn't on disk → the old apply died with a
@@ -618,6 +633,14 @@ Detailed history → [`docs/PROGRESS_LOG.md`](docs/PROGRESS_LOG.md). Design/depl
   is told not to fabricate when the context lacks the cause; (4) Studio Detailed-report gains an **Executive
   Summary** default view (charts + KPIs, links to technical sections). 5 new tests; 138 passed + same 8
   pre-existing failures; studio build clean. Detail → `docs/PROGRESS_LOG.md`.
+- **2026-09-24 · Auto-Repair retests the fix before raising the PR (+ live retest overlay).** After a
+  green build the agent re-runs the failed test as a REAL run (visible in Results/history) and raises the PR
+  only on a pass; a fail/unrunnable retest leaves the branch prepared for a manual open. Gated by
+  `repair_retest_before_pr` (default True); `RunRequest.is_repair_retest` stops the retest recursing into
+  another repair/defect pass. Studio adds a 🔁 Re-test stage + a floating retest overlay (live WS feed) that
+  auto-closes on completion. 5 new tests; suite 146 passed + the same 8 pre-existing fixture failures; studio
+  build clean. No-regression: `repair_retest_before_pr=False` reproduces the old build→auto-PR flow exactly.
+  Detail → `docs/PROGRESS_LOG.md`.
 - **2026-09-21 (latest+) · relevance-centred snippet truncation — the retrieved bug must reach the model.**
   A VM re-run proved the mock-card bug (`setMockMode(false)` at `App.tsx:2484`) was IN a retrieved chunk
   (`PaymentScreen`, 2344–2527 ≈ 7.5 KB) but the flat `page_content[:4000]` prompt cut dropped it — so Claude
