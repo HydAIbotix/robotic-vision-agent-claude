@@ -6,10 +6,21 @@ incremented — so a healthy "added, now click through to the cart" screen bridg
 `_last_interaction_screen` "same-screen = blocked control" heuristic is now the NO-LLM FALLBACK, used only
 when the judge is off (air-gapped path); these tests still cover the pure helpers it relies on."""
 from test_runner.nodes.run_vision_step import _conf_at_least, _last_interaction_screen
+from vision_agent.config import settings
+
+
+def test_bridge_confidence_default_is_medium():
+    # A wrong-screen navigation gap bridges at MEDIUM+ confidence by default, so Tier-3 recovers the same
+    # way in a verification retest as in a normal run (a 'high'-only bar failed legit gaps like the RPS
+    # payment reveal). Defect verdicts + low-confidence gaps still fail fast regardless of this bar.
+    assert settings.verify_bridge_min_confidence == "medium"
+    assert _conf_at_least("medium", settings.verify_bridge_min_confidence) is True
+    assert _conf_at_least("low", settings.verify_bridge_min_confidence) is False
 
 
 def test_conf_threshold_only_bridges_sufficiently_confident_gap():
-    # Default threshold 'high': only a HIGH-confidence gap bridges; medium/low gap fails fast.
+    # With a 'high' bar only a HIGH-confidence gap bridges; medium/low fail fast (the pure comparator —
+    # the shipped DEFAULT bar is now 'medium', see config, so a medium gap bridges by default).
     assert _conf_at_least("high", "high") is True
     assert _conf_at_least("medium", "high") is False
     assert _conf_at_least("low", "high") is False

@@ -380,7 +380,13 @@ class Settings(BaseSettings):
     #      it is a recoverable navigation GAP. A lower-confidence "gap" (or any "defect") fails fast. Ordered
     #      high > medium > low; "high" = strictest (bridge only when sure). Lower it toward "low" to bridge
     #      more readily (closer to the pre-tuning always-bridge behaviour).
-    verify_bridge_min_confidence: str = "high"
+    #      DEFAULT "medium" (2026-09-24): a "high"-only bar failed a legit navigation gap that Tier-3 normally
+    #      recovers — the RPS payment "Use Mock Card" reveal, where the judge (correctly) sees a healthy screen
+    #      but is only MEDIUM-confident it's a gap. Blocking that made a verification RETEST fail where a normal
+    #      run passes — the flow must NOT change just because it's a retest. "medium" bridges medium/high gaps
+    #      (consistent normal↔retest recovery) while DEFECT verdicts (error/refusal popups) and LOW-confidence
+    #      gaps still fail fast, so real/planted bugs (e.g. text-assertion failures, error popups) are unaffected.
+    verify_bridge_min_confidence: str = "medium"
     #  (2) UNRESPONSIVE-INTERACTION RULE (deterministic, no LLM) — if the plan's immediately-preceding
     #      interaction (a tap/type with a known screen_id) was performed on the SAME screen the app is STILL
     #      showing at the failed verify, that interaction did NOT advance the flow (an unresponsive / blocked /

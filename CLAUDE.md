@@ -370,7 +370,11 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
     popup auto-dismissed to a normal `products` screen, so the judge saw nothing wrong and bridged). Two
     levers now push borderline cases to fail fast: **(1) judge confidence** — the judge also returns
     high/medium/low, and a wrong-screen miss BRIDGES only on a `gap` verdict at least `verify_bridge_min_
-    confidence` (default `high`); a lower-confidence `gap` or any `defect` fails fast. **(2) unresponsive-
+    confidence` (**default `medium` as of 2026-09-24** — a `high`-only bar failed legitimate navigation gaps
+    that Tier-3 normally recovers, e.g. the RPS payment "Use Mock Card" reveal, which made a verification
+    RETEST fail where a normal run passes; `medium` bridges medium/high gaps so normal↔retest recovery is
+    consistent, while any `defect` verdict and `low`-confidence gaps still fail fast, so text-assertion and
+    error-popup bugs are unaffected); a lower-confidence `gap` or any `defect` fails fast. **(2) unresponsive-
     interaction rule** (`verify_unresponsive_interaction_defect`, deterministic, no LLM): if the app is STILL
     on the screen where the plan's last interaction (a tap/type with a `screen_id`) ran, treat it as a
     blocked/refused control → defect. Both are configurable; lower the confidence bar toward `low` (or disable

@@ -2322,3 +2322,33 @@ No-regression: single-test suites behave as before (the "suite" is that one test
 target test's outcome; `_write_run_artifacts`/RunRequest changes are additive. 2 new tests (full-suite default
 + suite scope threaded to every per-failure repair). Suite 153 passed + the same 8 pre-existing vision/template
 fixture failures; studio `npm run build` clean.
+
+---
+
+## 2026-09-24 (bridge bar → medium) · a retest must recover the same way a normal run does
+
+During a full-suite verification retest, TC-RPS-003 failed at the payment step (`verify order_result` →
+still on `payment`) even though the same flow passes in a normal run. The new branch/commit logging proved
+the retest ran on the correct `repair/*` branch, so it was NOT a branch/source problem.
+
+Root cause (generic, not test-specific): the RPS payment needs a "Use Mock Card" (`continue-to-mock-card`)
+click to REVEAL the mock-card-number input (`data-testid="mock-card-number"`, App.tsx ~2495) before the card
+number can be typed. The cached plan skips that reveal and the app_map's `mock_card_number_input` lacks the
+testid, so step 11 focuses by an unreliable COORDINATE tap (the "selects all elements" symptom). In normal
+runs Tier-3 bridges this. In the retest the gap-vs-defect judge rated the wrong-screen verify a MEDIUM-
+confidence gap, and the `verify_bridge_min_confidence=high` bar failed it fast — so the retest diverged from
+a normal run, violating "a retest must not change a test's flow."
+
+Fix (backend, generic): **`verify_bridge_min_confidence` default `high` → `medium`.** A wrong-screen
+navigation gap now bridges at MEDIUM+ confidence, so Tier-3 recovers identically in a normal run AND a
+verification retest (and, in general, no run fails a legit nav gap the judge is only medium-sure about).
+DEFECT verdicts (error/refusal popups) and LOW-confidence gaps still fail fast, and text-assertion failures
+stay terminal — so planted/real bugs (quantity popup, balance/'PURCHASE' text checks) are unaffected. This
+also relieves the earlier add-to-cart class of gap. 1 new test asserts the default; suite 154 passed + the
+same 8 pre-existing vision/template fixture failures.
+
+DURABLE follow-up (data, user action — recommended): **re-explore the RPS app** so the explorer traverses
+into the mock-card entry (clicking "Use Mock Card"), charts the `mock-card-number` input WITH its testid, and
+regenerates the plan to include the reveal step. Then step 11 focuses by testid (reliable, no coordinate
+"select all"), the payment completes on the FAST path with no Tier-3 needed, and the flakiness is gone at the
+source. The threshold fix guarantees a clean retest meanwhile; re-exploration removes the dependency on it.
