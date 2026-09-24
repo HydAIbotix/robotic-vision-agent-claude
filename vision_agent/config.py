@@ -462,14 +462,15 @@ class Settings(BaseSettings):
     repair_retest_before_pr: bool = True
     # REBUILD/redeploy the app-under-test with the just-applied fix BEFORE the verification retest, so the
     # retest browser actually hits the FIXED code (a retest is only meaningful against a build containing
-    # the fix). Empty (default) = NO rebuild: the local `npm run dev` server already serves the patched
-    # working tree live (Vite HMR), so the retest sees the fix with nothing to do — local behaviour is
-    # unchanged. On the GCP VM the POS is a built nginx image (Dockerfile: `npm run build` → COPY dist),
-    # so set this to the compose rebuild of the POS service, e.g. in start-all.sh / .env:
-    #   REPAIR_REBUILD_CMD="docker compose up -d --build pos"
-    # It runs in the POS repo (repair_codebase_dir) through the shell (operator-trusted config, not user
-    # input), AFTER the fix is committed to the repair branch (so the build context carries the fix).
-    repair_rebuild_cmd: str = ""
+    # the fix). DEFAULTS to the GCP-VM compose rebuild of the POS service — the POS there is a built nginx
+    # image (Dockerfile: `npm run build` → COPY dist), and the build context is the working tree, which
+    # carries the fix committed to the repair branch, so this picks it up. It runs in the POS repo
+    # (repair_codebase_dir) through the shell (operator-trusted config, not user input), AFTER the fix is
+    # committed.
+    #   ⚠️ LOCAL DEV (`npm run dev`): set REPAIR_REBUILD_CMD="" (empty) in your local .env — the Vite dev
+    #   server already serves the patched working tree live, so no rebuild is needed and running compose
+    #   locally would be wrong. Empty also restores the pre-2026-09-24 retest behaviour exactly.
+    repair_rebuild_cmd: str = "docker compose up -d --build pos"
     repair_rebuild_timeout_s: int = 900          # docker build + up can be slow on a small VM
     # After a rebuild, wait until the app URL answers before retesting (nginx needs a moment to come up).
     repair_rebuild_ready_timeout_s: int = 90

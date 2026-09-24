@@ -57,17 +57,20 @@ def test_retest_is_noop_without_test_id(monkeypatch):
 
 # ── App rebuild helper ─────────────────────────────────────────────────────────
 
-def test_rebuild_app_noop_when_no_command():
-    # Empty command (the local dev-server case) → nothing runs; treated as OK so the retest proceeds.
+def test_rebuild_app_noop_when_no_command(monkeypatch):
+    # With no configured command (the local dev-server posture) nothing runs; treated as OK so the
+    # retest proceeds against the live dev server. rebuild_app() falls back to settings.repair_rebuild_cmd,
+    # so empty that out to exercise the no-op path.
+    monkeypatch.setattr(settings, "repair_rebuild_cmd", "")
     from repair_agent.repair_failed_test import rebuild_app
-    out = rebuild_app("")
+    out = rebuild_app()
     assert out["ran"] is False and out["ok"] is True
 
 
-def test_rebuild_cmd_defaults_empty_and_restore_on():
-    # Default is the local (dev-server) posture: no rebuild command, and restore-on so a VM deployment
-    # returns to baseline after a retest once it DOES set a rebuild command.
-    assert settings.repair_rebuild_cmd == ""
+def test_rebuild_cmd_defaults_to_vm_compose_and_restore_on():
+    # Default targets the GCP VM (POS is a built nginx image) so the rebuild happens with no env set;
+    # restore-on returns the app to baseline after the retest. Local dev sets REPAIR_REBUILD_CMD="".
+    assert settings.repair_rebuild_cmd == "docker compose up -d --build pos"
     assert settings.repair_rebuild_restore is True
 
 

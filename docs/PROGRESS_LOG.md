@@ -2151,3 +2151,13 @@ reproducibility and lets a bad auto-fix corrupt the rest of the results).
 **Verification:** 8 tests in `tests/test_repair_retest.py` (gating + `rebuild_app` no-op + readiness +
 setting defaults); studio `npm run build` clean. On the VM set `REPAIR_REBUILD_CMD` in `start-all.sh`/`.env`,
 restart the backend, and rebuild the **studio** container.
+
+---
+
+## 2026-09-24 (rebuild default) · repair_rebuild_cmd now defaults to the VM compose rebuild
+
+`repair_rebuild_cmd` default changed from empty to **`docker compose up -d --build pos`** so the
+rebuild-then-retest loop is ON by default on the GCP VM with no env to set. **Local dev (`npm run dev`)
+must set `REPAIR_REBUILD_CMD=""` in `.env`** — the Vite dev server already serves the patched working tree,
+and running compose locally would be wrong (and would gate the PR on a failed local rebuild). Test updated
+to assert the new default. No other behaviour change.

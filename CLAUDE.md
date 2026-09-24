@@ -506,9 +506,10 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   `auto_pr` SUPPRESSED (the `prepare_pr` node only PREPARES the branch/commit), then `_run_auto_repair` →
   `_retest_and_maybe_open_pr`: **(1)** rebuilds/redeploys the app-under-test with the fix via
   `repair_rebuild_cmd` (run in `repair_codebase_dir` through the shell, then wait on the app URL up to
-  `repair_rebuild_ready_timeout_s`) so the retest browser hits the FIXED code — **empty (default) = no-op**,
-  the local `npm run dev` server already serves the patched working tree; on the VM set
-  `REPAIR_REBUILD_CMD="docker compose up -d --build pos"`; **(2)** mints a REAL `TestRun`
+  `repair_rebuild_ready_timeout_s`) so the retest browser hits the FIXED code — **defaults to
+  `docker compose up -d --build pos`** (the VM POS is a built nginx image); on a LOCAL `npm run dev` box set
+  `REPAIR_REBUILD_CMD=""` (empty = no-op, the dev server already serves the patched working tree); **(2)**
+  mints a REAL `TestRun`
   (`filter_tc=<test_id>`, `RunRequest.is_repair_retest=True`) and runs it synchronously via `_execute_run`
   (so it shows in Results / the run summary / history); **(3)** opens the PR (respecting `repair_auto_pr`)
   ONLY if the retest PASSES — a fail/unrunnable retest (or a failed rebuild) leaves the branch prepared for a
@@ -518,8 +519,8 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   gates BOTH the Defect agent and Auto-Repair on `not req.is_repair_retest` so a retest never recurses or
   files duplicate defects. A live `repair_retest_started`/`repair_retest_done` pair streams on the original
   run's WS, and the studio pops a **retest overlay** (live feed) that auto-closes on completion. **No-regression:**
-  `repair_retest_before_pr=False` ⇒ byte-for-byte the old build→auto-open-PR flow; empty `repair_rebuild_cmd`
-  ⇒ local dev-server behaviour unchanged (no rebuild, no branch restore); retest is skipped on RCA-stop /
+  `repair_retest_before_pr=False` ⇒ byte-for-byte the old build→auto-open-PR flow; `repair_rebuild_cmd=""`
+  ⇒ local dev-server behaviour (no rebuild, no branch restore); retest is skipped on RCA-stop /
   dry-run / cancel / no-green-build / awaiting-review; the `human_review_rca` resume path keeps the real
   `repair_auto_pr`. Set `repair_rebuild_restore=False` to LEAVE the fixed build deployed (demo the fixed app).
   Detail → `docs/PROGRESS_LOG.md` (2026-09-24).
@@ -651,16 +652,16 @@ Detailed history → [`docs/PROGRESS_LOG.md`](docs/PROGRESS_LOG.md). Design/depl
   Summary** default view (charts + KPIs, links to technical sections). 5 new tests; 138 passed + same 8
   pre-existing failures; studio build clean. Detail → `docs/PROGRESS_LOG.md`.
 - **2026-09-24 · Auto-Repair rebuilds with the fix, retests, then raises the PR (+ live retest overlay).**
-  After a green build the agent rebuilds/redeploys the app WITH the fix (`repair_rebuild_cmd`; no-op locally
-  where `npm run dev` serves the patched tree, `docker compose up -d --build pos` on the VM), re-runs the
+  After a green build the agent rebuilds/redeploys the app WITH the fix (`repair_rebuild_cmd`, default
+  `docker compose up -d --build pos` for the VM; set `""` locally where `npm run dev` serves the patched tree), re-runs the
   failed test as a REAL run (visible in Results/history), raises the PR only on a pass (a fail/unrunnable
   retest or failed rebuild leaves the branch prepared for a manual open), and restores the baseline
   (`repair_rebuild_restore`). Gated by `repair_retest_before_pr` (default True); `RunRequest.is_repair_retest`
   stops the retest recursing into another repair/defect pass. The full suite always completes on the ORIGINAL
   build first (repair fires post-suite) — baseline integrity; fixes integrate via PR. Studio adds a 🔁 Re-test
   stage + a floating retest overlay (live WS feed) that auto-closes on completion. 8 new tests; studio build
-  clean. No-regression: `repair_retest_before_pr=False` reproduces the old build→auto-PR flow; empty
-  `repair_rebuild_cmd` keeps local behaviour unchanged. Detail → `docs/PROGRESS_LOG.md`.
+  clean. No-regression: `repair_retest_before_pr=False` reproduces the old build→auto-PR flow;
+  `repair_rebuild_cmd=""` keeps local (dev-server) behaviour. Detail → `docs/PROGRESS_LOG.md`.
 - **2026-09-21 (latest+) · relevance-centred snippet truncation — the retrieved bug must reach the model.**
   A VM re-run proved the mock-card bug (`setMockMode(false)` at `App.tsx:2484`) was IN a retrieved chunk
   (`PaymentScreen`, 2344–2527 ≈ 7.5 KB) but the flat `page_content[:4000]` prompt cut dropped it — so Claude
