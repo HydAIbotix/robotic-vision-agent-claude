@@ -251,7 +251,19 @@ def _render_run_log(run_id: str, run, test_results: list, robot_events: list) ->
     return "\n".join(lines) + "\n"
 
 
-def _write_run_artifacts(run_id: str, run, test_results: list, robot_events: list) -> None:
+def _pos_source_info() -> dict:
+    """Branch + short commit + dir of the app-under-test (POS) repo the tests run against. Never raises
+    (returns {} if git/the repo isn't available). Used to record EXACTLY which source each run executed
+    against — so retest/restore branch switching is auditable in the console log + results JSON."""
+    try:
+        from repair_agent.repair_failed_test import source_info
+        return source_info()
+    except Exception:
+        return {}
+
+
+def _write_run_artifacts(run_id: str, run, test_results: list, robot_events: list,
+                         pos_src: Optional[dict] = None) -> None:
     """Persist this run's results to results/<run_id>/ (results.json + run.log). Never raises —
     an artifact-write failure must not fail the run. Preserves EVERY run (unique per run_id)."""
     try:
@@ -261,6 +273,9 @@ def _write_run_artifacts(run_id: str, run, test_results: list, robot_events: lis
             "run_id":       run_id,
             "backend":      getattr(run, "mode", ""),
             "kiosk_id":     getattr(run, "kiosk_id", ""),
+            # The app-under-test source this run executed against (branch + commit of the POS repo). Lets
+            # you confirm subsequent tests + retests used the RIGHT branch after a repair's rebuild/restore.
+            "pos_source":   pos_src if pos_src is not None else _pos_source_info(),
             "started_at":   str(getattr(run, "started_at", "")),
             "finished_at":  datetime.utcnow().isoformat() + "Z",
             "total":        getattr(run, "total", 0),
@@ -3097,6 +3112,7 @@ def _execute_run(run_id: str, req: RunRequest, tenant_id: str = ""):
     _log_fh = None
     _teeing = False
     test_results: list = []
+    _pos_src: dict = {}
     try:
         # Route this run's step screenshots into a per-run folder: screenshots/<run_id>/
         _run_dir = _run_screens_dir(run_id)
@@ -3129,6 +3145,17 @@ def _execute_run(run_id: str, req: RunRequest, tenant_id: str = ""):
         run.started_at = datetime.utcnow()
         db.commit()
         _broadcast(run_id, {"event": "run_started", "run_id": run_id})
+
+        # OBSERVABILITY: record the EXACT app-under-test source this run executes against — the POS repo's
+        # branch + commit. After an Auto-Repair rebuild/restore this proves each run (the verification
+        # retest AND every subsequent test) ran on the intended branch/source, not a stale one.
+        _pos_src = _pos_source_info()
+        if _pos_src:
+            print(f"  [RUN] app-under-test source: {_pos_src.get('dir','')} @ branch "
+                  f"'{_pos_src.get('branch','?')}' commit {_pos_src.get('commit','?')}")
+            _broadcast(run_id, {"event": "log", "run_id": run_id,
+                                "message": f"App-under-test: branch '{_pos_src.get('branch','?')}' "
+                                           f"commit {_pos_src.get('commit','?')}"})
 
         from vision_agent import robot
         from app_map import store as app_map_store
@@ -3359,7 +3386,7 @@ def _execute_run(run_id: str, req: RunRequest, tenant_id: str = ""):
                     _events = list(_rb.get_events() or [])
             except Exception:
                 _events = []
-            _write_run_artifacts(run_id, run, test_results, _events)
+            _write_run_artifacts(run_id, run, test_results, _events, pos_src=_pos_src)
         except Exception as _ae:
             print(f"  [RUN] artifact write skipped: {_ae}")
 
@@ -3647,14 +3674,23 @@ def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result:
     if not test_id or not build_ok or not pr.get("prepared"):
         return
 
-    from repair_agent.repair_failed_test import rebuild_app, checkout_branch, open_pull_request
+    from repair_agent.repair_failed_test import rebuild_app, checkout_branch, open_pull_request, source_info
     rebuild_configured = bool((settings.repair_rebuild_cmd or "").strip())
+
+    # The source the retest will run against — the repair branch + commit the fix was committed to (the
+    # graph's prepare_pr has already `checkout -B`'d it). Surfaced on the retest stage + logged so it's
+    # obvious WHICH branch/commit was rebuilt and retested (not the base). Falls back to the PR fields.
+    src = source_info()
+    retest_branch = src.get("branch") or pr.get("branch", "")
+    retest_commit = src.get("commit") or pr.get("commit", "")
+    print(f"  [REPAIR] retest will build + run against branch '{retest_branch}' commit {retest_commit}")
 
     # 1) Rebuild the app WITH the fix (VM path). Local dev server needs nothing → skipped as a no-op.
     rebuild = {"ran": False, "ok": True}
     if rebuild_configured:
         _repair_stage(repair_id, {"stage": "retest", "status": "running",
-                                  "note": "Rebuilding the app with the fix…"})
+                                  "branch": retest_branch, "commit": retest_commit,
+                                  "note": f"Rebuilding the app with the fix (branch {retest_branch} @ {retest_commit})…"})
         _broadcast(run_id, {"event": "repair_retest_started", "run_id": run_id, "repair_id": repair_id,
                             "test_id": test_id, "phase": "rebuild"})
         print(f"  [REPAIR] Rebuilding app with the fix for {test_id}…")
@@ -3662,7 +3698,8 @@ def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result:
         if not rebuild.get("ok"):
             # A failed rebuild means we can't trust ANY retest verdict → gate the PR, say why.
             retest_stage = {"stage": "retest", "status": "failed", "passed": False, "outcome": "rebuild_failed",
-                            "rebuild": rebuild, "note": "App rebuild failed — the fix could not be verified."}
+                            "branch": retest_branch, "commit": retest_commit, "rebuild": rebuild,
+                            "note": "App rebuild failed — the fix could not be verified."}
             _repair_stage(repair_id, retest_stage)
             result.setdefault("stages", {})["retest"] = retest_stage
             pr["retest_blocked"] = True
@@ -3688,7 +3725,8 @@ def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result:
         db.close()
 
     _repair_stage(repair_id, {"stage": "retest", "status": "running", "run_id": retest_run_id,
-                              "rebuild": rebuild, "note": f"Re-running {test_id} to verify the fix…"})
+                              "branch": retest_branch, "commit": retest_commit, "rebuild": rebuild,
+                              "note": f"Re-running {test_id} on branch {retest_branch} @ {retest_commit} to verify the fix…"})
     _broadcast(run_id, {"event": "repair_retest_started", "run_id": run_id, "repair_id": repair_id,
                         "test_id": test_id, "retest_run_id": retest_run_id})
 
@@ -3720,8 +3758,9 @@ def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result:
 
     retest_stage = {"stage": "retest", "status": "done" if passed else "failed",
                     "run_id": retest_run_id, "passed": passed, "outcome": outcome, "total": total,
-                    "rebuild": rebuild,
-                    "note": f"{test_id} {'passed' if passed else 'still failing'} on retest"}
+                    "branch": retest_branch, "commit": retest_commit, "rebuild": rebuild,
+                    "note": f"{test_id} {'passed' if passed else 'still failing'} on retest "
+                            f"(branch {retest_branch} @ {retest_commit})"}
     _repair_stage(repair_id, retest_stage)
     result.setdefault("stages", {})["retest"] = retest_stage
     _broadcast(run_id, {"event": "repair_retest_done", "run_id": run_id, "repair_id": repair_id,
@@ -3748,13 +3787,21 @@ def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result:
         if base:
             _repair_stage(repair_id, {"stage": "retest", **retest_stage,
                                       "note": f"{retest_stage['note']} · restoring baseline ({base})…"})
-            print(f"  [REPAIR] Restoring baseline → {base} and rebuilding…")
+            print(f"  [REPAIR] Restoring baseline → checkout '{base}' and rebuilding…")
             checkout_branch(base)
             restore = rebuild_app()
             _wait_for_app_ready(settings.kiosk_url, settings.repair_rebuild_ready_timeout_s)
-            retest_stage = {**retest_stage, "restore": restore,
+            restored = source_info()   # confirm which branch/commit the app is on after restore
+            print(f"  [REPAIR] baseline restored → app now on branch '{restored.get('branch','?')}' "
+                  f"commit {restored.get('commit','?')} (subsequent runs use this)")
+            _broadcast(run_id, {"event": "log", "run_id": run_id,
+                                "message": f"[repair] baseline restored → branch '{restored.get('branch','?')}' "
+                                           f"commit {restored.get('commit','?')}"})
+            retest_stage = {**retest_stage, "restore": {**restore, "branch": restored.get("branch", ""),
+                                                        "commit": restored.get("commit", "")},
                             "note": f"{test_id} {'passed' if passed else 'still failing'} on retest "
-                                    f"· baseline {base} restored"}
+                                    f"(branch {retest_branch} @ {retest_commit}) · baseline "
+                                    f"'{restored.get('branch', base)}' @ {restored.get('commit','?')} restored"}
             _repair_stage(repair_id, retest_stage)
             result["stages"]["retest"] = retest_stage
 

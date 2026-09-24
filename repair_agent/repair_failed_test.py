@@ -1635,6 +1635,18 @@ def current_branch() -> str:
     return _current_branch()
 
 
+def current_commit() -> str:
+    """Short HEAD commit of the POS repo right now, or "" if unavailable. Paired with current_branch()
+    for observability — recorded at run start and at rebuild/retest/restore so the logs + results JSON
+    show EXACTLY which branch + source the retest and each subsequent test executed against."""
+    return _git(["rev-parse", "--short", "HEAD"]).get("output", "").strip()
+
+
+def source_info() -> dict:
+    """{'dir', 'branch', 'commit'} for the POS repo — the source the tests actually run against."""
+    return {"dir": str(CODEBASE_DIR), "branch": _current_branch(), "commit": current_commit()}
+
+
 def prepare_pr(patch: RepairPatch, target: Path, failure: str, test_id: str, branch_suffix: str = "") -> dict:
     """Create a local branch + commit for the fix and return the diff + prepared PR fields.
 

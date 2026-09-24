@@ -2259,3 +2259,36 @@ the same 8 pre-existing vision/template fixture failures.
 NOTE: the VM's running POS differs from the local `expanded-cloud-agnostic` checkout (local source shows a
 "Product Added" popup at add-to-cart; the deployed build shows the "Cart/Checkout (N)" badge flow with no
 popup) — worth re-aligning the deployed branch/build, but the fix above is generic and handles both.
+
+---
+
+## 2026-09-24 (retest observability + PR-status) · branch/commit visibility + gate "Raise PR" on the retest
+
+Three fixes from a VM test run (TC-VPS-009 repair):
+
+1. **"Raise PR" no longer shows done before the retest completes.** `prepare_pr` runs inside the graph and
+   PREPARES the branch (stage → done) before the API-level retest, so the UI showed a green ✓ on Raise PR
+   while the retest was still running. Fix (studio `AutoRepair.tsx`): when a `retest` stage exists, the PR
+   stage's dot is derived from the ACTUAL outcome — opened → done · retest running → pending · retest
+   finished-but-not-opened (failed/gated, or passed with auto-PR off) → warn/prepared. It goes green only
+   when the PR is truly raised.
+2. **Show the branch + commit used to build/retest the fix** (studio + backend). The retest stage now
+   carries `branch`/`commit` (the repair branch `prepare_pr` checked out, that the rebuild + retest ran
+   against) and `restore.branch`/`restore.commit` (the baseline restored afterwards). Shown in the 🔁 Re-test
+   stage detail and the technical report — the same branch/commit info that Raise PR shows, now visible in
+   the retest section too, so you can confirm the retest used the repair branch (not the base).
+3. **Record the app-under-test source at the start of every run** (backend). `_execute_run` logs
+   `[RUN] app-under-test source: <dir> @ branch '<b>' commit '<c>'` (and a `log` WS event) at run start, and
+   `results/<run_id>/results.json` gains `pos_source: {dir, branch, commit}`. After a repair's
+   rebuild/restore this proves each subsequent test ran on the intended branch/source. New helpers
+   `current_commit()` / `source_info()` in `repair_failed_test.py`; the restore step logs the branch/commit
+   the app was returned to (`[REPAIR] baseline restored → app now on branch '<b>' commit <c>`).
+
+No-regression: `_write_run_artifacts` gained an optional `pos_src` param (old call still valid); git lookups
+are best-effort (empty when not a repo). Studio `npm run build` clean; suite 151 passed + the same 8
+pre-existing vision/template fixture failures.
+
+Diagnosing a failed retest: check the retest stage's branch/commit (should be the `repair/*` branch) and the
+retest run's `results.json` `pos_source`. If the branch is correct but the test still fails, the cause is
+elsewhere (e.g. TC-VPS-009's card balance persists in the card-service `cards.json` volume across runs, so a
+balance-reduction assertion can depend on prior card state, not the branch).

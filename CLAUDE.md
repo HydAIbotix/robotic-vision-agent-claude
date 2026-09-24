@@ -550,6 +550,15 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   container root-equivalent host access** — remove that volume + set `REPAIR_REBUILD_CMD=""` to opt out.
   After `git pull`, relaunch with `docker compose up -d --build app` (rebuilds the image → picks up the CLI +
   all code); the socket mount + env come from the compose file.
+- **Branch/commit observability for every run (2026-09-24).** Each run logs the app-under-test source at
+  start — `[RUN] app-under-test source: <dir> @ branch '<b>' commit '<c>'` (also a `log` WS event) — and
+  records it in `results/<run_id>/results.json` as `pos_source: {dir, branch, commit}` (via `_pos_source_info`
+  → `repair_agent.repair_failed_test.source_info()`). The Auto-Repair **retest** stage carries `branch`/`commit`
+  (the repair branch the fix was built + retested against) and, after restore, `restore.branch`/`restore.commit`
+  (the baseline the app was returned to). This makes it auditable that the retest ran on the repair branch and
+  that subsequent tests ran on the restored baseline — the studio shows it in the 🔁 Re-test stage. The "Raise
+  PR" stage no longer reads **done** while a retest is still gating it (opened → done · retest running →
+  pending · finished-but-not-opened → prepared/warn); it goes green only when the PR is actually raised.
 - **⚠️ ONE repair + ONE PR per failed test, SEQUENTIALLY, after the suite completes (2026-09-24).**
   `_run_auto_repair` loops over EVERY failed test (`_run_one_repair` per failure); it fires from the
   completion block of `_execute_run` — AFTER the WHOLE suite has run and its results are committed — NOT
