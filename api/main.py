@@ -3783,11 +3783,26 @@ def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result:
     _broadcast(run_id, {"event": "repair_retest_done", "run_id": run_id, "repair_id": repair_id,
                         "test_id": test_id, "retest_run_id": retest_run_id, "passed": passed})
 
+    print(f"  [REPAIR] retest verdict for {test_id}: {outcome} (suite {suite_passed}/{suite_total})")
     if passed and settings.repair_auto_pr and not (pr.get("opened") or {}).get("opened"):
         # Verified → raise the PR now (the same push/open the pipeline would have done directly).
-        pr["opened"] = open_pull_request(pr["branch"], pr["base"], pr["title"], pr["body"])
+        print(f"  [REPAIR] retest passed → opening PR: push '{pr.get('branch')}' → {pr.get('base')} …")
+        opened = open_pull_request(pr["branch"], pr["base"], pr["title"], pr["body"])
+        pr["opened"] = opened
+        if opened.get("opened"):
+            pr.pop("open_error", None)
+            print(f"  [REPAIR] ✓ PR opened: {opened.get('url')}")
+        else:
+            # Retest PASSED but the push / PR-create failed (e.g. missing/expired GITHUB_TOKEN, remote auth,
+            # network, protected base). Surface WHY so it isn't a silent yellow — the branch is prepared and
+            # the "Open PR" button retries this exact push. (Previously this failure had no visible reason.)
+            pr["open_error"] = (opened.get("output") or "").strip() or \
+                "git push / PR creation failed — check GITHUB_TOKEN and the origin remote on the VM."
+            print(f"  [REPAIR] ⚠ auto-open PR FAILED: {pr['open_error']} (branch prepared — use 'Open PR' to retry)")
         _repair_stage(repair_id, {"stage": "pr", **pr})
         result["stages"]["pr"] = pr
+    elif passed and not settings.repair_auto_pr:
+        print(f"  [REPAIR] retest passed → PR branch prepared (auto_pr OFF); open it manually.")
     elif not passed:
         # Leave the branch prepared (manual open still available); record WHY it wasn't auto-raised.
         pr["retest_blocked"] = True

@@ -2352,3 +2352,27 @@ into the mock-card entry (clicking "Use Mock Card"), charts the `mock-card-numbe
 regenerates the plan to include the reveal step. Then step 11 focuses by testid (reliable, no coordinate
 "select all"), the payment completes on the FAST path with no Tier-3 needed, and the flakiness is gone at the
 source. The threshold fix guarantees a clean retest meanwhile; re-exploration removes the dependency on it.
+
+---
+
+## 2026-09-24 (PR auto-open failure surfaced) · retest passed but PR not raised
+
+The medium-threshold fix worked: a full-suite verification retest (run-12, `repair/tc-vps-009-fix-b3bba641`)
+passed 3/3 — TC-RPS-003's payment now bridges via Tier-3 (enters the mock card + pays) and the target
+TC-VPS-009 passed. So the fix was verified and the PR-open WAS attempted, but `open_pull_request` returned
+`opened=False`: the `git push` to origin failed (almost certainly a missing/empty `GITHUB_TOKEN` in the VM
+`.env` — the container can't authenticate the push). Previously this was SILENT: the "Raise PR" dot just went
+yellow with no reason.
+
+Fix:
+- **Backend (`api/main.py`):** `_retest_and_maybe_open_pr` logs the retest verdict + the PR-open attempt, and
+  on a failed auto-open records `pr["open_error"]` (the git/push output) and logs `⚠ auto-open PR FAILED: …`.
+  It also logs the auto_pr-off case. No behaviour change to the open itself — just visibility.
+- **Studio (`AutoRepair.tsx`, `client.ts`):** the success banner now says the automatic PR push failed and
+  shows the reason (`RepairStage.open_error`), pointing at `GITHUB_TOKEN`, with the existing **Open PR** button
+  to retry. The yellow "Raise PR" dot is correct — the PR was genuinely not raised (not a false green).
+
+Operator note: to auto-open PRs, set `GITHUB_TOKEN=<repo-scoped PAT>` in the VM's `.env` (gitignored) and
+restart the backend; then re-run or click **Open PR** to push the prepared `repair/*` branch. The branches
+are LOCAL until a push succeeds. No-regression: suite 154 passed + the same 8 pre-existing fixture failures;
+studio build clean.

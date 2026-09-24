@@ -560,6 +560,15 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   container root-equivalent host access** — remove that volume + set `REPAIR_REBUILD_CMD=""` to opt out.
   After `git pull`, relaunch with `docker compose up -d --build app` (rebuilds the image → picks up the CLI +
   all code); the socket mount + env come from the compose file.
+- **⚠️ Auto-open PR failure is now SURFACED, not silent (2026-09-24).** When the retest PASSES but
+  `open_pull_request` returns `opened=False` (the `git push` / PR-create failed — most often a missing/expired
+  `GITHUB_TOKEN` or origin auth in the container), `_retest_and_maybe_open_pr` records `pr["open_error"]` (the
+  git output) + logs `⚠ auto-open PR FAILED: …`, and the studio shows the reason under the success banner with
+  the manual **Open PR** retry. The "Raise PR" dot is correctly **warn** (yellow) — the PR was genuinely NOT
+  raised — not a false green. To actually auto-open PRs the VM's `.env` must set `GITHUB_TOKEN` (repo-scoped);
+  the `repair/*` branches created by `prepare_pr` are LOCAL until a push succeeds. `git push` is not something
+  the agent can auth without that token. (An earlier "Raise PR ✓" seen before the retest was the *prepared*
+  stage, not an opened PR.)
 - **Branch/commit observability for every run (2026-09-24).** Each run logs the app-under-test source at
   start — `[RUN] app-under-test source: <dir> @ branch '<b>' commit '<c>'` (also a `log` WS event) — and
   records it in `results/<run_id>/results.json` as `pos_source: {dir, branch, commit}` (via `_pos_source_info`
