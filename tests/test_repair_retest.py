@@ -53,3 +53,25 @@ def test_retest_is_noop_without_test_id(monkeypatch):
         {"stages": {"build": {"ok": True}, "pr": {"prepared": True}}}, None, "K-01",
     )
     assert reached["minted"] is False
+
+
+# ── App rebuild helper ─────────────────────────────────────────────────────────
+
+def test_rebuild_app_noop_when_no_command():
+    # Empty command (the local dev-server case) → nothing runs; treated as OK so the retest proceeds.
+    from repair_agent.repair_failed_test import rebuild_app
+    out = rebuild_app("")
+    assert out["ran"] is False and out["ok"] is True
+
+
+def test_rebuild_cmd_defaults_empty_and_restore_on():
+    # Default is the local (dev-server) posture: no rebuild command, and restore-on so a VM deployment
+    # returns to baseline after a retest once it DOES set a rebuild command.
+    assert settings.repair_rebuild_cmd == ""
+    assert settings.repair_rebuild_restore is True
+
+
+def test_wait_for_app_ready_trivial():
+    # No URL / no timeout → ready immediately (never blocks the retest when there's nothing to wait for).
+    assert main._wait_for_app_ready("", 0) is True
+    assert main._wait_for_app_ready("http://x", 0) is True

@@ -1595,6 +1595,40 @@ def _pr_base(current: str) -> str:
     return settings.repair_pr_base
 
 
+def rebuild_app(cmd: str = "", timeout: int = 0) -> dict:
+    """Rebuild/redeploy the app-under-test so a just-applied fix is what the RETEST browser hits.
+
+    `cmd` is a command run in CODEBASE_DIR (the POS repo) — e.g. `docker compose up -d --build pos` on
+    the VM, where the POS is a built nginx image. Empty → a no-op {'ran': False}: the LOCAL `npm run dev`
+    server already serves the patched working tree live, so there's nothing to rebuild (local behaviour
+    is unchanged). Runs through the shell so a compose/pipeline command works verbatim; the command is
+    operator-set config (settings.repair_rebuild_cmd), never user input. Never raises."""
+    cmd = (cmd or settings.repair_rebuild_cmd or "").strip()
+    if not cmd:
+        return {"ran": False, "ok": True,
+                "output": "no rebuild command configured — the dev server serves the patched working tree live"}
+    timeout = timeout or settings.repair_rebuild_timeout_s
+    import subprocess
+    try:
+        proc = subprocess.run(cmd, cwd=str(CODEBASE_DIR), shell=True,
+                              capture_output=True, text=True, timeout=timeout)
+        out = ((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")).strip()
+        return {"ran": True, "ok": proc.returncode == 0, "code": proc.returncode,
+                "cmd": cmd, "output": out[-4000:]}
+    except subprocess.TimeoutExpired:
+        return {"ran": True, "ok": False, "cmd": cmd, "output": f"rebuild timed out after {timeout}s"}
+    except Exception as e:
+        return {"ran": True, "ok": False, "cmd": cmd, "output": f"rebuild error: {e}"}
+
+
+def checkout_branch(branch: str) -> dict:
+    """Switch the POS repo back to `branch` (used to RESTORE the run's baseline after a verification
+    retest, so the repo isn't left on a throwaway repair branch). Never raises."""
+    if not branch:
+        return {"ok": False, "output": "no branch given"}
+    return _git(["checkout", branch])
+
+
 def prepare_pr(patch: RepairPatch, target: Path, failure: str, test_id: str, branch_suffix: str = "") -> dict:
     """Create a local branch + commit for the fix and return the diff + prepared PR fields.
 

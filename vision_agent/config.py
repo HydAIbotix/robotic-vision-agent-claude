@@ -460,6 +460,25 @@ class Settings(BaseSettings):
     # only PASS if the RUNNING app serves the fixed code (a dev server on the codebase, or a rebuild of
     # the app image from the fix branch) — otherwise it re-observes the same bug and the PR stays gated.
     repair_retest_before_pr: bool = True
+    # REBUILD/redeploy the app-under-test with the just-applied fix BEFORE the verification retest, so the
+    # retest browser actually hits the FIXED code (a retest is only meaningful against a build containing
+    # the fix). Empty (default) = NO rebuild: the local `npm run dev` server already serves the patched
+    # working tree live (Vite HMR), so the retest sees the fix with nothing to do — local behaviour is
+    # unchanged. On the GCP VM the POS is a built nginx image (Dockerfile: `npm run build` → COPY dist),
+    # so set this to the compose rebuild of the POS service, e.g. in start-all.sh / .env:
+    #   REPAIR_REBUILD_CMD="docker compose up -d --build pos"
+    # It runs in the POS repo (repair_codebase_dir) through the shell (operator-trusted config, not user
+    # input), AFTER the fix is committed to the repair branch (so the build context carries the fix).
+    repair_rebuild_cmd: str = ""
+    repair_rebuild_timeout_s: int = 900          # docker build + up can be slow on a small VM
+    # After a rebuild, wait until the app URL answers before retesting (nginx needs a moment to come up).
+    repair_rebuild_ready_timeout_s: int = 90
+    # After the retest, RESTORE the app to the branch the run started on (checkout the PR base + rebuild),
+    # so the suite's baseline is preserved and the repo isn't left on a throwaway repair branch — the fix
+    # lives in the PR (the proper integration path). Only acts when repair_rebuild_cmd is set (the VM
+    # path); the local dev-server path is untouched. Set False to LEAVE the fixed build deployed (e.g. to
+    # show the now-passing app after a demo repair).
+    repair_rebuild_restore: bool = True
     repair_pr_remote: str = "origin"
     # GitHub token (repo scope) used to (a) authenticate `git push` of the fix branch and (b) CREATE
     # the PR via the GitHub REST API when `gh` isn't installed (the container has no gh). Blank →

@@ -2106,3 +2106,48 @@ fix** and raises the PR **only when the retest passes**. Backend + studio.
 **Verification:** 5 new tests (`tests/test_repair_retest.py`) lock the gating (no-op without a green build /
 prepared PR / test id; the flag defaults). Full suite 146 passed + the same 8 pre-existing vision/template
 fixture failures; studio `npm run build` clean. Restart the backend + rebuild the **studio** container to deploy.
+
+---
+
+## 2026-09-24 (rebuild) · Auto-Repair — rebuild the app with the fix before the retest + baseline restore
+
+Extends the fix → retest → PR loop so the retest runs against a build that actually CONTAINS the fix, and
+answers the "what happens to the other 90 tests" question.
+
+**Rebuild-then-retest (`api/main.py`, `repair_agent/repair_failed_test.py`, `vision_agent/config.py`).**
+- New `_retest_and_maybe_open_pr` sequence: **(1)** rebuild/redeploy the app with the fix, **(2)** wait for
+  the app URL to answer, **(3)** run the verification retest, **(4)** open the PR on pass, **(5)** restore
+  the baseline.
+- New settings:
+  - `repair_rebuild_cmd` (default **empty**) — shell command run in `repair_codebase_dir` to rebuild the
+    app-under-test. Empty = no-op (local `npm run dev` already serves the patched working tree live). On the
+    GCP VM the POS is a built nginx image (`Dockerfile`: `npm run build` → `COPY dist`; `docker-compose.yml`
+    `pos` service), so set `REPAIR_REBUILD_CMD="docker compose up -d --build pos"` (the build context is the
+    working tree, which carries the fix committed to the repair branch).
+  - `repair_rebuild_timeout_s` (900), `repair_rebuild_ready_timeout_s` (90) — build timeout + post-build URL
+    readiness poll (`_wait_for_app_ready`, GET until non-5xx).
+  - `repair_rebuild_restore` (default **True**, VM path only) — after the retest, `git checkout <PR base>` +
+    rebuild so the repo/app return to the run's baseline (the fix lives in the PR, not silently in the running
+    build). Set False to LEAVE the fixed build deployed (demo the now-passing app).
+- New helpers `rebuild_app(cmd, timeout)` / `checkout_branch(branch)` in `repair_failed_test.py`. A failed
+  rebuild gates the PR (can't trust a retest on an un-rebuilt app) and is surfaced on the retest stage.
+- **No-regression:** empty `repair_rebuild_cmd` ⇒ identical to the pre-rebuild retest behaviour (local dev
+  server); rebuild/restore only act when the command is set.
+
+**Studio (`AutoRepair.tsx`, `client.ts`).** The 🔁 Re-test stage detail + technical report now show the
+rebuild command/output and note the baseline restore; `RepairStage` gains `rebuild`/`restore`. The retest
+overlay shows a "Rebuilding the app with the fix…" note before the live retest feed.
+
+**Design answer — the other 90 of 100 tests run on the ORIGINAL build (baseline integrity).** Auto-Repair
+fires from the completion block of `_execute_run`, i.e. AFTER the whole suite has already run — so every test
+executes on the one build the run started on (a coherent, reproducible snapshot); the SUT is never hot-swapped
+mid-suite. Each failure is repaired in isolation on its own `repair/*` branch, verified against a build with
+only that fix (rebuild → retest that test), raised as ONE reviewable PR, and the baseline is restored.
+Consolidated validation happens when the PRs merge and CI re-runs the full suite on the integration branch — a
+separate gate. This shift-left + isolated-verification + integrate-via-PR flow is the industry / AI-agent
+standard; re-pointing the running suite at a fix branch mid-run is explicitly avoided (it destroys run
+reproducibility and lets a bad auto-fix corrupt the rest of the results).
+
+**Verification:** 8 tests in `tests/test_repair_retest.py` (gating + `rebuild_app` no-op + readiness +
+setting defaults); studio `npm run build` clean. On the VM set `REPAIR_REBUILD_CMD` in `start-all.sh`/`.env`,
+restart the backend, and rebuild the **studio** container.

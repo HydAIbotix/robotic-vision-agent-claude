@@ -3604,15 +3604,41 @@ def _store_repair_result(repair_id: str, run_id: str, test_id: str, result: dict
                         "cancelled": bool(result.get("cancelled")), "pr_url": pr_url})
 
 
+def _wait_for_app_ready(url: str, timeout: int) -> bool:
+    """Poll `url` until it answers (any non-5xx), so a retest never drives the browser at an app that is
+    still booting after a rebuild. Returns True on ready / when there's nothing to wait for. Never raises."""
+    if not url or timeout <= 0:
+        return True
+    import time as _t
+    try:
+        import requests
+    except Exception:
+        return True
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        try:
+            if requests.get(url, timeout=5).status_code < 500:
+                return True
+        except Exception:
+            pass
+        _t.sleep(2)
+    return False
+
+
 def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result: dict,
                               credentials: Optional[dict], kiosk_id: str, tenant_id: str = ""):
-    """VERIFY the fix, then raise the PR only if it passes (repair_retest_before_pr).
+    """VERIFY the fix on a build that CONTAINS it, then raise the PR only if it passes (repair_retest_before_pr).
 
-    After a green build with a PREPARED (not-yet-opened) PR, re-run JUST the failed test as a REAL run
-    (a new TestRun → visible in Results/history + the run summary), streamed live to the UI. On PASS the
-    prepared PR is pushed/opened here (respecting repair_auto_pr); on FAIL/unrunnable the branch stays
-    prepared for a manual open. Mutates `result["stages"]` so the stored job reflects the retest + PR.
-    Never raises — a retest that can't run must not lose the fix. Runs synchronously in the repair thread.
+    After a green build with a PREPARED (not-yet-opened) PR:
+      1. REBUILD/redeploy the app with the fix (settings.repair_rebuild_cmd) so the retest browser hits the
+         FIXED code — a no-op locally (the `npm run dev` server already serves the patched working tree);
+      2. re-run JUST the failed test as a REAL run (a new TestRun → visible in Results/history + the run
+         summary), streamed live to the UI;
+      3. on PASS push/open the prepared PR (respecting repair_auto_pr); on FAIL/unrunnable leave it prepared;
+      4. RESTORE the run's baseline (checkout the PR base + rebuild) when repair_rebuild_restore, so the
+         suite baseline is preserved and the repo isn't left on a throwaway repair branch (VM path only).
+    Mutates `result["stages"]` so the stored job reflects the rebuild + retest + PR. Never raises — a retest
+    that can't run must not lose the fix. Runs synchronously in the repair thread.
     """
     stages = result.get("stages") or {}
     build_ok = bool((stages.get("build") or {}).get("ok"))
@@ -3621,6 +3647,34 @@ def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result:
     if not test_id or not build_ok or not pr.get("prepared"):
         return
 
+    from repair_agent.repair_failed_test import rebuild_app, checkout_branch, open_pull_request
+    rebuild_configured = bool((settings.repair_rebuild_cmd or "").strip())
+
+    # 1) Rebuild the app WITH the fix (VM path). Local dev server needs nothing → skipped as a no-op.
+    rebuild = {"ran": False, "ok": True}
+    if rebuild_configured:
+        _repair_stage(repair_id, {"stage": "retest", "status": "running",
+                                  "note": "Rebuilding the app with the fix…"})
+        _broadcast(run_id, {"event": "repair_retest_started", "run_id": run_id, "repair_id": repair_id,
+                            "test_id": test_id, "phase": "rebuild"})
+        print(f"  [REPAIR] Rebuilding app with the fix for {test_id}…")
+        rebuild = rebuild_app()
+        if not rebuild.get("ok"):
+            # A failed rebuild means we can't trust ANY retest verdict → gate the PR, say why.
+            retest_stage = {"stage": "retest", "status": "failed", "passed": False, "outcome": "rebuild_failed",
+                            "rebuild": rebuild, "note": "App rebuild failed — the fix could not be verified."}
+            _repair_stage(repair_id, retest_stage)
+            result.setdefault("stages", {})["retest"] = retest_stage
+            pr["retest_blocked"] = True
+            pr["retest_note"] = "App rebuild failed — PR not auto-raised. See the retest stage output."
+            _repair_stage(repair_id, {"stage": "pr", **pr})
+            result["stages"]["pr"] = pr
+            _broadcast(run_id, {"event": "repair_retest_done", "run_id": run_id, "repair_id": repair_id,
+                                "test_id": test_id, "passed": False})
+            return
+        _wait_for_app_ready(settings.kiosk_url, settings.repair_rebuild_ready_timeout_s)
+
+    # 2) Run the verification retest as a real run.
     now = datetime.now()
     retest_run_id = f"run-{_next_run_number()}-{now.strftime('%H%M%S-%d%m')}"
     db = next(get_db())
@@ -3634,7 +3688,7 @@ def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result:
         db.close()
 
     _repair_stage(repair_id, {"stage": "retest", "status": "running", "run_id": retest_run_id,
-                              "note": f"Re-running {test_id} to verify the fix…"})
+                              "rebuild": rebuild, "note": f"Re-running {test_id} to verify the fix…"})
     _broadcast(run_id, {"event": "repair_retest_started", "run_id": run_id, "repair_id": repair_id,
                         "test_id": test_id, "retest_run_id": retest_run_id})
 
@@ -3649,7 +3703,7 @@ def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result:
     except Exception as e:
         print(f"  [REPAIR] retest run error: {e}")
 
-    # Read the retest verdict from the DB (the per-test result is authoritative).
+    # 3) Read the retest verdict from the DB (the per-test result is authoritative).
     outcome, total = "failed", 0
     db = next(get_db())
     try:
@@ -3666,6 +3720,7 @@ def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result:
 
     retest_stage = {"stage": "retest", "status": "done" if passed else "failed",
                     "run_id": retest_run_id, "passed": passed, "outcome": outcome, "total": total,
+                    "rebuild": rebuild,
                     "note": f"{test_id} {'passed' if passed else 'still failing'} on retest"}
     _repair_stage(repair_id, retest_stage)
     result.setdefault("stages", {})["retest"] = retest_stage
@@ -3674,7 +3729,6 @@ def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result:
 
     if passed and settings.repair_auto_pr and not (pr.get("opened") or {}).get("opened"):
         # Verified → raise the PR now (the same push/open the pipeline would have done directly).
-        from repair_agent.repair_failed_test import open_pull_request
         pr["opened"] = open_pull_request(pr["branch"], pr["base"], pr["title"], pr["body"])
         _repair_stage(repair_id, {"stage": "pr", **pr})
         result["stages"]["pr"] = pr
@@ -3685,6 +3739,24 @@ def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result:
                              "is served by the running app (dev server / rebuild), then open the PR manually.")
         _repair_stage(repair_id, {"stage": "pr", **pr})
         result["stages"]["pr"] = pr
+
+    # 4) RESTORE the run's baseline so the suite's baseline is preserved and the repo isn't left on a
+    #    throwaway repair branch (the fix lives in the PR). VM path only; set repair_rebuild_restore=False
+    #    to LEAVE the fixed build deployed (e.g. to show the now-passing app after a demo).
+    if rebuild_configured and settings.repair_rebuild_restore:
+        base = pr.get("base") or ""
+        if base:
+            _repair_stage(repair_id, {"stage": "retest", **retest_stage,
+                                      "note": f"{retest_stage['note']} · restoring baseline ({base})…"})
+            print(f"  [REPAIR] Restoring baseline → {base} and rebuilding…")
+            checkout_branch(base)
+            restore = rebuild_app()
+            _wait_for_app_ready(settings.kiosk_url, settings.repair_rebuild_ready_timeout_s)
+            retest_stage = {**retest_stage, "restore": restore,
+                            "note": f"{test_id} {'passed' if passed else 'still failing'} on retest "
+                                    f"· baseline {base} restored"}
+            _repair_stage(repair_id, retest_stage)
+            result["stages"]["retest"] = retest_stage
 
 
 def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list,
