@@ -29,15 +29,19 @@ RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 # `/var/run/docker.sock` is mounted in docker-compose.yml). CLI only — no daemon runs here. Used solely by
 # repair_rebuild_cmd; inert unless that runs. ⚠️ Mounting the host docker socket grants the container
 # root-equivalent host access (see docker-compose.yml note).
-RUN install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
-    && chmod a+r /etc/apt/keyrings/docker.asc \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
-        > /etc/apt/sources.list.d/docker.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
-    && rm -rf /var/lib/apt/lists/* \
-    && docker --version && docker compose version
+# NON-FATAL: if the Docker apt repo is unreachable at build time, the backend must still build and run —
+# only the Auto-Repair rebuild step degrades (rebuild_app fails → the PR is gated, backend is fine). So the
+# whole install is wrapped so a failure logs a warning and the build continues.
+RUN ( install -m 0755 -d /etc/apt/keyrings \
+      && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+      && chmod a+r /etc/apt/keyrings/docker.asc \
+      && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
+          > /etc/apt/sources.list.d/docker.list \
+      && apt-get update \
+      && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
+      && rm -rf /var/lib/apt/lists/* \
+      && docker --version && docker compose version ) \
+    || echo "WARN: Docker CLI install failed — Auto-Repair rebuild (REPAIR_REBUILD_CMD) will be unavailable; the backend still runs."
 
 WORKDIR /app
 
