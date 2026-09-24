@@ -2292,3 +2292,33 @@ Diagnosing a failed retest: check the retest stage's branch/commit (should be th
 retest run's `results.json` `pos_source`. If the branch is correct but the test still fails, the cause is
 elsewhere (e.g. TC-VPS-009's card balance persists in the card-service `cards.json` volume across runs, so a
 balance-reduction assertion can depend on prior card state, not the branch).
+
+---
+
+## 2026-09-24 (full-suite retest) · verify a fix by re-running the WHOLE suite, not just the failing test
+
+A VM re-run confirmed a subtle but important gap: the branch/commit logging proved the retest ran on the
+correct `repair/*` branch with the fix, yet TC-VPS-009 still "failed" — because it verifies a VPS card
+balance + 'PURCHASE' transaction that an EARLIER test (the RPS mock-card payment) creates. Re-running
+TC-VPS-009 in isolation never recreates that purchase, so even a correct fix looks like a failure. E2E
+suites are inter-dependent (a lifecycle across VPS + RPS + card-service).
+
+Fix (backend, `repair_retest_before_pr` path):
+- New setting `repair_retest_full_suite` (default **True**): the verification retest re-runs the WHOLE
+  ORIGINAL suite in the operator's order (`filter_tc` = the original run's ordered list; empty → all cases),
+  so inter-dependent tests recreate the state the failing test validates. The verdict is then read for the
+  TARGET test specifically — other still-failing tests (e.g. not-yet-repaired bugs) do NOT block this fix's
+  PR. `False` → re-run only the failing test (cheaper; correct only for independent tests).
+- Threaded the original suite scope through: `_execute_run` → `_run_auto_repair(suite_filter_tc=req.filter_tc)`
+  → `_run_one_repair` → `_retest_and_maybe_open_pr`. The retest `TestRun` uses that filter; `is_repair_retest`
+  still prevents recursion/duplicate defects even though the re-run includes many tests.
+- The retest stage now carries `scope` ('suite'|'test'), `suite_passed`, `suite_total`; the studio shows
+  "re-ran the whole suite (X/Y passed); gated on the target test passing" in the 🔁 Re-test stage detail,
+  technical report, and overlay.
+- Cost note: with the per-failure loop this re-runs the suite once per fixed test. Set
+  `repair_retest_full_suite=False` (or reduce the suite) if that's too heavy for a large suite.
+
+No-regression: single-test suites behave as before (the "suite" is that one test); the PR gate is still the
+target test's outcome; `_write_run_artifacts`/RunRequest changes are additive. 2 new tests (full-suite default
++ suite scope threaded to every per-failure repair). Suite 153 passed + the same 8 pre-existing vision/template
+fixture failures; studio `npm run build` clean.

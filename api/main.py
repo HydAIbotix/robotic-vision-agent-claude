@@ -3352,7 +3352,8 @@ def _execute_run(run_id: str, req: RunRequest, tenant_id: str = ""):
                 threading.Thread(
                     target=_run_auto_repair,
                     args=(run_id, req.kiosk_id, failed_results),
-                    kwargs={"credentials": req.credentials, "tenant_id": tenant_id},
+                    kwargs={"credentials": req.credentials, "tenant_id": tenant_id,
+                            "suite_filter_tc": req.filter_tc or ""},
                     daemon=True,
                 ).start()
 
@@ -3653,15 +3654,19 @@ def _wait_for_app_ready(url: str, timeout: int) -> bool:
 
 
 def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result: dict,
-                              credentials: Optional[dict], kiosk_id: str, tenant_id: str = ""):
+                              credentials: Optional[dict], kiosk_id: str, tenant_id: str = "",
+                              suite_filter_tc: str = ""):
     """VERIFY the fix on a build that CONTAINS it, then raise the PR only if it passes (repair_retest_before_pr).
 
     After a green build with a PREPARED (not-yet-opened) PR:
       1. REBUILD/redeploy the app with the fix (settings.repair_rebuild_cmd) so the retest browser hits the
          FIXED code — a no-op locally (the `npm run dev` server already serves the patched working tree);
-      2. re-run JUST the failed test as a REAL run (a new TestRun → visible in Results/history + the run
-         summary), streamed live to the UI;
-      3. on PASS push/open the prepared PR (respecting repair_auto_pr); on FAIL/unrunnable leave it prepared;
+      2. re-run the verification as a REAL run (a new TestRun → visible in Results/history + the run summary),
+         streamed live to the UI. By default this re-runs the WHOLE original suite in the operator's order
+         (repair_retest_full_suite) so inter-dependent tests recreate the state the failing test validates
+         (e.g. an earlier RPS payment creates the 'PURCHASE' that TC-VPS-009 checks on VPS) — then the verdict
+         is read for the TARGET test specifically. Set repair_retest_full_suite=False to re-run only that test;
+      3. on PASS (the target test) push/open the prepared PR (respecting repair_auto_pr); else leave prepared;
       4. RESTORE the run's baseline (checkout the PR base + rebuild) when repair_rebuild_restore, so the
          suite baseline is preserved and the repo isn't left on a throwaway repair branch (VM path only).
     Mutates `result["stages"]` so the stored job reflects the rebuild + retest + PR. Never raises — a retest
@@ -3711,38 +3716,46 @@ def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result:
             return
         _wait_for_app_ready(settings.kiosk_url, settings.repair_rebuild_ready_timeout_s)
 
-    # 2) Run the verification retest as a real run.
+    # 2) Run the verification retest as a real run. By default re-run the WHOLE original suite in order so
+    #    inter-dependent tests recreate the state the failing test validates; else just the failing test.
+    full_suite = bool(settings.repair_retest_full_suite)
+    retest_filter = (suite_filter_tc or "") if full_suite else test_id   # "" → all cases
+    scope = "suite" if full_suite else "test"
+    scope_label = ("the full suite" if full_suite and not suite_filter_tc
+                   else f"the suite [{suite_filter_tc}]" if full_suite else test_id)
     now = datetime.now()
     retest_run_id = f"run-{_next_run_number()}-{now.strftime('%H%M%S-%d%m')}"
     db = next(get_db())
     try:
         db.add(models.TestRun(
-            run_id=retest_run_id, kiosk_id=kiosk_id or "", robot_id="R-01", filter_tc=test_id,
+            run_id=retest_run_id, kiosk_id=kiosk_id or "", robot_id="R-01", filter_tc=retest_filter or None,
             mode=settings.robot_backend, status="pending", created_at=datetime.utcnow(),
         ))
         db.commit()
     finally:
         db.close()
 
-    _repair_stage(repair_id, {"stage": "retest", "status": "running", "run_id": retest_run_id,
+    _repair_stage(repair_id, {"stage": "retest", "status": "running", "run_id": retest_run_id, "scope": scope,
                               "branch": retest_branch, "commit": retest_commit, "rebuild": rebuild,
-                              "note": f"Re-running {test_id} on branch {retest_branch} @ {retest_commit} to verify the fix…"})
+                              "note": f"Re-running {scope_label} on branch {retest_branch} @ {retest_commit} "
+                                      f"to verify {test_id}…"})
     _broadcast(run_id, {"event": "repair_retest_started", "run_id": run_id, "repair_id": repair_id,
                         "test_id": test_id, "retest_run_id": retest_run_id})
 
     req = RunRequest(
-        kiosk_id=kiosk_id or "", filter_tc=test_id, mode=settings.robot_backend,
+        kiosk_id=kiosk_id or "", filter_tc=retest_filter or None, mode=settings.robot_backend,
         credentials=credentials or RunRequest().credentials, is_repair_retest=True,
     )
     _active_runs[retest_run_id] = {"req": req}
-    print(f"  [REPAIR] Verifying fix for {test_id} → retest run {retest_run_id}")
+    print(f"  [REPAIR] Verifying fix for {test_id} by re-running {scope_label} → retest run {retest_run_id}")
     try:
         _execute_run(retest_run_id, req, tenant_id)   # blocks until the retest completes
     except Exception as e:
         print(f"  [REPAIR] retest run error: {e}")
 
-    # 3) Read the retest verdict from the DB (the per-test result is authoritative).
-    outcome, total = "failed", 0
+    # 3) Read the retest verdict — the TARGET test's result is authoritative (a full-suite re-run may have
+    #    OTHER still-failing tests, e.g. not-yet-repaired bugs; we gate only on THIS fix's test passing).
+    outcome, total, suite_passed, suite_total = "failed", 0, 0, 0
     db = next(get_db())
     try:
         rrun = db.query(models.TestRun).filter_by(run_id=retest_run_id).first()
@@ -3752,15 +3765,19 @@ def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result:
         elif rrun and rrun.total and rrun.failed == 0:
             outcome = "passed"
         total = rrun.total if rrun else 0
+        suite_passed = getattr(rrun, "passed", 0) if rrun else 0
+        suite_total = getattr(rrun, "total", 0) if rrun else 0
     finally:
         db.close()
     passed = outcome == "passed"
 
-    retest_stage = {"stage": "retest", "status": "done" if passed else "failed",
+    _suite_note = f" · suite {suite_passed}/{suite_total} passed" if full_suite else ""
+    retest_stage = {"stage": "retest", "status": "done" if passed else "failed", "scope": scope,
                     "run_id": retest_run_id, "passed": passed, "outcome": outcome, "total": total,
+                    "suite_passed": suite_passed, "suite_total": suite_total,
                     "branch": retest_branch, "commit": retest_commit, "rebuild": rebuild,
                     "note": f"{test_id} {'passed' if passed else 'still failing'} on retest "
-                            f"(branch {retest_branch} @ {retest_commit})"}
+                            f"(branch {retest_branch} @ {retest_commit}){_suite_note}"}
     _repair_stage(repair_id, retest_stage)
     result.setdefault("stages", {})["retest"] = retest_stage
     _broadcast(run_id, {"event": "repair_retest_done", "run_id": run_id, "repair_id": repair_id,
@@ -3807,7 +3824,7 @@ def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result:
 
 
 def _run_one_repair(run_id: str, kiosk_id: str, tr: dict, credentials: Optional[dict], tenant_id: str,
-                    batch_index: int = 0, batch_total: int = 1) -> dict:
+                    batch_index: int = 0, batch_total: int = 1, suite_filter_tc: str = "") -> dict:
     """Run ONE Auto-Repair job (RCA → fix → build → rebuild → retest → PR) for a single failed test,
     streaming its stages into an in-memory repair job and signalling the UI. Returns the run_repair
     result (with 'cancelled' set if the user cancelled) so the batch loop can stop on a cancel."""
@@ -3845,7 +3862,8 @@ def _run_one_repair(run_id: str, kiosk_id: str, tr: dict, credentials: Optional[
         # Verify the fix with a real retest, then open the PR on pass (no-op if the repair stopped early,
         # was cancelled, or produced no green build). Skipped entirely when retest is disabled.
         if retest and not cancel_event.is_set() and not result.get("awaiting_rca_review"):
-            _retest_and_maybe_open_pr(repair_id, run_id, test_id, result, credentials, kiosk_id, tenant_id)
+            _retest_and_maybe_open_pr(repair_id, run_id, test_id, result, credentials, kiosk_id, tenant_id,
+                                      suite_filter_tc=suite_filter_tc)
         # The resume context (human_review_rca path only) keeps the REAL auto_pr so an approved resume
         # behaves as it did before the retest feature: build → open PR. The retest gate applies to the
         # straight-through auto path handled just above, not to the paused-for-review resume.
@@ -3867,7 +3885,7 @@ def _run_one_repair(run_id: str, kiosk_id: str, tr: dict, credentials: Optional[
 
 
 def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list,
-                     credentials: Optional[dict] = None, tenant_id: str = ""):
+                     credentials: Optional[dict] = None, tenant_id: str = "", suite_filter_tc: str = ""):
     """Background thread: auto-run the Auto-Repair agent for EVERY failed test in a completed run —
     ONE repair job + ONE PR per failure — SEQUENTIALLY (they share the codebase repo, git branch state
     and the single app container, so they must not overlap). Fires only AFTER the whole suite finished
@@ -3896,7 +3914,7 @@ def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list,
             except Exception as e:
                 print(f"  [REPAIR] could not re-base to baseline '{baseline}' before repair {idx + 1}: {e}")
         result = _run_one_repair(run_id, kiosk_id, tr, credentials, tenant_id,
-                                 batch_index=idx, batch_total=total)
+                                 batch_index=idx, batch_total=total, suite_filter_tc=suite_filter_tc)
         if result.get("cancelled"):
             print(f"  [REPAIR] batch cancelled at {idx + 1}/{total} — stopping remaining repairs")
             _broadcast(run_id, {"event": "repair_batch_done", "run_id": run_id,

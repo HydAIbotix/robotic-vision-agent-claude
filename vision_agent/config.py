@@ -460,6 +460,14 @@ class Settings(BaseSettings):
     # only PASS if the RUNNING app serves the fixed code (a dev server on the codebase, or a rebuild of
     # the app image from the fix branch) — otherwise it re-observes the same bug and the PR stays gated.
     repair_retest_before_pr: bool = True
+    # Re-run the WHOLE original suite (in the operator's order) for the verification retest, not just the
+    # one failed test — then gate the PR on THAT test now passing. Default True because E2E suites are
+    # inter-dependent: a test often validates state created by EARLIER tests (e.g. TC-VPS-009 checks a card
+    # balance/'PURCHASE' transaction that an earlier RPS payment test created, across the VPS+RPS+card-service
+    # subsystems). Re-running the failing test alone can't reproduce that lifecycle, so a correct fix would
+    # still "fail" the retest. False → re-run only the failing test (cheaper; correct only for independent
+    # tests). Cost note: with the per-failure loop this re-runs the suite once per fixed test.
+    repair_retest_full_suite: bool = True
     # REBUILD/redeploy the app-under-test with the just-applied fix BEFORE the verification retest, so the
     # retest browser actually hits the FIXED code (a retest is only meaningful against a build containing
     # the fix). DEFAULTS to the GCP-VM compose rebuild of the POS service — the POS there is a built nginx

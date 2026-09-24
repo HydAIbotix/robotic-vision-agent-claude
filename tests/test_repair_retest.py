@@ -94,7 +94,7 @@ def _stub_batch(monkeypatch):
 def test_batch_runs_one_repair_per_failure(monkeypatch):
     calls = []
 
-    def fake_one(run_id, kiosk_id, tr, cred, tenant, batch_index=0, batch_total=1):
+    def fake_one(run_id, kiosk_id, tr, cred, tenant, batch_index=0, batch_total=1, suite_filter_tc=""):
         calls.append((tr["test_id"], batch_index, batch_total))
         return {}
 
@@ -110,10 +110,31 @@ def test_batch_runs_one_repair_per_failure(monkeypatch):
     assert checkouts == ["baseline", "baseline"]            # re-based to baseline before repairs 2 & 3
 
 
+def test_retest_full_suite_defaults_on():
+    # E2E suites are inter-dependent → the verification retest re-runs the whole suite by default.
+    assert settings.repair_retest_full_suite is True
+
+
+def test_batch_forwards_suite_filter_to_each_repair(monkeypatch):
+    seen = []
+
+    def fake_one(run_id, kiosk_id, tr, cred, tenant, batch_index=0, batch_total=1, suite_filter_tc=""):
+        seen.append(suite_filter_tc)
+        return {}
+
+    monkeypatch.setattr(main, "_run_one_repair", fake_one)
+    _stub_batch(monkeypatch)
+
+    main._run_auto_repair("run-x", "K-01", [{"test_id": "T1"}, {"test_id": "T2"}],
+                          credentials=None, tenant_id="", suite_filter_tc="TC-VPS-001,TC-RPS-003,TC-VPS-009")
+    # Every per-failure repair gets the ORIGINAL suite scope so its retest can recreate dependencies.
+    assert seen == ["TC-VPS-001,TC-RPS-003,TC-VPS-009", "TC-VPS-001,TC-RPS-003,TC-VPS-009"]
+
+
 def test_batch_stops_on_cancel(monkeypatch):
     calls = []
 
-    def fake_one(run_id, kiosk_id, tr, cred, tenant, batch_index=0, batch_total=1):
+    def fake_one(run_id, kiosk_id, tr, cred, tenant, batch_index=0, batch_total=1, suite_filter_tc=""):
         calls.append(tr["test_id"])
         return {"cancelled": True} if tr["test_id"] == "T2" else {}
 

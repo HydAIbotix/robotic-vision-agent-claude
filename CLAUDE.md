@@ -524,9 +524,15 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   `docker compose up -d --build pos`** (the VM POS is a built nginx image); on a LOCAL `npm run dev` box set
   `REPAIR_REBUILD_CMD=""` (empty = no-op, the dev server already serves the patched working tree); **(2)**
   mints a REAL `TestRun`
-  (`filter_tc=<test_id>`, `RunRequest.is_repair_retest=True`) and runs it synchronously via `_execute_run`
-  (so it shows in Results / the run summary / history); **(3)** opens the PR (respecting `repair_auto_pr`)
-  ONLY if the retest PASSES — a fail/unrunnable retest (or a failed rebuild) leaves the branch prepared for a
+  (`RunRequest.is_repair_retest=True`) and runs it synchronously via `_execute_run` (so it shows in Results /
+  the run summary / history) — by default the WHOLE original suite in the operator's order
+  (`repair_retest_full_suite`, `filter_tc=<original suite>`), NOT just the failing test, because E2E suites
+  are inter-dependent (a test often validates state EARLIER tests create across subsystems — e.g. TC-VPS-009
+  checks a VPS balance/'PURCHASE' that an earlier RPS payment writes; re-running TC-VPS-009 alone can never
+  see it, so a correct fix would still "fail"); the verdict is then read for the TARGET test specifically
+  (other still-failing tests, e.g. not-yet-repaired bugs, don't block this PR). Set
+  `repair_retest_full_suite=False` to re-run only the failing test. **(3)** opens the PR (respecting
+  `repair_auto_pr`) ONLY if the target test PASSES — a fail/unrunnable retest (or a failed rebuild) leaves the branch prepared for a
   manual open and annotates the `pr` stage (`retest_blocked`); **(4)** when `repair_rebuild_restore` (default
   True, VM path only) RESTORES the run's baseline (`git checkout <PR base>` + rebuild) so the repo isn't left
   on a throwaway repair branch and the baseline is reproducible — the fix lives in the PR. `_execute_run`
