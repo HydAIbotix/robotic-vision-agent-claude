@@ -371,12 +371,26 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
     levers now push borderline cases to fail fast: **(1) judge confidence** — the judge also returns
     high/medium/low, and a wrong-screen miss BRIDGES only on a `gap` verdict at least `verify_bridge_min_
     confidence` (default `high`); a lower-confidence `gap` or any `defect` fails fast. **(2) unresponsive-
-    interaction rule** (`verify_unresponsive_interaction_defect`, deterministic, no LLM, runs first): if the
-    app is STILL on the screen where the plan's last interaction (a tap/type with a `screen_id`) ran, that
-    interaction did not advance the flow → a blocked/refused control → defect. Both are configurable; lower
-    the confidence bar toward `low` (or disable the rule) to bridge more readily (closer to always-bridge).
+    interaction rule** (`verify_unresponsive_interaction_defect`, deterministic, no LLM): if the app is STILL
+    on the screen where the plan's last interaction (a tap/type with a `screen_id`) ran, treat it as a
+    blocked/refused control → defect. Both are configurable; lower the confidence bar toward `low` (or disable
+    the rule) to bridge more readily (closer to always-bridge).
     Helpers `_conf_at_least` / `_last_interaction_screen`; `classify_wrong_screen_failure` now returns
     `(category, confidence, observation)` and stays default-safe (`("gap","high",…)` on error → bridges).
+  - **⚠️ The JUDGE is AUTHORITATIVE; the unresponsive-interaction heuristic is a NO-LLM FALLBACK only
+    (2026-09-24).** The deterministic rule used to run FIRST and pre-empt the judge — but "still on the same
+    screen after a tap" does NOT mean the control was blocked. Many valid flows keep you on the same screen
+    and update an in-page control: e.g. **Add to Cart adds the item and increments a "Cart/Checkout (1)"
+    badge but does NOT auto-navigate** — you click that badge to reach the cart. The blind heuristic flagged
+    that as an "unresponsive/blocked control", failed the test fast, blocked the Tier-3 bridge (which would
+    have clicked "Cart/Checkout" → cart → resumed → PASS), and fed a misleading reason to Auto-Repair's RCA
+    (which then guessed `test_invalid`). FIX: when `verify_defect_judge` is on (default), the Claude-vision
+    judge runs FIRST and decides — it can SEE that the action took effect (badge/count changed, a success
+    toast, a Cart/Next/Continue control) ⇒ a recoverable `gap` (bridge), vs a visible error/refusal/validation
+    popup ⇒ `defect` (fail fast). The prompt now explicitly classifies "succeeded, navigation pending" as a
+    high-confidence gap. The `_last_interaction_screen` heuristic applies ONLY when the judge is off (the
+    air-gapped path). No-regression: genuine refusal/error states still fail fast (the judge sees them); the
+    demo quantity bug still fails fast on the branch where it shows a "Quantity Required" popup.
   - **DEFERRED — local/no-LLM equivalents (revisit when Auto-Repair must run air-gapped).** *Option A:*
     classify the ACTUAL screen deterministically — a `*_popup` / `*_required` / `*_error` / error-banner
     state ⇒ defect (terminal); a neutral other screen ⇒ gap (bridge). *Option B:* keep the bridge but

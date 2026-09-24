@@ -2225,3 +2225,37 @@ project, launched by start-all.sh in ~/robotics-kiosk-pos). Wired via docker-out
 image → picks up the Docker CLI + all Python changes); the socket mount + REPAIR_REBUILD_CMD come from the
 compose file. Launch kiosk-test-studio separately as usual. Compose YAML + start-all.sh validated; retest
 tests green (config default for repair_rebuild_cmd unchanged; the VM command is the compose override).
+
+---
+
+## 2026-09-24 (verify judge authoritative) · fix false "unresponsive control" on add-to-cart-style flows
+
+A valid TC-RPS-003 run failed falsely: after "Add to Cart" (which added the item and updated the
+"Cart/Checkout (1)" badge but does NOT auto-navigate — you click that badge to reach the cart), the
+cart verify saw the app still on `products`. The deterministic `verify_unresponsive_interaction_defect`
+rule fired FIRST, called it a "blocked/unresponsive control", failed the test fast (blocking the Tier-3
+bridge that would have clicked "Cart/Checkout" → cart → resumed → PASS), and fed that wrong reason to
+Auto-Repair's RCA, which then mis-diagnosed `test_invalid`. The app code is fine.
+
+Root cause: "still on the same screen after a tap" does NOT imply the control was blocked — many valid
+flows update an in-page control (a cart badge/count) and require a further navigation click.
+
+Fix (backend, generic — no app-specifics):
+- **`run_vision_step.py`:** the Claude-vision JUDGE (`classify_wrong_screen_failure`) now runs FIRST when
+  `verify_defect_judge` is on (default) and is AUTHORITATIVE; the blind `_last_interaction_screen`
+  "same-screen = blocked" heuristic is demoted to a NO-LLM FALLBACK used only when the judge is off
+  (air-gapped path). The judge can SEE whether the action took effect, so it distinguishes a recoverable
+  navigation gap (bridge) from a genuine refusal/error (fail fast).
+- **`validate_pipeline.py`:** the judge prompt now explicitly classifies "the action clearly SUCCEEDED but
+  the UI didn't auto-navigate" (a cart/basket counter incremented, a success toast, a Next/Continue/View-cart
+  control is available) as a HIGH-confidence `gap`; only a visible error/refusal/validation popup is a
+  `defect`.
+
+Effect: TC-RPS-003 now bridges (clicks "Cart/Checkout") and passes; genuine defects (error/refusal popups,
+the demo quantity bug's "Quantity Required") still fail fast so Auto-Repair targets the real bug. Existing
+`tests/test_verify_defect_gate.py` pure-helper tests unchanged + comments updated. Full suite 151 passed +
+the same 8 pre-existing vision/template fixture failures.
+
+NOTE: the VM's running POS differs from the local `expanded-cloud-agnostic` checkout (local source shows a
+"Product Added" popup at add-to-cart; the deployed build shows the "Cart/Checkout (N)" badge flow with no
+popup) — worth re-aligning the deployed branch/build, but the fix above is generic and handles both.

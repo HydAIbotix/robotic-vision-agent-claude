@@ -1038,19 +1038,16 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
             _verify_defect = False
             if not success and _screen_only and settings.verify_wrong_screen_recovers:
                 _defect_reason = ""
-                # (2) UNRESPONSIVE-INTERACTION rule (deterministic, no LLM, cheap + authoritative). If the
-                # app is STILL on the screen where the plan's last interaction ran, that interaction did not
-                # advance the flow → a blocked/refused/unresponsive control → defect (don't let Tier-3 mask
-                # it by re-doing the action). Runs BEFORE the judge to save the LLM call when it fires.
-                if settings.verify_unresponsive_interaction_defect:
-                    _ia_screen = _last_interaction_screen(step_results)
-                    if _ia_screen and actual and _ia_screen == actual:
-                        _verify_defect = True
-                        _defect_reason = (f"the preceding interaction on {_ia_screen!r} did not advance the "
-                                          f"screen (still on {actual!r}) — an unresponsive/blocked control")
-                # (1) Vision JUDGE with a CONFIDENCE threshold. Bridge ONLY on a sufficiently-confident 'gap';
-                # a 'defect' (any confidence) or a low-confidence 'gap' fails fast (don't mask a possible bug).
-                if not _verify_defect and settings.verify_defect_judge:
+                # (1) Vision JUDGE is AUTHORITATIVE (Claude SEES the actual screen). It distinguishes a
+                # genuine refusal/error (defect → fail fast) from a HEALTHY screen that merely needs another
+                # navigation click (gap → bridge) — e.g. "Add to Cart" added the item and updated the
+                # "Cart/Checkout (1)" badge, but the flow still needs a click on that button to reach the
+                # cart. The blind "same-screen after a tap = blocked control" heuristic below CANNOT tell
+                # those apart (it fired on this exact add-to-cart flow and wrongly failed a valid test), so
+                # the judge runs FIRST when enabled and the heuristic is only a no-LLM fallback. Bridge ONLY
+                # on a sufficiently-confident 'gap'; a 'defect' (any confidence) or a low-confidence 'gap'
+                # fails fast (don't mask a possible bug).
+                if settings.verify_defect_judge:
                     from vision_agent.nodes.validate_pipeline import classify_wrong_screen_failure
                     judge_shot = _cap("verify_defect", i) or last_screenshot
                     _kind, _conf, _why = classify_wrong_screen_failure(judge_shot, desc, expected, actual)
@@ -1062,6 +1059,17 @@ def _execute_structured_plan(plan: dict, credentials: dict, run_id: str = "", te
                         _defect_reason = (f"the judge was only {_conf}-confident this is a recoverable "
                                           f"navigation gap (< required {settings.verify_bridge_min_confidence}) "
                                           f"→ not masking a possible defect")
+                # (2) UNRESPONSIVE-INTERACTION heuristic — NO-LLM FALLBACK, used ONLY when the judge is OFF
+                # (air-gapped/local path). If the app is STILL on the screen where the plan's last interaction
+                # ran, treat it as a blocked/refused control. The judge (above) is more accurate because it
+                # can SEE that the action had an effect, so it takes precedence to avoid false positives on
+                # legitimate "added the item, now click through to the cart" navigation gaps.
+                elif settings.verify_unresponsive_interaction_defect:
+                    _ia_screen = _last_interaction_screen(step_results)
+                    if _ia_screen and actual and _ia_screen == actual:
+                        _verify_defect = True
+                        _defect_reason = (f"the preceding interaction on {_ia_screen!r} did not advance the "
+                                          f"screen (still on {actual!r}) — an unresponsive/blocked control")
                 if _verify_defect:
                     # PREPEND the defect reason to the observation (don't drop it): the bare "wrong screen:
                     # expected X got Y" is what misled the RCA agent (it read the design doc and called the

@@ -1,7 +1,10 @@
-"""Option C tuning (2026-09-21): judge-confidence threshold + the unresponsive-interaction rule.
+"""Option C tuning: judge-confidence threshold + the unresponsive-interaction fallback.
 
-Pure-function tests for the two levers that make a wrong-screen verify fail FAST into Auto-Repair instead
-of a Tier-3 bridge masking a real defect. Both default ON; both configurable."""
+Pure-function tests for the two levers behind a wrong-screen verify. NOTE (2026-09-24): the vision JUDGE is
+now AUTHORITATIVE and runs FIRST when enabled (it can SEE whether the action took effect — e.g. a cart badge
+incremented — so a healthy "added, now click through to the cart" screen bridges instead of failing). The
+`_last_interaction_screen` "same-screen = blocked control" heuristic is now the NO-LLM FALLBACK, used only
+when the judge is off (air-gapped path); these tests still cover the pure helpers it relies on."""
 from test_runner.nodes.run_vision_step import _conf_at_least, _last_interaction_screen
 
 
@@ -20,8 +23,9 @@ def test_conf_threshold_only_bridges_sufficiently_confident_gap():
 
 
 def test_unresponsive_interaction_detects_a_control_that_did_not_advance():
-    # The plant: tap add-to-cart on 'products', then the cart verify lands back on 'products' → the
-    # interaction did not advance → the rule reports the interaction's screen so the caller fails fast.
+    # (No-LLM fallback path.) The plant: tap add-to-cart on 'products', then the cart verify lands back on
+    # 'products' → the interaction's screen is reported so the fallback caller (judge OFF) can fail fast.
+    # With the judge ON (default), the judge decides instead — a healthy "Cart/Checkout (1)" screen bridges.
     steps = [
         {"step": "tap: Sign In @ (690,636)", "screen_id": "login"},
         {"step": "tap: audiopulse_increment @ (517,739)", "screen_id": "products"},
