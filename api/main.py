@@ -3759,17 +3759,11 @@ def _retest_and_maybe_open_pr(repair_id: str, run_id: str, test_id: str, result:
             result["stages"]["retest"] = retest_stage
 
 
-def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list,
-                     credentials: Optional[dict] = None, tenant_id: str = ""):
-    """Background thread: auto-run the Auto-Repair agent for the FIRST failed test, streaming its
-    stages into an in-memory repair job and signalling the UI (repair_started/repair_done on the
-    run WS) so it can pop the repair into a new window.
-
-    When repair_retest_before_pr is on, the PR is only PREPARED in the pipeline (auto_pr suppressed)
-    and then opened here after a passing verification retest — see _retest_and_maybe_open_pr."""
-    if not failed_results:
-        return
-    tr = failed_results[0]
+def _run_one_repair(run_id: str, kiosk_id: str, tr: dict, credentials: Optional[dict], tenant_id: str,
+                    batch_index: int = 0, batch_total: int = 1) -> dict:
+    """Run ONE Auto-Repair job (RCA → fix → build → rebuild → retest → PR) for a single failed test,
+    streaming its stages into an in-memory repair job and signalling the UI. Returns the run_repair
+    result (with 'cancelled' set if the user cancelled) so the batch loop can stop on a cancel."""
     test_id = tr.get("test_id", "")
     failure = _failure_text_for(tr, run_id=run_id)
     images = _failure_images_for(tr, run_id)   # attached only for a multimodal model (Claude)
@@ -3781,12 +3775,13 @@ def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list,
         failure=failure, test_id=test_id, run_id=run_id,
         created_at=datetime.utcnow().isoformat(),
     )
-    print(f"\n  [REPAIR] Auto-repair for run {run_id} / {test_id} → job {repair_id}")
-    _broadcast(run_id, {"event": "repair_started", "run_id": run_id,
-                        "repair_id": repair_id, "test_id": test_id})
+    print(f"\n  [REPAIR] Auto-repair {batch_index + 1}/{batch_total} for run {run_id} / {test_id} → job {repair_id}")
+    _broadcast(run_id, {"event": "repair_started", "run_id": run_id, "repair_id": repair_id,
+                        "test_id": test_id, "batch_index": batch_index, "batch_total": batch_total})
     cancel_event = threading.Event()
     with _repair_lock:
         _repair_cancel[repair_id] = cancel_event
+    result: dict = {}
     try:
         from repair_agent.repair_failed_test import run_repair
         branch_suffix = repair_id.split("-")[-1]
@@ -3816,10 +3811,52 @@ def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list,
         _repair_fail_running_stages(repair_id, str(e))
         _repair_set(repair_id, status="failed", error=str(e))
         _broadcast(run_id, {"event": "repair_done", "run_id": run_id, "repair_id": repair_id,
-                            "test_id": test_id, "success": False, "error": str(e)})
+                            "test_id": test_id, "success": False, "error": str(e),
+                            "batch_index": batch_index, "batch_total": batch_total})
     finally:
         with _repair_lock:
             _repair_cancel.pop(repair_id, None)
+    return result
+
+
+def _run_auto_repair(run_id: str, kiosk_id: str, failed_results: list,
+                     credentials: Optional[dict] = None, tenant_id: str = ""):
+    """Background thread: auto-run the Auto-Repair agent for EVERY failed test in a completed run —
+    ONE repair job + ONE PR per failure — SEQUENTIALLY (they share the codebase repo, git branch state
+    and the single app container, so they must not overlap). Fires only AFTER the whole suite finished
+    (called from the completion path of _execute_run), preserving the run's baseline: all tests ran on
+    the original build; each fix is then verified in isolation and raised as its own PR.
+
+    Isolation: every fix branches off the SAME captured baseline (re-checked-out before each repair),
+    so each PR's diff contains ONLY that test's fix — never a previous fix. A cancel stops the batch."""
+    if not failed_results:
+        return
+    total = len(failed_results)
+    baseline = ""
+    try:
+        from repair_agent.repair_failed_test import current_branch, checkout_branch
+        baseline = current_branch()
+    except Exception:
+        checkout_branch = None  # type: ignore
+
+    for idx, tr in enumerate(failed_results):
+        # Re-base every subsequent fix off the clean baseline (the working tree is clean after the
+        # prior repair committed its fix to its own branch), so diffs stay isolated even when
+        # repair_rebuild_restore is off. The first repair is already on the baseline.
+        if idx > 0 and baseline and checkout_branch:
+            try:
+                checkout_branch(baseline)
+            except Exception as e:
+                print(f"  [REPAIR] could not re-base to baseline '{baseline}' before repair {idx + 1}: {e}")
+        result = _run_one_repair(run_id, kiosk_id, tr, credentials, tenant_id,
+                                 batch_index=idx, batch_total=total)
+        if result.get("cancelled"):
+            print(f"  [REPAIR] batch cancelled at {idx + 1}/{total} — stopping remaining repairs")
+            _broadcast(run_id, {"event": "repair_batch_done", "run_id": run_id,
+                                "total": total, "completed": idx + 1, "cancelled": True})
+            return
+    _broadcast(run_id, {"event": "repair_batch_done", "run_id": run_id,
+                        "total": total, "completed": total, "cancelled": False})
 
 
 def _run_explorer(explore_id: str, kiosk_url: str, kiosk_id: str = "", app_map_path: str = "", review_feedback: str = ""):

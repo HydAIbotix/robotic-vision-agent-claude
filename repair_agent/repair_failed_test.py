@@ -1623,10 +1623,16 @@ def rebuild_app(cmd: str = "", timeout: int = 0) -> dict:
 
 def checkout_branch(branch: str) -> dict:
     """Switch the POS repo back to `branch` (used to RESTORE the run's baseline after a verification
-    retest, so the repo isn't left on a throwaway repair branch). Never raises."""
+    retest, and to re-base each per-failure repair off the clean baseline). Never raises."""
     if not branch:
         return {"ok": False, "output": "no branch given"}
     return _git(["checkout", branch])
+
+
+def current_branch() -> str:
+    """Public accessor for the branch the POS repo is on right now (the run's baseline). Used by the
+    per-failure repair loop to re-base every fix branch off the SAME baseline (clean, isolated diffs)."""
+    return _current_branch()
 
 
 def prepare_pr(patch: RepairPatch, target: Path, failure: str, test_id: str, branch_suffix: str = "") -> dict:

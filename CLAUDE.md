@@ -524,16 +524,25 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   dry-run / cancel / no-green-build / awaiting-review; the `human_review_rca` resume path keeps the real
   `repair_auto_pr`. Set `repair_rebuild_restore=False` to LEAVE the fixed build deployed (demo the fixed app).
   Detail → `docs/PROGRESS_LOG.md` (2026-09-24).
-- **Suite-vs-repair sequencing = baseline integrity (design rationale).** Auto-Repair fires from the
-  completion block of `_execute_run` — i.e. AFTER the WHOLE suite has run and its results are committed — NOT
+- **⚠️ ONE repair + ONE PR per failed test, SEQUENTIALLY, after the suite completes (2026-09-24).**
+  `_run_auto_repair` loops over EVERY failed test (`_run_one_repair` per failure); it fires from the
+  completion block of `_execute_run` — AFTER the WHOLE suite has run and its results are committed — NOT
   interleaved per test. So in a 100-test suite where #10 fails, all 100 still execute on the ORIGINAL build
   the run started on (a coherent, reproducible "what's broken today" snapshot); the SUT is never hot-swapped
   mid-suite. Each failure is then repaired in ISOLATION on its own `repair/*` branch, verified against a
-  build containing ONLY that fix (rebuild → retest that one test), raised as ONE reviewable PR, and the
-  baseline is restored. Consolidated validation of the fixes together happens when the PRs merge and CI
+  build containing ONLY that fix (rebuild → retest that one test), and raised as its OWN reviewable PR. The
+  repairs are SEQUENTIAL (they share the one codebase repo + git state + app container), and every fix is
+  re-based off the SAME captured baseline branch (`current_branch()` at loop start, `checkout_branch(baseline)`
+  before each repair) so each PR diff contains only that test's fix — never a previous one. A user cancel
+  stops the batch; `repair_started`/`repair_done` carry `batch_index`/`batch_total`, and a final
+  `repair_batch_done` closes it. The studio opens ONE repair window per run (a batch of >1 shows the full
+  Auto-Repair dashboard via `?repair=all`; a single failure keeps the focused single view) — a 10-failure
+  suite never spawns 10 tabs. Consolidated validation of the fixes together happens when the PRs merge and CI
   re-runs the full suite on the integration branch — a separate gate. This shift-left + isolated-verification
   + integrate-via-PR flow is the industry/AI-agent standard; do NOT re-point the running suite at a fix branch
-  mid-run (it destroys run reproducibility and lets a bad auto-fix corrupt the rest of the results).
+  mid-run (it destroys run reproducibility and lets a bad auto-fix corrupt the rest of the results). **Cost
+  note:** with `repair_rebuild_restore` on this is ~2 rebuilds/failure (fix + restore); set it False to leave
+  the last fix deployed and cut to ~1/failure (isolation still holds via the per-repair baseline checkout).
 - **⚠️ APPLY is resilient to the RAG chunk ≠ on-disk-text gap (2026-09-21).** Tree-sitter indexes an INNER
   node, so a chunk stores `addToCart = (…) => {` while the file has `  const addToCart = (…) => {`. The
   model faithfully copies the chunk, so its byte-exact `find` isn't on disk → the old apply died with a

@@ -78,3 +78,49 @@ def test_wait_for_app_ready_trivial():
     # No URL / no timeout → ready immediately (never blocks the retest when there's nothing to wait for).
     assert main._wait_for_app_ready("", 0) is True
     assert main._wait_for_app_ready("http://x", 0) is True
+
+
+# ── Per-failure batch loop (one repair + one PR per failed test) ────────────────
+
+def _stub_batch(monkeypatch):
+    """Stub _run_one_repair + git helpers so the batch loop is exercised without a real repair/git."""
+    import repair_agent.repair_failed_test as rf
+    monkeypatch.setattr(rf, "current_branch", lambda: "baseline")
+    checkouts = []
+    monkeypatch.setattr(rf, "checkout_branch", lambda b: checkouts.append(b) or {"ok": True})
+    return checkouts
+
+
+def test_batch_runs_one_repair_per_failure(monkeypatch):
+    calls = []
+
+    def fake_one(run_id, kiosk_id, tr, cred, tenant, batch_index=0, batch_total=1):
+        calls.append((tr["test_id"], batch_index, batch_total))
+        return {}
+
+    monkeypatch.setattr(main, "_run_one_repair", fake_one)
+    checkouts = _stub_batch(monkeypatch)
+
+    failed = [{"test_id": "T1"}, {"test_id": "T2"}, {"test_id": "T3"}]
+    main._run_auto_repair("run-x", "K-01", failed, credentials=None, tenant_id="")
+
+    assert [c[0] for c in calls] == ["T1", "T2", "T3"]      # one repair per failure, in order
+    assert [c[1] for c in calls] == [0, 1, 2]               # correct batch_index
+    assert all(c[2] == 3 for c in calls)                    # correct batch_total
+    assert checkouts == ["baseline", "baseline"]            # re-based to baseline before repairs 2 & 3
+
+
+def test_batch_stops_on_cancel(monkeypatch):
+    calls = []
+
+    def fake_one(run_id, kiosk_id, tr, cred, tenant, batch_index=0, batch_total=1):
+        calls.append(tr["test_id"])
+        return {"cancelled": True} if tr["test_id"] == "T2" else {}
+
+    monkeypatch.setattr(main, "_run_one_repair", fake_one)
+    _stub_batch(monkeypatch)
+
+    failed = [{"test_id": "T1"}, {"test_id": "T2"}, {"test_id": "T3"}]
+    main._run_auto_repair("run-x", "K-01", failed, credentials=None, tenant_id="")
+
+    assert calls == ["T1", "T2"]   # T2 cancelled → T3 never attempted

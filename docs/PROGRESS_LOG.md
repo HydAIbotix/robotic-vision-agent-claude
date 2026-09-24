@@ -2161,3 +2161,41 @@ rebuild-then-retest loop is ON by default on the GCP VM with no env to set. **Lo
 must set `REPAIR_REBUILD_CMD=""` in `.env`** — the Vite dev server already serves the patched working tree,
 and running compose locally would be wrong (and would gate the PR on a failed local rebuild). Test updated
 to assert the new default. No other behaviour change.
+
+---
+
+## 2026-09-24 (per-failure) · One repair + one PR per failed test (sequential, after the suite)
+
+Auto-Repair now repairs EVERY failed test in a completed run, not just the first — one repair job and one
+PR per failure.
+
+**Backend (`api/main.py`, `repair_agent/repair_failed_test.py`).**
+- `_run_auto_repair` now LOOPS over all `failed_results`, calling the extracted `_run_one_repair(...)` per
+  failure. Runs SEQUENTIALLY (they share the codebase repo + git state + the single app container). Still
+  fires only from the completion path of `_execute_run` — AFTER the whole suite has run — so baseline
+  integrity is preserved (all tests ran on the original build).
+- ISOLATION: the run's baseline branch is captured once (`current_branch()`); before each repair
+  (`checkout_branch(baseline)`) the repo is re-based to it, so each `repair/*` fix branch diffs off the clean
+  baseline — every PR contains ONLY that test's fix, never a previous one. Works whether or not
+  `repair_rebuild_restore` is on (a per-repair restore also returns to baseline; the explicit checkout covers
+  the restore-off case).
+- A user cancel of any repair stops the batch. `repair_started`/`repair_done` now carry `batch_index` /
+  `batch_total`; a new `repair_batch_done` (`total`, `completed`, `cancelled`) closes the batch.
+- New public helper `current_branch()` in `repair_failed_test.py`.
+- **No-regression:** a single-failure run is a loop of one — behaviour identical to before (the pre-repair
+  baseline checkout is skipped for index 0, i.e. the branch we're already on).
+
+**Studio (`App.tsx`, `LiveMonitor.tsx`).**
+- `?repair=all` renders the full Auto-Repair dashboard in the chrome-less standalone window.
+- Live Monitor opens the repair window ONCE per run (tracked by `repairOpenedRunRef`): a batch (>1 failures)
+  opens `?repair=all` (all repairs stream into ONE window); a single failure keeps the focused single-repair
+  view. A 10-failure suite no longer spawns 10 tabs. The banner shows batch progress (`k/N test(s), one PR
+  each`, PR count) and a `repair_batch_done` marker; retest start/done are logged inline.
+
+**Efficiency note.** With `repair_rebuild_restore` on (default) a batch does ~2 rebuilds per failure
+(rebuild-to-fix for the retest + restore-to-baseline). Set `repair_rebuild_restore=False` to leave the last
+fix deployed and cut to ~1 rebuild per failure — isolation still holds via the per-repair baseline checkout.
+
+**Verification:** 2 new tests (batch runs one repair per failure with correct index/total + baseline
+re-checkout; cancel stops the batch). Suite 151 passed + the same 8 pre-existing vision/template fixture
+failures; studio `npm run build` clean.
