@@ -524,6 +524,18 @@ The frontend's `scripts/start-api.cjs` launches this backend automatically (uvic
   dry-run / cancel / no-green-build / awaiting-review; the `human_review_rca` resume path keeps the real
   `repair_auto_pr`. Set `repair_rebuild_restore=False` to LEAVE the fixed build deployed (demo the fixed app).
   Detail → `docs/PROGRESS_LOG.md` (2026-09-24).
+- **⚠️ The rebuild runs docker-out-of-docker on the VM (2026-09-24).** The repair agent lives INSIDE the
+  `app` container, so to rebuild the SIBLING POS (its own compose project, launched by `start-all.sh` in
+  `~/robotics-kiosk-pos`) the `app` image now ships the **Docker CLI + compose plugin** and the compose file
+  mounts the host **`/var/run/docker.sock`**. The default `REPAIR_REBUILD_CMD` in `docker-compose.yml` is
+  `docker compose -p robotics-kiosk-pos up -d --build --no-deps pos`: `-p robotics-kiosk-pos` pins the SAME
+  project `start-all.sh` launches (which now also passes `-p robotics-kiosk-pos`) so it updates the running
+  pos container rather than making a second one on :80; `--no-deps` leaves `card-service` (and its persisted
+  balances) untouched. The rebuild omits `PUBLIC_BASE_URL` → the SPA builds `same-origin` (works for both the
+  external human browser and the in-container retest browser). **⚠️ Mounting the docker socket grants the
+  container root-equivalent host access** — remove that volume + set `REPAIR_REBUILD_CMD=""` to opt out.
+  After `git pull`, relaunch with `docker compose up -d --build app` (rebuilds the image → picks up the CLI +
+  all code); the socket mount + env come from the compose file.
 - **⚠️ ONE repair + ONE PR per failed test, SEQUENTIALLY, after the suite completes (2026-09-24).**
   `_run_auto_repair` loops over EVERY failed test (`_run_one_repair` per failure); it fires from the
   completion block of `_execute_run` — AFTER the WHOLE suite has run and its results are committed — NOT

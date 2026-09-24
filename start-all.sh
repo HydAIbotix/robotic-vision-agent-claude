@@ -121,7 +121,10 @@ if [ "${PULL:-0}" = "1" ]; then
 fi
 
 echo "==> [1/3] Kiosk POS    ($POS_DIR)"
-( cd "$POS_DIR" && PUBLIC_BASE_URL="http://${EXTERNAL_IP}" docker compose up -d --build )
+# Pin an EXPLICIT compose project name so the QA backend's Auto-Repair rebuild step (which runs
+# `docker compose -p robotics-kiosk-pos … up -d --build --no-deps pos` from inside the app container,
+# docker-out-of-docker) targets THESE SAME containers regardless of POS_DIR's basename.
+( cd "$POS_DIR" && PUBLIC_BASE_URL="http://${EXTERNAL_IP}" docker compose -p robotics-kiosk-pos up -d --build )
 
 echo "==> [2/3] QA backend   ($BACKEND_DIR)${REPAIR_MODE:+  (+ local Auto-Repair: Neo4j + Ollama)}${COMPOSE_GPU:+  (GPU)}"
 ( cd "$BACKEND_DIR" && docker compose $COMPOSE_GPU up -d --build )

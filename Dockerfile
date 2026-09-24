@@ -24,6 +24,21 @@ RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && node --version && npm --version
 
+# Docker CLI + compose plugin for the Auto-Repair REBUILD step (docker-out-of-docker): after a fix, the
+# app container triggers a rebuild of the SIBLING POS compose service on the HOST daemon (the host
+# `/var/run/docker.sock` is mounted in docker-compose.yml). CLI only — no daemon runs here. Used solely by
+# repair_rebuild_cmd; inert unless that runs. ⚠️ Mounting the host docker socket grants the container
+# root-equivalent host access (see docker-compose.yml note).
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
+        > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/* \
+    && docker --version && docker compose version
+
 WORKDIR /app
 
 # Install Python deps in a layer keyed ONLY on pyproject.toml, so editing app source

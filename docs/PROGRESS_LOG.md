@@ -2199,3 +2199,29 @@ fix deployed and cut to ~1 rebuild per failure — isolation still holds via the
 **Verification:** 2 new tests (batch runs one repair per failure with correct index/total + baseline
 re-checkout; cancel stops the batch). Suite 151 passed + the same 8 pre-existing vision/template fixture
 failures; studio `npm run build` clean.
+
+---
+
+## 2026-09-24 (docker-out-of-docker) · wire the POS rebuild to run from the app container on the VM
+
+The rebuild-then-retest step needs the app container to rebuild the SIBLING POS compose service (its own
+project, launched by start-all.sh in ~/robotics-kiosk-pos). Wired via docker-out-of-docker.
+
+- **`Dockerfile`:** install the Docker CLI + compose plugin (`docker-ce-cli docker-compose-plugin`, CLI
+  only — no daemon) so the app container can drive the host daemon. (Node 20 was already present for the
+  tsc/vite verification.)
+- **`docker-compose.yml`:** mount the host `/var/run/docker.sock` into `app`, and default
+  `REPAIR_REBUILD_CMD=docker compose -p robotics-kiosk-pos up -d --build --no-deps pos` +
+  `REPAIR_REBUILD_RESTORE=true`. `-p robotics-kiosk-pos` pins the SAME project start-all.sh launches (updates
+  the running pos container, not a second one on :80); `--no-deps` leaves card-service + its persisted
+  balances untouched. The rebuild omits PUBLIC_BASE_URL → SPA builds `same-origin` (works for the external
+  human browser and the internal-IP retest browser alike).
+- **`start-all.sh`:** the POS `up` now passes `-p robotics-kiosk-pos` so both the initial launch and the
+  in-container rebuild target the same project regardless of POS_DIR's basename.
+- **⚠️ Security:** mounting the docker socket grants the container root-equivalent host control. It's used
+  only by REPAIR_REBUILD_CMD; remove the volume + set REPAIR_REBUILD_CMD="" to opt out.
+
+**Deploy:** after `git pull`, relaunch the backend with `docker compose up -d --build app` (rebuilds the
+image → picks up the Docker CLI + all Python changes); the socket mount + REPAIR_REBUILD_CMD come from the
+compose file. Launch kiosk-test-studio separately as usual. Compose YAML + start-all.sh validated; retest
+tests green (config default for repair_rebuild_cmd unchanged; the VM command is the compose override).

@@ -160,6 +160,14 @@ services:
       REPAIR_PR_BASE: expanded-cloud-agnostic      # branch a prepared fix diffs against (the deployed POS branch)
       REPAIR_PERSIST_DIR: /app/data/chroma_code_db # Chroma RAG index — under host-mounted ./data (persists + visible)
       REPAIR_AUTO_PR: "true"                       # after a green build: push the fix branch + auto-create the PR
+      # REBUILD the POS with the fix before the verification retest, then RESTORE the baseline after.
+      # Runs docker-out-of-docker: the app container drives the HOST daemon (socket mounted below) to
+      # rebuild the SIBLING POS compose service. `-p robotics-kiosk-pos` pins the SAME project start-all.sh
+      # launched (so it updates the running pos container, not a new one); `--no-deps` leaves card-service
+      # (and its persisted balances) untouched. Set REPAIR_REBUILD_CMD="" to disable (retest hits the
+      # currently-deployed build). ⚠️ Local `npm run dev`: set REPAIR_REBUILD_CMD="" (dev server is live).
+      REPAIR_REBUILD_CMD: ${REPAIR_REBUILD_CMD:-docker compose -p robotics-kiosk-pos up -d --build --no-deps pos}
+      REPAIR_REBUILD_RESTORE: ${REPAIR_REBUILD_RESTORE:-true}   # after retest, checkout PR base + rebuild → baseline
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}              # repo-scoped PAT (from .env) → git push auth + PR creation via API
       # git identity so the agent's commit works inside the container (no repo/global config needed)
       GIT_AUTHOR_NAME: "Auto-Repair"
@@ -235,6 +243,11 @@ services:
       # POS source for Auto-Repair: RAG index + patch-apply + tsc/vite build + git branch/commit.
       # rw (the agent edits + commits). Default is the VM sibling layout; override with POS_REPO_DIR.
       - ${POS_REPO_DIR:-../robotics-kiosk-pos}:/repos/pos
+      # HOST Docker socket for the Auto-Repair rebuild step (docker-out-of-docker): the app container
+      # rebuilds the SIBLING POS service on the host daemon via REPAIR_REBUILD_CMD (above). ⚠️ SECURITY:
+      # this grants the container root-equivalent control of the host Docker. It's only used by the
+      # rebuild command; remove this line (and set REPAIR_REBUILD_CMD="") to opt out.
+      - /var/run/docker.sock:/var/run/docker.sock
 
   # NOTE: on a single VM the API runs suites IN-PROCESS (TASK_QUEUE_BACKEND=inline above), so no
   # separate worker service is needed — this is the robust, local-identical setup. For horizontal
